@@ -122,6 +122,8 @@ assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot
 assert_contains "recovery fixture daemon control request" "$recovery_fixture_text" '"snapshot.mount_helper.reconcile_inventory"'
 assert_contains "recovery fixture operation polling" "$recovery_fixture_text" '"operation.get"'
 assert_contains "recovery fixture unknown blocker gate" "$recovery_fixture_text" '"snapshot_mount_helper.reconcile_required"'
+assert_contains "recovery fixture unknown state reserve fence" "$recovery_fixture_text" 'future_state_id'
+assert_contains "recovery fixture malformed released reserve fence" "$recovery_fixture_text" 'malformed_released_id'
 assert_contains "recovery fixture CLI invocation" "$recovery_fixture_text" '"snapshot-mount-helper"'
 assert_contains "recovery fixture CLI JSON assertion" "$recovery_fixture_text" 'cli_payload["inventoryDrift"] == 0'
 assert_contains "Swift reconcile action method" "$control_action_text" 'snapshot.mount_helper.reconcile_inventory'
@@ -141,6 +143,11 @@ assert_contains "released tombstone has a valid baseline" "$mount_helper_text" '
 assert_contains "stale inventory change reblocks" "$mount_helper_text" "released snapshot tombstone inventory changed"
 assert_contains "inventory drift classification" "$mount_helper_text" "released_inventory_drift"
 assert_contains "inventory drift reconciliation" "$mount_helper_text" "reconcile_released_tombstone"
+assert_contains "unknown journal state classification" "$mount_helper_text" "state IS NOT 'released'"
+assert_contains "unknown journal state reserve fence" "$mount_helper_text" "state IS NOT 'released'"
+assert_not_contains "released tombstone audit skips malformed rows" "$mount_helper_text" "state = 'released' AND reservation_manifest_valid = 1"
+assert_contains "status concurrency gate" "$mount_helper_text" 'status_busy'
+assert_contains "status inventory cache" "$mount_helper_text" 'inventory_cache'
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"
 assert_contains "partial deletion retains unconfirmed manifest" "$mount_helper_text" "retain_unconfirmed_manifest_after_delete_failure"

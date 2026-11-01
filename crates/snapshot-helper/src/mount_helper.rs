@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
@@ -387,12 +388,16 @@ pub async fn run_server() -> Result<(), MountHelperError> {
     let listener = UnixListener::bind(&socket_path)?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))?;
     let mutation_lock = Arc::new(AsyncMutex::new(()));
+    let status_lock = Arc::new(AsyncMutex::new(()));
     loop {
         let (stream, _) = listener.accept().await?;
         let journal = journal.clone();
         let mutation_lock = Arc::clone(&mutation_lock);
+        let status_lock = Arc::clone(&status_lock);
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(stream, journal, mutation_lock).await {
+            if let Err(error) =
+                serve_connection(stream, journal, mutation_lock, status_lock).await
+            {
                 eprintln!("snapshot mount helper connection failed: {error}");
             }
         });
@@ -640,6 +645,7 @@ async fn serve_connection(
     stream: TokioUnixStream,
     journal: SqlitePool,
     mutation_lock: Arc<AsyncMutex<()>>,
+    status_lock: Arc<AsyncMutex<()>>,
 ) -> Result<(), MountHelperError> {
     let peer_uid = peer_uid(stream.as_raw_fd())?;
     let (read_half, mut write_half) = stream.into_split();
@@ -658,7 +664,20 @@ async fn serve_connection(
                         | MountMethod::RecordCleanup { .. }
                         | MountMethod::Cleanup { .. }
                 );
-                if needs_file_lock {
+                let needs_status_lock = matches!(
+                    &request.method,
+                    MountMethod::Status | MountMethod::StatusVolume { .. }
+                );
+                if needs_status_lock {
+                    match status_lock.try_lock() {
+                        Ok(_status_guard) => handle_request(request, peer_uid, &journal).await,
+                        Err(_) => MountResponse::error(
+                            request.request_id,
+                            "status_busy",
+                            "snapshot mount helper status is already being evaluated",
+                        ),
+                    }
+                } else if needs_file_lock {
                     let _mutation_guard = mutation_lock.lock().await;
                     match tokio::task::spawn_blocking(acquire_mutation_lock).await {
                         Ok(Ok(_file_lock)) => handle_request(request, peer_uid, &journal).await,
@@ -799,20 +818,6 @@ async fn status_result(
 ) -> Result<MountStatusResult, MountHelperError> {
     let classification =
         classify_status_rows(pool, (peer_uid != 0).then_some(peer_uid), None).await?;
-    let blocked_volume_uuids = if peer_uid == 0 {
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT volume_uuid FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
-        )
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT volume_uuid FROM mounts WHERE uid = ? AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
-        )
-        .bind(i64::from(peer_uid))
-        .fetch_all(pool)
-        .await?
-    };
     Ok(MountStatusResult {
         // Keep the wire compatibility version stable for the approved Snapshot Access
         // artifact. The additive component_version carries the implementation bump.
@@ -821,7 +826,7 @@ async fn status_result(
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: Some(classification.pending_cleanup),
-        blocked_volume_uuids,
+        blocked_volume_uuids: classification.blocked_volume_uuids,
         recovery_leases: classification.recovery_leases,
         pending_cleanup_leases: classification.pending_cleanup_leases,
         live_mounts: Some(classification.live_mounts),
@@ -845,19 +850,13 @@ async fn status_for_volume_result(
     }
     validate_uuid(volume_uuid)?;
     let classification = classify_status_rows(pool, None, Some((volume_uuid, uid))).await?;
-    let blocked_volume_uuids = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT volume_uuid FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
-    )
-    .bind(volume_uuid)
-    .fetch_all(pool)
-    .await?;
     Ok(MountStatusResult {
         helper_version: MOUNT_HELPER_WIRE_VERSION.to_string(),
         component_version: Some(ROOT_MOUNT_HELPER_VERSION.to_string()),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: Some(classification.pending_cleanup),
-        blocked_volume_uuids,
+        blocked_volume_uuids: classification.blocked_volume_uuids,
         recovery_leases: classification.recovery_leases,
         pending_cleanup_leases: classification.pending_cleanup_leases,
         live_mounts: Some(classification.live_mounts),
@@ -878,6 +877,7 @@ struct StatusClassification {
     recovery_leases: Vec<MountRecoveryLease>,
     pending_cleanup_leases: Vec<MountRecoveryLease>,
     inventory_drift_leases: Vec<MountRecoveryLease>,
+    blocked_volume_uuids: Vec<String>,
 }
 
 async fn classify_status_rows(
@@ -886,7 +886,7 @@ async fn classify_status_rows(
     volume_scope: Option<(&str, u32)>,
 ) -> Result<StatusClassification, MountHelperError> {
     let mut statement = String::from(
-        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_device, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_device, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IS NOT 'released'",
     );
     if scope_uid.is_some() {
         statement.push_str(" AND uid = ?");
@@ -914,7 +914,9 @@ async fn classify_status_rows(
         recovery_leases: Vec::new(),
         pending_cleanup_leases: Vec::new(),
         inventory_drift_leases: Vec::new(),
+        blocked_volume_uuids: Vec::new(),
     };
+    let mut inventory_cache: HashMap<String, Option<Vec<MountSnapshotRef>>> = HashMap::new();
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let uid: i64 = row.try_get("uid")?;
@@ -928,6 +930,11 @@ async fn classify_status_rows(
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let stale = row.try_get::<i64, _>("stale_row")? == 1;
         let live = row.try_get::<i64, _>("live_row")? == 1;
+        if !volume_uuid.is_empty()
+            && !classification.blocked_volume_uuids.contains(&volume_uuid)
+        {
+            classification.blocked_volume_uuids.push(volume_uuid.clone());
+        }
         let manifest_valid = parse_journal_manifest(&snapshot_manifest).is_ok();
         let reservation_valid = reservation_manifest_valid == 1
             && parse_reservation_manifest(&reservation_manifest).is_ok();
@@ -954,7 +961,13 @@ async fn classify_status_rows(
             .map(|(_, owner_uid)| uid == i64::from(owner_uid))
             .unwrap_or(true);
         let pending_cleanup_candidate = state == "cleanup_pending" && journal_identity_valid;
-        if pending_cleanup_candidate {
+        let known_state = matches!(
+            state.as_str(),
+            "reserved" | "prepared" | "active" | "cleanup_pending"
+        );
+        if !known_state {
+            classification.unknown_blocking_mounts += 1;
+        } else if pending_cleanup_candidate {
             classification.pending_cleanup += 1;
             if owner_matches {
                 classification
@@ -1014,14 +1027,28 @@ async fn classify_status_rows(
         if !identity_valid || !owner_matches {
             classification.active_mounts += 1;
             classification.unknown_blocking_mounts += 1;
+            if !volume_uuid.is_empty()
+                && !classification.blocked_volume_uuids.contains(&volume_uuid)
+            {
+                classification.blocked_volume_uuids.push(volume_uuid);
+            }
             continue;
         }
         let baseline = baseline.expect("validated reservation manifest");
-        match snapshot_inventory_manifest(&device_identifier) {
-            Ok(current_manifest) if manifests_equal(&current_manifest, &baseline) => {}
-            Ok(_) => {
+        let current_manifest = inventory_cache
+            .entry(device_identifier.clone())
+            .or_insert_with(|| snapshot_inventory_manifest(&device_identifier).ok())
+            .clone();
+        match current_manifest {
+            Some(current_manifest) if manifests_equal(&current_manifest, &baseline) => {}
+            Some(_) => {
                 classification.active_mounts += 1;
                 classification.inventory_drift_mounts += 1;
+                if !volume_uuid.is_empty()
+                    && !classification.blocked_volume_uuids.contains(&volume_uuid)
+                {
+                    classification.blocked_volume_uuids.push(volume_uuid.clone());
+                }
                 classification
                     .inventory_drift_leases
                     .push(MountRecoveryLease {
@@ -1029,9 +1056,14 @@ async fn classify_status_rows(
                         state: "released_inventory_drift".to_string(),
                     });
             }
-            Err(_) => {
+            None => {
                 classification.active_mounts += 1;
                 classification.unknown_blocking_mounts += 1;
+                if !volume_uuid.is_empty()
+                    && !classification.blocked_volume_uuids.contains(&volume_uuid)
+                {
+                    classification.blocked_volume_uuids.push(volume_uuid);
+                }
             }
         }
     }
@@ -1044,7 +1076,7 @@ async fn audit_released_tombstones(
     device_identifier: &str,
 ) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released' AND reservation_manifest_valid = 1",
+        "SELECT device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released'",
     )
     .bind(volume_uuid)
     .fetch_all(journal)
@@ -1094,7 +1126,7 @@ async fn reserve_request(
     source.recheck(source_path)?;
     audit_released_tombstones(journal, volume_uuid, device_identifier).await?;
     let blocked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IS NOT 'released'",
     )
     .bind(volume_uuid)
     .fetch_one(journal)
@@ -1343,7 +1375,7 @@ async fn mount_request(
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
     validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
     let blocked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND lease_id != ? AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND lease_id != ? AND state IS NOT 'released'",
     )
     .bind(volume_uuid)
     .bind(lease_id)
@@ -3660,6 +3692,30 @@ mod tests {
         assert_eq!(status.pending_cleanup, Some(0));
         assert!(status.pending_cleanup_leases.is_empty());
         assert_eq!(status.unknown_blocking_mounts, Some(1));
+    }
+
+    #[tokio::test]
+    async fn status_keeps_an_unrecognized_state_as_an_unknown_blocker() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', '[]', '[]', 1, 'future_state', datetime('now'), datetime('now'))",
+        )
+        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let status = status_result(&journal, 501).await.unwrap();
+        assert_eq!(status.active_mounts, 1);
+        assert_eq!(status.unknown_blocking_mounts, Some(1));
+        assert_eq!(
+            status.blocked_volume_uuids,
+            vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
+        );
     }
 
     #[test]
