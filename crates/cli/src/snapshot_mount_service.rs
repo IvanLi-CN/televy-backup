@@ -372,22 +372,19 @@ fn classify_busy_status(
         && status.recoverable_stale_mounts.is_none()
         && status.unknown_blocking_mounts.is_none()
         && status.inventory_drift_mounts.is_none();
-    let stale_current_partial_classification =
-        status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-            && status
-                .build_commit
-                .as_deref()
-                .is_some_and(|commit| {
-                    commit != env!("TELEVYBACKUP_BUILD_COMMIT")
-                        && commit.len() == 40
-                        && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-                })
-            && status.active_mounts > 0
-            && status.pending_cleanup.is_some()
-            && status.live_mounts.is_some()
-            && status.recoverable_stale_mounts.is_some()
-            && status.unknown_blocking_mounts.is_some()
-            && status.inventory_drift_mounts.is_none();
+    let stale_current_partial_classification = status.component_version.as_deref()
+        == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && status.build_commit.as_deref().is_some_and(|commit| {
+            commit != env!("TELEVYBACKUP_BUILD_COMMIT")
+                && commit.len() == 40
+                && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && status.active_mounts > 0
+        && status.pending_cleanup.is_some()
+        && status.live_mounts.is_some()
+        && status.recoverable_stale_mounts.is_some()
+        && status.unknown_blocking_mounts.is_some()
+        && status.inventory_drift_mounts.is_none();
     if stale_current_partial_classification {
         // The previous helper implementation used the current component version but did not
         // report inventory-drift rows. Replace that known stale build only after Snapshot Access
