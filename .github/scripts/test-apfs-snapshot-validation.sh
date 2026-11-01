@@ -67,13 +67,13 @@ assert_contains "main stale partial helper upgrade fixture" "$main_workflow_text
 assert_contains "PR fixture manifest download" "$pr_workflow_text" "--pattern BUILD-MANIFEST.json"
 assert_contains "PR fixture tag provenance" "$pr_workflow_text" "verify-tag-provenance"
 assert_contains "PR fixture tag identity" "$pr_workflow_text" "--tag v0.9.9-rc.118"
-assert_contains "PR fixture immutable asset verification" "$pr_workflow_text" "release_helper.py verify-assets"
+assert_contains "PR fixture immutable asset verification" "$pr_workflow_text" 'release_helper.py" verify-assets'
 assert_contains "PR fixture release asset API attestation" "$pr_workflow_text" "GitHub Release asset digest does not match downloaded bytes"
 assert_contains "PR fixture release asset automation uploader" "$pr_workflow_text" "github-actions[bot]"
 assert_contains "PR fixture trusted policy checkout" "$pr_workflow_text" "git worktree add --detach \"\${trusted_root}\" \"\${trusted_base_sha}\""
 assert_contains "main fixture tag provenance" "$main_workflow_text" "verify-tag-provenance"
 assert_contains "main fixture tag identity" "$main_workflow_text" "--tag v0.9.9-rc.122"
-assert_contains "main fixture immutable asset verification" "$main_workflow_text" "release_helper.py verify-assets"
+assert_contains "main fixture immutable asset verification" "$main_workflow_text" 'release_helper.py" verify-assets'
 assert_contains "main fixture release asset API attestation" "$main_workflow_text" "GitHub Release asset digest does not match downloaded bytes"
 assert_contains "main fixture release asset automation uploader" "$main_workflow_text" "github-actions[bot]"
 assert_contains "main fixture trusted policy checkout" "$main_workflow_text" "git worktree add --detach \"\${trusted_root}\" \"\${trusted_base_sha}\""
