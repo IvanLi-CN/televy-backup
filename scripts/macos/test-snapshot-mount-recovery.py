@@ -73,7 +73,7 @@ def wait_for_operation(path, operation_id):
 
 
 def bootout_service(service):
-    result = run("sudo", "-n", "launchctl", "bootout", "system", service, check=False)
+    result = run("sudo", "-n", "launchctl", "bootout", service, check=False)
     if result.returncode not in (0, 5):
         result.check_returncode()
 
