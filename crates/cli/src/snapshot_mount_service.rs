@@ -1114,13 +1114,11 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     }
     ensure_uninstall_safe(busy)?;
     let service = system_service_target();
-    if let Err(error) = bootout_for_mutation(
+    bootout_for_mutation(
         &service,
         "uninstall",
         "snapshot_mount_helper.uninstall_failed",
-    ) {
-        return Err(error);
-    }
+    )?;
     let (old_binary, old_plist) = match quarantine_uninstall_assets() {
         Ok(backups) => backups,
         Err(error) => {
