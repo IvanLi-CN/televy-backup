@@ -985,13 +985,7 @@ fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<
                 let error = status
                     .get("error")
                     .cloned()
-                    .and_then(|value| {
-                        let parsed =
-                            serde_json::from_value::<televy_backup_core::control::ControlError>(
-                                value,
-                            );
-                        parsed.ok()
-                    })
+                    .and_then(decode_control_error)
                     .unwrap_or_else(|| televy_backup_core::control::ControlError {
                         code: "snapshot_mount_helper.reconcile_failed".to_string(),
                         message: "snapshot inventory reconciliation failed".to_string(),
@@ -1049,6 +1043,13 @@ fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn decode_control_error(
+    value: serde_json::Value,
+) -> Option<televy_backup_core::control::ControlError> {
+    serde_json::from_value(value).ok()
 }
 
 pub fn status(json_output: bool) -> Result<(), CliError> {

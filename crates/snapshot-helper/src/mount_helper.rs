@@ -955,7 +955,8 @@ async fn classify_status_rows(
         let volume_is_unblocked =
             !volume_uuid.is_empty() && !classification.blocked_volume_uuids.contains(&volume_uuid);
         if volume_is_unblocked {
-            classification.blocked_volume_uuids.push(volume_uuid.clone());
+            let blocked_volume_uuids = &mut classification.blocked_volume_uuids;
+            blocked_volume_uuids.push(volume_uuid.clone());
         }
         let manifest_valid = parse_journal_manifest(&snapshot_manifest).is_ok();
         let reservation_valid = reservation_manifest_valid == 1
