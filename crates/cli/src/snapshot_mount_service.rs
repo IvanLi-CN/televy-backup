@@ -378,17 +378,18 @@ fn classify_busy_status(
         status.recoverable_stale_mounts,
         status.unknown_blocking_mounts,
     ) {
-        (Some(pending), Some(live), Some(recoverable), Some(unknown)) => pending
-            .checked_add(live)
-            .and_then(|total| total.checked_add(recoverable))
-            .and_then(|total| total.checked_add(unknown))
-            == Some(status.active_mounts),
+        (Some(pending), Some(live), Some(recoverable), Some(unknown)) => {
+            pending
+                .checked_add(live)
+                .and_then(|total| total.checked_add(recoverable))
+                .and_then(|total| total.checked_add(unknown))
+                == Some(status.active_mounts)
+        }
         _ => false,
     };
     let stale_current_partial_classification = status.helper_version
         == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        && status.component_version.as_deref()
-            == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit != env!("TELEVYBACKUP_BUILD_COMMIT")
                 && commit.len() == 40
