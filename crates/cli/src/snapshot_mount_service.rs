@@ -406,6 +406,7 @@ fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
 fn bootstrap_restored_helper() -> Result<(), CliError> {
     if Path::new(MOUNT_HELPER_PLIST_PATH).is_file() {
         launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+        wait_for_helper_status().map(|_| ())?;
     }
     Ok(())
 }
@@ -1146,10 +1147,11 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     })?;
     recover_interrupted_helper_transaction()?;
     let busy = check_if_busy("install or update the snapshot mount helper")?;
+    let mut replace_legacy_helper = false;
     match busy {
         BusyCheck::Clear => {}
         BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
-            prepare_legacy_upgrade(config_dir, data_dir)?
+            replace_legacy_helper = true;
         }
         BusyCheck::RecoveryRequired => {
             drop(mutation_lock);
@@ -1163,7 +1165,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             match check_if_busy("install or update the snapshot mount helper")? {
                 BusyCheck::Clear => {}
                 BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
-                    prepare_legacy_upgrade(config_dir, data_dir)?
+                    replace_legacy_helper = true;
                 }
                 BusyCheck::RecoveryRequired => {
                     return Err(CliError::retryable(
@@ -1191,6 +1193,12 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         };
         (staged_binary, staged_plist, candidate_hash)
     };
+    if replace_legacy_helper {
+        if let Err(error) = prepare_legacy_upgrade(config_dir, data_dir) {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
+    }
     let service = system_service_target();
     if let Err(error) =
         bootout_for_mutation(&service, "install", "snapshot_mount_helper.install_failed")

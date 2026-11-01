@@ -317,6 +317,8 @@ jobs:
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-build-only
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --stale-partial-classification
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --uninstall
 
   release-preparation-validation:
     name: Release preparation validation

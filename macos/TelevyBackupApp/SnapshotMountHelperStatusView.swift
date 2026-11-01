@@ -23,6 +23,7 @@ struct SnapshotMountHelperStatusView: View {
         let updateBlockReason = !readiness.isReady
             && !readiness.isLegacyAggregateStatus
             && !readiness.isLegacyPendingCleanupStatus
+            && !readiness.isStaleCurrentPartialClassification
             ? SnapshotMountHelperReadiness.updateBlockReason(
                 activeMounts: activeMounts,
                 pendingCleanup: pendingCleanup

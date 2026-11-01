@@ -146,9 +146,14 @@ def main():
         action="store_true",
         help="seed root-owned interrupted-install backups and verify the installer recovers them",
     )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="install the candidate, then verify the privileged uninstall transaction removes its assets",
+    )
     args = parser.parse_args()
     legacy_fixture = args.legacy_blocking or args.legacy_build_only or args.stale_partial_classification
-    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback, args.orphaned_backup_recovery)) <= 1, "fixture modes are mutually exclusive"
+    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback, args.orphaned_backup_recovery, args.uninstall)) <= 1, "fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -317,6 +322,9 @@ while True:
         elif args.orphaned_backup_recovery:
             assert before["result"]["mount_helper_reachable"] is False
             print("SETUP: interrupted helper backups are present while the service is absent", flush=True)
+        elif args.uninstall:
+            assert before["result"]["mount_helper_reachable"] is False
+            print("SETUP: legacy helper is reachable only through the compatibility probe", flush=True)
         elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
@@ -436,8 +444,24 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert installation["buildCommit"] == args.expect_build_commit
             assert installation["binarySha256"] == digest == installed_digest
             print("PASS: installed file hash and running IPC build match the candidate", flush=True)
-        after = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
-        assert after["result"]["mount_helper_error"] is None
+        if args.uninstall:
+            removed = run(
+                "sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data),
+                "snapshot-mount-helper", "uninstall",
+            )
+            assert removed.returncode == 0, removed.stderr
+            removal = json.loads(removed.stdout)
+            assert removal["uninstalled"] is True
+            assert not BINARY.exists() and not PLIST.exists()
+            after = wait_for(
+                lambda: request(access_socket, metadata["protocolVersion"]),
+                lambda reply: reply.get("result", {}).get("mount_helper_reachable") is False,
+            )
+            assert after["result"]["mount_helper_error"] is not None
+            print("PASS: privileged uninstall removes helper assets and leaves Snapshot Access unreachable", flush=True)
+        else:
+            after = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
+            assert after["result"]["mount_helper_error"] is None
         assert process.poll() is None, "Access unexpectedly exited during installation"
         print("PASS: real bundled install replaces the legacy service and the same Access process becomes reachable", flush=True)
     finally:
