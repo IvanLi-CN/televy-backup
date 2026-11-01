@@ -74,7 +74,7 @@ def wait_for_operation(path, operation_id):
 
 def bootout_service(service):
     result = run("sudo", "-n", "launchctl", "bootout", service, check=False)
-    if result.returncode not in (0, 5):
+    if result.returncode not in (0, 3, 5):
         result.check_returncode()
 
 
@@ -87,6 +87,8 @@ def restart_root_service(service, plist, socket_path):
         time.sleep(0.1)
     else:
         raise AssertionError("root helper did not stop before journal restart")
+    if socket_path.exists():
+        run("sudo", "-n", "rm", "-f", str(socket_path))
     deadline = time.monotonic() + 15
     while socket_path.exists() and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -595,6 +597,8 @@ def main():
             assert (
                 stopped.returncode != 0 and b"Could not find service" in stopped.stderr
             ), "fixture shutdown unverified; preserving state"
+            if ipc.exists():
+                run("sudo", "-n", "rm", "-f", str(ipc))
         if not managed_root_existed and managed_root.exists():
             run("sudo", "-n", "rmdir", str(managed_root))
         if attached:
