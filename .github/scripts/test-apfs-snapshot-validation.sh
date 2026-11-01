@@ -45,6 +45,7 @@ long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
 mount_helper_integration_text="$(<"$root_dir/scripts/macos/mount-helper-install-integration-test.py")"
 mount_helper_text="$(<"$mount_helper_source")"
+cli_mount_helper_text="$(<"$root_dir/crates/cli/src/snapshot_mount_service.rs")"
 access_text="$(<"$access_source")"
 control_text="$(<"$control_source")"
 recovery_fixture_text="$(<"$recovery_fixture_source")"
@@ -126,6 +127,7 @@ assert_contains "recovery fixture unknown state reserve fence" "$recovery_fixtur
 assert_contains "recovery fixture malformed released reserve fence" "$recovery_fixture_text" 'malformed_released_id'
 assert_contains "recovery fixture CLI invocation" "$recovery_fixture_text" '"snapshot-mount-helper"'
 assert_contains "recovery fixture CLI JSON assertion" "$recovery_fixture_text" 'cli_payload["inventoryDrift"] == 0'
+assert_contains "CLI cleanup delegates to daemon" "$cli_mount_helper_text" '"snapshot.mount_helper.retry_cleanup"'
 assert_contains "Swift reconcile action method" "$control_action_text" 'snapshot.mount_helper.reconcile_inventory'
 assert_contains "Swift reconcile action callback" "$control_action_text" 'static func reconcileInventory(using send:'
 assert_contains "Swift reconcile action test" "$control_action_test_text" 'SnapshotMountHelperControlAction.reconcileInventory'
@@ -148,6 +150,8 @@ assert_contains "unknown journal state reserve fence" "$mount_helper_text" "stat
 assert_not_contains "released tombstone audit skips malformed rows" "$mount_helper_text" "state = 'released' AND reservation_manifest_valid = 1"
 assert_contains "status concurrency gate" "$mount_helper_text" 'status_lock.lock().await'
 assert_contains "explicit inventory reconciliation flag" "$mount_helper_text" 'reconcile_inventory: true'
+assert_contains "reconciliation transaction" "$mount_helper_text" 'let mut transaction = journal.begin().await?'
+assert_contains "status command timeout" "$mount_helper_text" 'STATUS_COMMAND_TIMEOUT'
 assert_contains "status inventory cache" "$mount_helper_text" 'inventory_cache'
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"

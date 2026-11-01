@@ -392,7 +392,10 @@ fn classify_busy_status(
         && status.live_mounts == Some(0)
         && status.recoverable_stale_mounts == Some(0)
         && status.unknown_blocking_mounts == Some(0)
-        && status.inventory_drift_mounts == Some(0)
+        && status
+            .inventory_drift_mounts
+            .map(|count| count == 0)
+            .unwrap_or(true)
         && status.pending_cleanup_leases.is_empty();
     if legacy_pending_only {
         return Ok(BusyCheck::LegacyUpgrade);
@@ -716,6 +719,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
 /// This is intentionally a separate explicit command. Status probes and refreshes remain
 /// read-only, while each release still revalidates UID, volume/device identity and inventory in
 /// the root helper before changing the journal.
+#[cfg(not(unix))]
 pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     let uid = unsafe { libc::geteuid() };
     if uid == 0 {
@@ -806,6 +810,119 @@ pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
         println!("snapshot mount cleanup reconciled ({released} record(s) released)");
     }
     Ok(())
+}
+
+#[cfg(unix)]
+pub fn reconcile(
+    _config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    reconcile_cleanup_via_daemon(data_dir, json_output)
+}
+
+#[cfg(unix)]
+fn reconcile_cleanup_via_daemon(data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    let response = super::control_ipc_call_with_timeouts(
+        data_dir,
+        "snapshot.mount_helper.retry_cleanup",
+        json!({}),
+        Duration::from_secs(15),
+        Duration::from_secs(10),
+    )?;
+    let operation_id = response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("operationId"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon did not return a snapshot cleanup operation",
+            )
+        })?
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        let status_response = super::control_ipc_call_with_timeouts(
+            data_dir,
+            "operation.get",
+            json!({"operationId": operation_id}),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?;
+        let status = status_response.result.ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon returned no snapshot cleanup operation status",
+            )
+        })?;
+        match status.get("state").and_then(serde_json::Value::as_str) {
+            Some("succeeded") => {
+                let mut payload = status.get("result").cloned().unwrap_or_else(|| json!({}));
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert("reconciled".to_string(), json!(true));
+                }
+                if json_output {
+                    println!("{payload}");
+                } else {
+                    let released = payload
+                        .get("released")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    println!("snapshot mount cleanup reconciled ({released} record(s) released)");
+                }
+                return Ok(());
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .cloned()
+                    .and_then(decode_control_error)
+                    .unwrap_or_else(|| televy_backup_core::control::ControlError {
+                        code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                        message: "snapshot cleanup reconciliation failed".to_string(),
+                        retryable: true,
+                        details: json!({}),
+                    });
+                let code = match error.code.as_str() {
+                    "snapshot_mount_helper.active"
+                    | "snapshot_mount_helper.pending_cleanup"
+                    | "snapshot_mount_helper.reconcile_required"
+                    | "snapshot_mount_helper.status_incomplete"
+                    | "snapshot_mount_helper.status_inconsistent"
+                    | "snapshot_mount_helper.update_required" => error.code.as_str(),
+                    _ => "snapshot_mount_helper.reconcile_failed",
+                };
+                let message = if error.message.is_empty() {
+                    "snapshot cleanup reconciliation failed"
+                } else {
+                    error.message.as_str()
+                };
+                let cli_error = if error.retryable {
+                    CliError::retryable(code, message)
+                } else {
+                    CliError::new(code, message)
+                };
+                return Err(cli_error.with_details(error.details));
+            }
+            Some("pending" | "running") if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Some("pending" | "running") => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_timeout",
+                    "snapshot cleanup reconciliation did not finish before the timeout",
+                ));
+            }
+            _ => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_failed",
+                    "daemon returned an invalid snapshot cleanup operation state",
+                ));
+            }
+        }
+    }
 }
 
 /// Explicitly re-baseline released tombstones whose only verified difference is the current
@@ -1224,6 +1341,26 @@ mod tests {
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(0),
             inventory_drift_mounts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn legacy_pending_only_status_without_inventory_drift_field_allows_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: None,
             ..Default::default()
         };
         assert_eq!(

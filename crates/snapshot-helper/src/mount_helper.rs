@@ -1,19 +1,20 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use plist::Value;
 use sqlx::{
-    Row, SqlitePool,
+    Acquire, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use thiserror::Error;
@@ -39,6 +40,7 @@ pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const RECOVERY_AGE_SECONDS: &str = "-300 seconds";
 const AUTHORIZE_SOURCE_PATH_ARG: &str = "--authorize-source-path";
@@ -1896,6 +1898,7 @@ async fn reconcile_released_tombstone(
         });
     }
     let current_manifest_json = serde_json::to_string(&current_manifest)?;
+    let mut transaction = journal.begin().await?;
     let updated = sqlx::query(
         "UPDATE mounts SET reservation_manifest = ?, reservation_manifest_valid = 1 WHERE lease_id = ? AND uid = ? AND state = 'released' AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest_valid = 1 AND reservation_manifest = ?",
     )
@@ -1903,7 +1906,7 @@ async fn reconcile_released_tombstone(
     .bind(lease_id)
     .bind(i64::from(uid))
     .bind(reservation_manifest_json)
-    .execute(journal)
+    .execute(&mut *transaction)
     .await?;
     if updated.rows_affected() != 1 {
         return Err(MountHelperError::Protocol(
@@ -1916,6 +1919,7 @@ async fn reconcile_released_tombstone(
             "released snapshot tombstone inventory changed during reconciliation".into(),
         ));
     }
+    transaction.commit().await?;
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
         cleanup_state: "released".to_string(),
@@ -2936,17 +2940,70 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
     program: &str,
     args: [S; N],
 ) -> Result<Vec<u8>, MountHelperError> {
-    let output =
-        Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|error| MountHelperError::Command {
+    let timeout = matches!(stage, "snapshot_inventory" | "volume_identity")
+        .then_some(STATUS_COMMAND_TIMEOUT)
+        .unwrap_or(MUTATING_REQUEST_TIMEOUT);
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| MountHelperError::Command {
+            stage,
+            command,
+            status: "not_started".into(),
+            channel: "errno",
+            summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| MountHelperError::Protocol("snapshot command stdout was unavailable".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| MountHelperError::Protocol("snapshot command stderr was unavailable".into()))?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(8 * 1024 * 1024).read_to_end(&mut bytes);
+        (result, bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stderr.take(8 * 1024 * 1024).read_to_end(&mut bytes);
+        (result, bytes)
+    });
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(MountHelperError::Command {
                 stage,
                 command,
-                status: "not_started".into(),
-                channel: "errno",
-                summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
-            })?;
+                status: "timeout".into(),
+                channel: "timeout",
+                summary: format!("timeout={}ms", timeout.as_millis()),
+            });
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    let (_, stdout) = stdout_reader
+        .join()
+        .map_err(|_| MountHelperError::Protocol("snapshot command stdout reader failed".into()))?;
+    let (_, stderr) = stderr_reader
+        .join()
+        .map_err(|_| MountHelperError::Protocol("snapshot command stderr reader failed".into()))?;
+    let output = std::process::Output {
+        status,
+        stdout,
+        stderr,
+    };
     if output.status.success() {
         return Ok(output.stdout);
     }
