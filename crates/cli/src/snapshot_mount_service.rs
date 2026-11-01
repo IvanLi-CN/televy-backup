@@ -97,7 +97,7 @@ fn plist_contents() -> &'static str {
 "#
 }
 
-fn atomic_copy(source: &Path, destination: &Path) -> Result<(), CliError> {
+fn stage_copy(source: &Path, destination: &Path) -> Result<PathBuf, CliError> {
     let parent = destination.parent().ok_or_else(|| {
         CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -108,18 +108,28 @@ fn atomic_copy(source: &Path, destination: &Path) -> Result<(), CliError> {
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = destination.with_extension(format!("tmp-{}", std::process::id()));
-    fs::copy(source, &staged).map_err(|error| {
-        CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-    })?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).map_err(|error| {
-        CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-    })?;
-    set_root_owner(&staged, "snapshot mount helper")?;
-    fs::rename(&staged, destination)
-        .map_err(|error| CliError::new("snapshot_mount_helper.install_failed", error.to_string()))
+    if let Err(error) = fs::copy(source, &staged) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = set_root_owner(&staged, "snapshot mount helper") {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(staged)
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
+fn stage_write(path: &Path, contents: &[u8]) -> Result<PathBuf, CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -130,25 +140,116 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
+    let mut file = match OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(&staged)
-        .map_err(|error| {
-            CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-        })?;
-    file.write_all(contents)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| {
-            CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-        })?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)).map_err(|error| {
-        CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-    })?;
-    set_root_owner(&staged, "snapshot mount helper plist")?;
-    fs::rename(staged, path)
-        .map_err(|error| CliError::new("snapshot_mount_helper.install_failed", error.to_string()))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_file(&staged);
+            return Err(CliError::new(
+                "snapshot_mount_helper.install_failed",
+                error.to_string(),
+            ));
+        }
+    };
+    if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = set_root_owner(&staged, "snapshot mount helper plist") {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(staged)
+}
+
+fn discard_staged(paths: &[&Path]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn install_asset_error(error: impl std::fmt::Display) -> CliError {
+    CliError::new("snapshot_mount_helper.install_failed", error.to_string())
+}
+
+fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Ok(None);
+    }
+    let backup = path.with_extension(format!("backup-{}", std::process::id()));
+    if fs::symlink_metadata(&backup).is_ok() {
+        return Err(install_asset_error(format!(
+            "stale helper backup exists: {}",
+            backup.display()
+        )));
+    }
+    fs::rename(path, &backup).map_err(install_asset_error)?;
+    Ok(Some(backup))
+}
+
+fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
+    if let Some(backup) = backup {
+        fs::rename(backup, path).map_err(install_asset_error)?;
+    }
+    Ok(())
+}
+
+fn commit_staged_assets(
+    staged_binary: &Path,
+    staged_plist: &Path,
+) -> Result<(Option<PathBuf>, Option<PathBuf>), CliError> {
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    let old_binary = backup_asset(binary)?;
+    let old_plist = match backup_asset(plist) {
+        Ok(backup) => backup,
+        Err(error) => {
+            restore_asset(binary, old_binary)?;
+            return Err(error);
+        }
+    };
+    if let Err(error) = fs::rename(staged_binary, binary) {
+        restore_asset(plist, old_plist)?;
+        restore_asset(binary, old_binary)?;
+        return Err(install_asset_error(error));
+    }
+    if let Err(error) = fs::rename(staged_plist, plist) {
+        let _ = fs::remove_file(binary);
+        restore_asset(plist, old_plist)?;
+        restore_asset(binary, old_binary)?;
+        return Err(install_asset_error(error));
+    }
+    Ok((old_binary, old_plist))
+}
+
+fn rollback_installed_assets(old_binary: Option<PathBuf>, old_plist: Option<PathBuf>) {
+    let service = system_service_target();
+    let _ = bootout_for_mutation(
+        &service,
+        "install rollback",
+        "snapshot_mount_helper.install_failed",
+    );
+    let _ = fs::remove_file(MOUNT_HELPER_INSTALL_PATH);
+    let _ = fs::remove_file(MOUNT_HELPER_PLIST_PATH);
+    let _ = restore_asset(Path::new(MOUNT_HELPER_INSTALL_PATH), old_binary);
+    let _ = restore_asset(Path::new(MOUNT_HELPER_PLIST_PATH), old_plist);
+    if Path::new(MOUNT_HELPER_PLIST_PATH).is_file() {
+        let _ = launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH]);
+    }
 }
 
 fn set_root_owner(path: &Path, description: &str) -> Result<(), CliError> {
@@ -728,38 +829,68 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
-    let candidate_hash = {
+    let (staged_binary, staged_plist, candidate_hash) = {
         let source = current_executable_sibling()?;
         let candidate_hash = helper_sha256(&source)?;
-        atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
-        atomic_write(
+        let staged_binary = stage_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
+        let staged_plist = match stage_write(
             Path::new(MOUNT_HELPER_PLIST_PATH),
             plist_contents().as_bytes(),
-        )?;
-        candidate_hash
-        // Release the shared lock before bootstrap: the new root helper must take it during
-        // startup recovery before it can create the ready IPC socket.
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                discard_staged(&[&staged_binary]);
+                return Err(error);
+            }
+        };
+        (staged_binary, staged_plist, candidate_hash)
     };
     let service = system_service_target();
-    bootout_for_mutation(
+    if let Err(error) = bootout_for_mutation(
         &service,
         "install",
         "snapshot_mount_helper.install_failed",
-    )?;
+    ) {
+        discard_staged(&[&staged_binary, &staged_plist]);
+        return Err(error);
+    }
+    let (old_binary, old_plist) = match commit_staged_assets(&staged_binary, &staged_plist) {
+        Ok(backups) => backups,
+        Err(error) => {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
+    };
     drop(mutation_lock);
-    launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
-    let started = Instant::now();
-    let status = wait_for_installed_helper(
-        env!("TELEVYBACKUP_BUILD_COMMIT"),
-        mount_helper::status,
-        std::thread::sleep,
-        || started.elapsed(),
-    )?;
-    if helper_sha256(Path::new(MOUNT_HELPER_INSTALL_PATH))? != candidate_hash {
-        return Err(CliError::new(
-            "snapshot_mount_helper.identity_failed",
-            "installed mount helper does not match the candidate binary",
-        ));
+    let install_result = (|| {
+        launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+        let started = Instant::now();
+        let status = wait_for_installed_helper(
+            env!("TELEVYBACKUP_BUILD_COMMIT"),
+            mount_helper::status,
+            std::thread::sleep,
+            || started.elapsed(),
+        )?;
+        if helper_sha256(Path::new(MOUNT_HELPER_INSTALL_PATH))? != candidate_hash {
+            return Err(CliError::new(
+                "snapshot_mount_helper.identity_failed",
+                "installed mount helper does not match the candidate binary",
+            ));
+        }
+        Ok(status)
+    })();
+    let status = match install_result {
+        Ok(status) => status,
+        Err(error) => {
+            rollback_installed_assets(old_binary, old_plist);
+            return Err(error);
+        }
+    };
+    if let Some(path) = old_binary {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = old_plist {
+        let _ = fs::remove_file(path);
     }
     if json_output {
         println!(
