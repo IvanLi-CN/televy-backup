@@ -413,9 +413,7 @@ pub async fn run_server() -> Result<(), MountHelperError> {
         let mutation_lock = Arc::clone(&mutation_lock);
         let status_lock = Arc::clone(&status_lock);
         tokio::spawn(async move {
-            if let Err(error) =
-                serve_connection(stream, journal, mutation_lock, status_lock).await
-            {
+            if let Err(error) = serve_connection(stream, journal, mutation_lock, status_lock).await {
                 eprintln!("snapshot mount helper connection failed: {error}");
             }
         });
@@ -803,11 +801,9 @@ async fn handle_request(
             uid,
             lease_id,
             reconcile_inventory,
-        } => {
-            release_request(peer_uid, uid, &lease_id, reconcile_inventory, journal)
-                .await
-                .map(MountResponseResult::Released)
-        }
+        } => release_request(peer_uid, uid, &lease_id, reconcile_inventory, journal)
+            .await
+            .map(MountResponseResult::Released),
         MountMethod::RecordCleanup { uid, lease_id } => {
             record_cleanup_request(peer_uid, uid, &lease_id, journal)
                 .await
@@ -955,9 +951,7 @@ async fn classify_status_rows(
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let stale = row.try_get::<i64, _>("stale_row")? == 1;
         let live = row.try_get::<i64, _>("live_row")? == 1;
-        if !volume_uuid.is_empty()
-            && !classification.blocked_volume_uuids.contains(&volume_uuid)
-        {
+        if !volume_uuid.is_empty() && !classification.blocked_volume_uuids.contains(&volume_uuid) {
             classification.blocked_volume_uuids.push(volume_uuid.clone());
         }
         let manifest_valid = parse_journal_manifest(&snapshot_manifest).is_ok();
@@ -1072,7 +1066,9 @@ async fn classify_status_rows(
                 if !volume_uuid.is_empty()
                     && !classification.blocked_volume_uuids.contains(&volume_uuid)
                 {
-                    classification.blocked_volume_uuids.push(volume_uuid.clone());
+                    classification
+                        .blocked_volume_uuids
+                        .push(volume_uuid.clone());
                 }
                 classification
                     .inventory_drift_leases

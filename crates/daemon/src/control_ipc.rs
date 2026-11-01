@@ -1230,24 +1230,23 @@ async fn handle_control_ipc_client(
             let mut reconciled = 0_u32;
             for lease in status.inventory_drift_leases {
                 let lease_id = lease.lease_id;
-                let result =
-                    tokio::task::spawn_blocking(move || {
-                        mount_helper::reconcile_inventory(uid, &lease_id)
-                    })
-                        .await
-                        .map_err(|_| {
-                            ControlError::unavailable(
-                                "Snapshot inventory reconciliation task failed.",
-                                serde_json::json!({}),
-                            )
-                        })?
-                        .map_err(|_| ControlError {
-                            code: "snapshot_mount_helper.reconcile_failed".to_string(),
-                            message: "A snapshot inventory record could not be safely reconciled."
-                                .to_string(),
-                            retryable: true,
-                            details: serde_json::json!({"reason": "release_rejected"}),
-                        })?;
+                let result = tokio::task::spawn_blocking(move || {
+                    mount_helper::reconcile_inventory(uid, &lease_id)
+                })
+                .await
+                .map_err(|_| {
+                    ControlError::unavailable(
+                        "Snapshot inventory reconciliation task failed.",
+                        serde_json::json!({}),
+                    )
+                })?
+                .map_err(|_| ControlError {
+                    code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                    message: "A snapshot inventory record could not be safely reconciled."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"reason": "release_rejected"}),
+                })?;
                 if result.cleanup_state == "released" {
                     reconciled += 1;
                 }

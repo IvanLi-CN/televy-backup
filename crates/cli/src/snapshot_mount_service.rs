@@ -961,10 +961,7 @@ fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<
         })?;
         match status.get("state").and_then(serde_json::Value::as_str) {
             Some("succeeded") => {
-                let mut payload = status
-                    .get("result")
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let mut payload = status.get("result").cloned().unwrap_or_else(|| json!({}));
                 if let Some(object) = payload.as_object_mut() {
                     let reconciled = object
                         .get("reconciled")
@@ -989,9 +986,7 @@ fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<
                     .get("error")
                     .cloned()
                     .and_then(|value| {
-                        serde_json::from_value::<televy_backup_core::control::ControlError>(
-                            value,
-                        )
+                        serde_json::from_value::<televy_backup_core::control::ControlError>(value)
                         .ok()
                     })
                     .unwrap_or_else(|| televy_backup_core::control::ControlError {

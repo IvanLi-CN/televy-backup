@@ -328,7 +328,14 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), HelperError> {
         let uid: i64 = sqlx::Row::try_get(&row, "uid")?;
         let _mount_device: i64 = sqlx::Row::try_get(&row, "mount_device").unwrap_or_default();
         let state = match mount_helper::release(uid as u32, &lease_id) {
-            Ok(result) if matches!(result.cleanup_state.as_str(), "released" | "reconcile_required") => "released",
+            Ok(result)
+                if matches!(
+                    result.cleanup_state.as_str(),
+                    "released" | "reconcile_required"
+                ) =>
+            {
+                "released"
+            }
             _ => "cleanup_pending",
         };
         sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
