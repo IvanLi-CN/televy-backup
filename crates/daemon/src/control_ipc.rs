@@ -1231,7 +1231,9 @@ async fn handle_control_ipc_client(
             for lease in status.inventory_drift_leases {
                 let lease_id = lease.lease_id;
                 let result =
-                    tokio::task::spawn_blocking(move || mount_helper::release(uid, &lease_id))
+                    tokio::task::spawn_blocking(move || {
+                        mount_helper::reconcile_inventory(uid, &lease_id)
+                    })
                         .await
                         .map_err(|_| {
                             ControlError::unavailable(

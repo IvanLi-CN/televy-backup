@@ -146,7 +146,8 @@ assert_contains "inventory drift reconciliation" "$mount_helper_text" "reconcile
 assert_contains "unknown journal state classification" "$mount_helper_text" "state IS NOT 'released'"
 assert_contains "unknown journal state reserve fence" "$mount_helper_text" "state IS NOT 'released'"
 assert_not_contains "released tombstone audit skips malformed rows" "$mount_helper_text" "state = 'released' AND reservation_manifest_valid = 1"
-assert_contains "status concurrency gate" "$mount_helper_text" 'status_busy'
+assert_contains "status concurrency gate" "$mount_helper_text" 'status_lock.lock().await'
+assert_contains "explicit inventory reconciliation flag" "$mount_helper_text" 'reconcile_inventory: true'
 assert_contains "status inventory cache" "$mount_helper_text" 'inventory_cache'
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"

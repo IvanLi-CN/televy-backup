@@ -26,6 +26,10 @@ pub const CONFIG_DIR_ENV: &str = "TELEVYBACKUP_CONFIG_DIR";
 pub const DATA_DIR_ENV: &str = "TELEVYBACKUP_DATA_DIR";
 pub const MIN_FREE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub version: u32,
@@ -154,6 +158,9 @@ pub enum MountMethod {
     Release {
         uid: u32,
         lease_id: String,
+        /// Only explicit inventory reconciliation may re-baseline a released tombstone.
+        #[serde(default, skip_serializing_if = "is_false")]
+        reconcile_inventory: bool,
     },
     RecordCleanup {
         uid: u32,

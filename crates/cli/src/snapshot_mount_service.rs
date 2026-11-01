@@ -810,6 +810,7 @@ pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
 
 /// Explicitly re-baseline released tombstones whose only verified difference is the current
 /// snapshot inventory. This never deletes snapshots or opens source files.
+#[cfg(not(unix))]
 pub fn reconcile_inventory(
     config_dir: &Path,
     data_dir: &Path,
@@ -878,7 +879,7 @@ pub fn reconcile_inventory(
     let mut reconciled = 0_u32;
     for lease in &status.inventory_drift_leases {
         let lease_id = lease.lease_id.clone();
-        let result = mount_helper::release(uid, &lease_id).map_err(|_| {
+        let result = mount_helper::reconcile_inventory(uid, &lease_id).map_err(|_| {
             CliError::retryable(
                 "snapshot_mount_helper.reconcile_failed",
                 "a snapshot inventory record could not be safely reconciled",
@@ -911,6 +912,145 @@ pub fn reconcile_inventory(
         println!("snapshot inventory reconciled ({reconciled} record(s))");
     }
     Ok(())
+}
+
+#[cfg(unix)]
+pub fn reconcile_inventory(
+    _config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    reconcile_inventory_via_daemon(data_dir, json_output)
+}
+
+#[cfg(unix)]
+fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    let response = super::control_ipc_call_with_timeouts(
+        data_dir,
+        "snapshot.mount_helper.reconcile_inventory",
+        json!({}),
+        Duration::from_secs(15),
+        Duration::from_secs(10),
+    )?;
+    let operation_id = response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("operationId"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon did not return a snapshot inventory reconciliation operation",
+            )
+        })?
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        let status_response = super::control_ipc_call_with_timeouts(
+            data_dir,
+            "operation.get",
+            json!({"operationId": operation_id}),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?;
+        let status = status_response.result.ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon returned no reconciliation operation status",
+            )
+        })?;
+        match status.get("state").and_then(serde_json::Value::as_str) {
+            Some("succeeded") => {
+                let mut payload = status
+                    .get("result")
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                if let Some(object) = payload.as_object_mut() {
+                    let reconciled = object
+                        .get("reconciled")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    object.insert("reconciled".to_string(), json!(true));
+                    object.insert("records".to_string(), json!(reconciled));
+                }
+                if json_output {
+                    println!("{payload}");
+                } else {
+                    let records = payload
+                        .get("records")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    println!("snapshot inventory reconciled ({records} record(s))");
+                }
+                return Ok(());
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .cloned()
+                    .and_then(|value| {
+                        serde_json::from_value::<televy_backup_core::control::ControlError>(
+                            value,
+                        )
+                        .ok()
+                    })
+                    .unwrap_or_else(|| televy_backup_core::control::ControlError {
+                        code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                        message: "snapshot inventory reconciliation failed".to_string(),
+                        retryable: true,
+                        details: json!({}),
+                    });
+                let (code, fallback_code) = match error.code.as_str() {
+                    "snapshot_mount_helper.active" => (
+                        "snapshot_mount_helper.active",
+                        "snapshot inventory reconciliation is blocked by an active mount",
+                    ),
+                    "snapshot_mount_helper.pending_cleanup" => (
+                        "snapshot_mount_helper.pending_cleanup",
+                        "snapshot inventory reconciliation is blocked by pending cleanup",
+                    ),
+                    "snapshot_mount_helper.unknown_blocker" => (
+                        "snapshot_mount_helper.unknown_blocker",
+                        "snapshot inventory reconciliation is blocked by an unknown record",
+                    ),
+                    "snapshot_mount_helper.reconcile_required" => (
+                        "snapshot_mount_helper.reconcile_required",
+                        "snapshot inventory reconciliation remains blocked",
+                    ),
+                    _ => (
+                        "snapshot_mount_helper.reconcile_failed",
+                        "snapshot inventory reconciliation failed",
+                    ),
+                };
+                let message = if error.message.is_empty() {
+                    fallback_code
+                } else {
+                    error.message.as_str()
+                };
+                let cli_error = if error.retryable {
+                    CliError::retryable(code, message)
+                } else {
+                    CliError::new(code, message)
+                };
+                return Err(cli_error.with_details(error.details));
+            }
+            Some("pending" | "running") if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Some("pending" | "running") => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_timeout",
+                    "snapshot inventory reconciliation did not finish before the timeout",
+                ));
+            }
+            _ => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_failed",
+                    "daemon returned an invalid reconciliation operation state",
+                ));
+            }
+        }
+    }
 }
 
 pub fn status(json_output: bool) -> Result<(), CliError> {

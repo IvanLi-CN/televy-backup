@@ -72,6 +72,27 @@ def wait_for_operation(path, operation_id):
     raise AssertionError("daemon operation did not reach a terminal state")
 
 
+def restart_root_service(service, plist, socket_path):
+    run("sudo", "-n", "launchctl", "bootout", "system", service)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if run("sudo", "-n", "launchctl", "print", service, check=False).returncode != 0:
+            break
+        time.sleep(0.1)
+    else:
+        raise AssertionError("root helper did not stop before journal restart")
+    deadline = time.monotonic() + 15
+    while socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert not socket_path.exists(), "root helper socket remained after bootout"
+    run("sudo", "-n", "launchctl", "bootstrap", "system", str(plist))
+    deadline = time.monotonic() + 15
+    while not socket_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert socket_path.exists(), "root helper socket did not return after restart"
+    assert request(socket_path, "status")["ok"], "root helper failed after journal restart"
+
+
 def write_fixture_rows(
     journal,
     uid,
@@ -95,7 +116,6 @@ rows = [
     (unknown_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'active'),
     (malformed_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'cleanup_pending'),
     (released_drift_id, int(uid), volume_uuid, device, '', '', '', '[]', '[{"device_identifier":"%s","uuid":"00000000-0000-0000-0000-000000000001"}]' % device, 1, 'released'),
-    (future_state_id, int(uid), volume_uuid, device, '', '', '', '[]', '[]', 1, 'future_state'),
     (malformed_released_id, int(uid), volume_uuid, device, '', '', '', '[]', 'not-json', 0, 'released'),
 ]
 connection.executemany(
@@ -132,6 +152,38 @@ connection.close()
         released_drift_id,
         future_state_id,
         malformed_released_id,
+    )
+
+
+def write_future_state_row(journal, uid, volume_uuid, device, lease_id):
+    script = '''
+import sqlite3, sys
+journal, uid, volume_uuid, device, lease_id = sys.argv[1:]
+connection = sqlite3.connect(journal)
+connection.execute(
+    """
+        INSERT INTO mounts (
+            lease_id, uid, volume_uuid, device_identifier, source_path,
+            snapshot_name, mount_root, snapshot_manifest, reservation_manifest,
+            reservation_manifest_valid, state, created_at, last_renewed_at
+        ) VALUES (?, ?, ?, ?, '', '', '', '[]', '[]', 1, 'future_state', datetime('now'), datetime('now'))
+    """,
+    (lease_id, int(uid), volume_uuid, device),
+)
+connection.commit()
+connection.close()
+'''
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(journal),
+        str(uid),
+        volume_uuid,
+        device,
+        lease_id,
     )
 
 
@@ -288,6 +340,13 @@ def main():
         released_drift_id = str(uuid.uuid4())
         future_state_id = str(uuid.uuid4())
         malformed_released_id = str(uuid.uuid4())
+        write_future_state_row(journal, os.getuid(), volume_uuid, device, future_state_id)
+        restart_root_service(service, root_plist, ipc)
+        restarted = request(ipc, "status")
+        assert restarted["ok"]
+        assert restarted["result"]["active_mounts"] == 1
+        assert restarted["result"]["unknown_blocking_mounts"] == 1
+        delete_fixture_rows(journal, [future_state_id])
         write_fixture_rows(
             journal,
             os.getuid(),
@@ -301,6 +360,7 @@ def main():
             future_state_id,
             malformed_released_id,
         )
+        write_future_state_row(journal, os.getuid(), volume_uuid, device, future_state_id)
         before = request(ipc, "status")
         assert before["ok"]
         status = before["result"]

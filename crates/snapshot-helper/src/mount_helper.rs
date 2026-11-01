@@ -252,11 +252,29 @@ pub fn release(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelp
     let response = request(MountMethod::Release {
         uid,
         lease_id: lease_id.to_string(),
+        reconcile_inventory: false,
     })?;
     match response.result {
         Some(MountResponseResult::Released(result)) => Ok(result),
         _ => Err(MountHelperError::Protocol(
             "release response missing result".into(),
+        )),
+    }
+}
+
+pub fn reconcile_inventory(
+    uid: u32,
+    lease_id: &str,
+) -> Result<MountReleaseResult, MountHelperError> {
+    let response = request(MountMethod::Release {
+        uid,
+        lease_id: lease_id.to_string(),
+        reconcile_inventory: true,
+    })?;
+    match response.result {
+        Some(MountResponseResult::Released(result)) => Ok(result),
+        _ => Err(MountHelperError::Protocol(
+            "inventory reconciliation response missing result".into(),
         )),
     }
 }
@@ -468,6 +486,15 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
         let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let state: String = row.try_get("state")?;
+        if !matches!(
+            state.as_str(),
+            "reserved" | "prepared" | "active" | "cleanup_pending"
+        ) {
+            // Unknown states belong to a newer or corrupted journal schema. Leave the exact row
+            // untouched so status can report a blocking unknown record; startup recovery must
+            // never mutate an unrecognized state.
+            continue;
+        }
         if state == "reserved" && mount_root.is_empty() && manifest_json == "[]" {
             // Snapshot creation may have completed while the access process was disconnected.
             // Keep the reservation blocked until a later owner can reconcile the post-reservation
@@ -669,14 +696,8 @@ async fn serve_connection(
                     MountMethod::Status | MountMethod::StatusVolume { .. }
                 );
                 if needs_status_lock {
-                    match status_lock.try_lock() {
-                        Ok(_status_guard) => handle_request(request, peer_uid, &journal).await,
-                        Err(_) => MountResponse::error(
-                            request.request_id,
-                            "status_busy",
-                            "snapshot mount helper status is already being evaluated",
-                        ),
-                    }
+                    let _status_guard = status_lock.lock().await;
+                    handle_request(request, peer_uid, &journal).await
                 } else if needs_file_lock {
                     let _mutation_guard = mutation_lock.lock().await;
                     match tokio::task::spawn_blocking(acquire_mutation_lock).await {
@@ -778,8 +799,12 @@ async fn handle_request(
         )
         .await
         .map(MountResponseResult::Mounted),
-        MountMethod::Release { uid, lease_id } => {
-            release_request(peer_uid, uid, &lease_id, journal)
+        MountMethod::Release {
+            uid,
+            lease_id,
+            reconcile_inventory,
+        } => {
+            release_request(peer_uid, uid, &lease_id, reconcile_inventory, journal)
                 .await
                 .map(MountResponseResult::Released)
         }
@@ -1076,7 +1101,7 @@ async fn audit_released_tombstones(
     device_identifier: &str,
 ) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released'",
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released'",
     )
     .bind(volume_uuid)
     .fetch_all(journal)
@@ -1086,10 +1111,26 @@ async fn audit_released_tombstones(
     }
     let current_manifest = snapshot_inventory_manifest(device_identifier)?;
     for row in rows {
+        let lease_id: String = row.try_get("lease_id")?;
+        let uid: i64 = row.try_get("uid")?;
+        let stored_volume_uuid: String = row.try_get("volume_uuid")?;
         let stored_device: String = row.try_get("device_identifier")?;
+        let mount_root: String = row.try_get("mount_root")?;
+        let snapshot_manifest: String = row.try_get("snapshot_manifest")?;
         let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
+        let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let baseline = parse_reservation_manifest(&reservation_manifest_json);
-        let matches = stored_device.eq_ignore_ascii_case(device_identifier)
+        let identity_valid = uid > 0
+            && validate_lease_id(&lease_id).is_ok()
+            && stored_volume_uuid.eq_ignore_ascii_case(volume_uuid)
+            && validate_uuid(&stored_volume_uuid).is_ok()
+            && validate_device(&stored_device).is_ok()
+            && validate_device_volume_binding(&stored_device, &stored_volume_uuid).is_ok()
+            && mount_root.is_empty()
+            && snapshot_manifest == "[]"
+            && reservation_manifest_valid == 1;
+        let matches = identity_valid
+            && stored_device.eq_ignore_ascii_case(device_identifier)
             && baseline
                 .as_ref()
                 .is_ok_and(|baseline| manifests_equal(&current_manifest, baseline));
@@ -1634,6 +1675,7 @@ async fn release_request(
     peer_uid: u32,
     uid: u32,
     lease_id: &str,
+    reconcile_inventory: bool,
     journal: &SqlitePool,
 ) -> Result<MountReleaseResult, MountHelperError> {
     if peer_uid != uid || uid == 0 {
@@ -1680,7 +1722,21 @@ async fn release_request(
             "mount lease belongs to another user".into(),
         ));
     }
+    if !matches!(
+        state.as_str(),
+        "reserved" | "prepared" | "active" | "cleanup_pending" | "released"
+    ) {
+        return Err(MountHelperError::Protocol(
+            "mount lease has an unknown journal state; explicit repair is required".into(),
+        ));
+    }
     if state == "released" {
+        if !reconcile_inventory {
+            return Ok(MountReleaseResult {
+                lease_id: lease_id.to_string(),
+                cleanup_state: "reconcile_required".to_string(),
+            });
+        }
         return reconcile_released_tombstone(
             journal,
             uid,
@@ -3239,6 +3295,7 @@ mod tests {
             request_timeout(&MountMethod::Release {
                 uid: 501,
                 lease_id: "lease".into(),
+                reconcile_inventory: false,
             }),
             MUTATING_REQUEST_TIMEOUT
         );
@@ -3331,6 +3388,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state, "reserved");
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_an_unrecognized_state() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, '', '', '[]', '[]', 1, 'future_state', datetime('now'))",
+        )
+        .bind(lease_id)
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        recover_journal(&journal).await.unwrap();
+
+        let state: String = sqlx::query_scalar("SELECT state FROM mounts WHERE lease_id = ?")
+            .bind(lease_id)
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(state, "future_state");
+    }
+
+    #[tokio::test]
+    async fn ordinary_release_does_not_rebaseline_a_released_tombstone() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, '', '', '[]', '[]', 1, 'released', datetime('now'))",
+        )
+        .bind(lease_id)
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let result = release_request(501, 501, lease_id, false, &journal)
+            .await
+            .unwrap();
+        assert_eq!(result.cleanup_state, "reconcile_required");
     }
 
     #[tokio::test]
