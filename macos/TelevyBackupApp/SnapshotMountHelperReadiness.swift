@@ -174,7 +174,8 @@ struct SnapshotMountHelperReadiness {
               let liveMounts,
               let recoverableStaleMounts,
               let unknownBlockingMounts,
-              inventoryDriftMounts == nil
+              inventoryDriftMounts == nil,
+              liveMounts == 0
         else { return false }
         let (pendingLive, pendingLiveOverflow) = pendingCleanup.addingReportingOverflow(liveMounts)
         let (withRecoverable, recoverableOverflow) = pendingLive.addingReportingOverflow(recoverableStaleMounts)

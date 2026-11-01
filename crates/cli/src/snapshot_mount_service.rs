@@ -863,6 +863,7 @@ fn classify_busy_status(
         && status.recoverable_stale_mounts.is_some()
         && status.unknown_blocking_mounts.is_some()
         && status.inventory_drift_mounts.is_none()
+        && status.live_mounts == Some(0)
         && stale_current_partition_is_complete;
     if stale_current_partial_classification {
         // The previous helper implementation used the current component version but did not
@@ -1193,11 +1194,11 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         };
         (staged_binary, staged_plist, candidate_hash)
     };
-    if replace_legacy_helper {
-        if let Err(error) = prepare_legacy_upgrade(config_dir, data_dir) {
-            discard_staged(&[&staged_binary, &staged_plist]);
-            return Err(error);
-        }
+    if replace_legacy_helper
+        && let Err(error) = prepare_legacy_upgrade(config_dir, data_dir)
+    {
+        discard_staged(&[&staged_binary, &staged_plist]);
+        return Err(error);
     }
     let service = system_service_target();
     if let Err(error) =
