@@ -687,6 +687,12 @@ fn helper_sha256(path: &Path) -> Result<String, CliError> {
 
 pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     require_root()?;
+    let _install_lock = mount_helper::acquire_install_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_lock_unavailable",
+            format!("cannot install or update the snapshot mount helper safely: {error}"),
+        )
+    })?;
     let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
         CliError::retryable(
             "snapshot_mount_helper.lock_unavailable",
@@ -722,12 +728,6 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
-    let service = system_service_target();
-    bootout_for_mutation(
-        &service,
-        "install",
-        "snapshot_mount_helper.install_failed",
-    )?;
     let candidate_hash = {
         let source = current_executable_sibling()?;
         let candidate_hash = helper_sha256(&source)?;
@@ -740,6 +740,12 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         // Release the shared lock before bootstrap: the new root helper must take it during
         // startup recovery before it can create the ready IPC socket.
     };
+    let service = system_service_target();
+    bootout_for_mutation(
+        &service,
+        "install",
+        "snapshot_mount_helper.install_failed",
+    )?;
     drop(mutation_lock);
     launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
     let started = Instant::now();
@@ -768,6 +774,12 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
 
 pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     require_root()?;
+    let _install_lock = mount_helper::acquire_install_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_lock_unavailable",
+            format!("cannot uninstall the snapshot mount helper safely: {error}"),
+        )
+    })?;
     let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
         CliError::retryable(
             "snapshot_mount_helper.lock_unavailable",

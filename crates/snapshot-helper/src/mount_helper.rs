@@ -25,8 +25,9 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use crate::{
-    DEFAULT_MOUNT_HELPER_JOURNAL, DEFAULT_MOUNT_HELPER_MUTATION_LOCK, DEFAULT_MOUNT_HELPER_SOCKET,
-    MOUNT_HELPER_PROTOCOL_VERSION, MountLeaseResult, MountMethod, MountRecoveryLease,
+    DEFAULT_MOUNT_HELPER_INSTALL_LOCK, DEFAULT_MOUNT_HELPER_JOURNAL,
+    DEFAULT_MOUNT_HELPER_MUTATION_LOCK, DEFAULT_MOUNT_HELPER_SOCKET, MOUNT_HELPER_PROTOCOL_VERSION,
+    MountLeaseResult, MountMethod, MountRecoveryLease,
     MountReleaseResult, MountRequest, MountResponse, MountResponseResult, MountSnapshotRef,
     MountStatusResult, validate_mount_request,
 };
@@ -97,6 +98,12 @@ pub fn configured_mutation_lock_path() -> PathBuf {
         })
 }
 
+pub fn configured_install_lock_path() -> PathBuf {
+    std::env::var_os("TELEVYBACKUP_SNAPSHOT_MOUNT_INSTALL_LOCK")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_MOUNT_HELPER_INSTALL_LOCK))
+}
+
 pub struct MutationFileLock {
     file: fs::File,
 }
@@ -111,7 +118,20 @@ impl Drop for MutationFileLock {
 }
 
 pub fn acquire_mutation_lock() -> Result<MutationFileLock, MountHelperError> {
-    let path = configured_mutation_lock_path();
+    acquire_file_lock(configured_mutation_lock_path(), "snapshot mount mutation lock")
+}
+
+/// Serialize privileged helper installation and removal across CLI processes. This lock is
+/// separate from the journal mutation lock because the latter must be released before the
+/// newly bootstrapped helper can start its own recovery transaction.
+pub fn acquire_install_lock() -> Result<MutationFileLock, MountHelperError> {
+    acquire_file_lock(
+        configured_install_lock_path(),
+        "snapshot mount helper installation lock",
+    )
+}
+
+fn acquire_file_lock(path: PathBuf, description: &str) -> Result<MutationFileLock, MountHelperError> {
     let parent = path
         .parent()
         .ok_or_else(|| MountHelperError::Protocol("mutation lock has no parent".into()))?;
@@ -120,7 +140,7 @@ pub fn acquire_mutation_lock() -> Result<MutationFileLock, MountHelperError> {
         && (metadata.file_type().is_symlink() || !metadata.is_file())
     {
         return Err(MountHelperError::Protocol(
-            "unsafe root-owned snapshot mount mutation lock".into(),
+            format!("unsafe root-owned {description}"),
         ));
     }
     let file = OpenOptions::new()
@@ -130,7 +150,7 @@ pub fn acquire_mutation_lock() -> Result<MutationFileLock, MountHelperError> {
         .write(true)
         .open(&path)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    ensure_root_owned_file(&path, "snapshot mount mutation lock")?;
+    ensure_root_owned_file(&path, description)?;
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(MountHelperError::Io(std::io::Error::last_os_error()));
     }
