@@ -413,7 +413,8 @@ pub async fn run_server() -> Result<(), MountHelperError> {
         let mutation_lock = Arc::clone(&mutation_lock);
         let status_lock = Arc::clone(&status_lock);
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(stream, journal, mutation_lock, status_lock).await {
+            let result = serve_connection(stream, journal, mutation_lock, status_lock).await;
+            if let Err(error) = result {
                 eprintln!("snapshot mount helper connection failed: {error}");
             }
         });
@@ -951,7 +952,9 @@ async fn classify_status_rows(
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let stale = row.try_get::<i64, _>("stale_row")? == 1;
         let live = row.try_get::<i64, _>("live_row")? == 1;
-        if !volume_uuid.is_empty() && !classification.blocked_volume_uuids.contains(&volume_uuid) {
+        let volume_is_unblocked =
+            !volume_uuid.is_empty() && !classification.blocked_volume_uuids.contains(&volume_uuid);
+        if volume_is_unblocked {
             classification.blocked_volume_uuids.push(volume_uuid.clone());
         }
         let manifest_valid = parse_journal_manifest(&snapshot_manifest).is_ok();

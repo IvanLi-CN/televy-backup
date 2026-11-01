@@ -187,6 +187,38 @@ connection.close()
     )
 
 
+def write_malformed_released_row(journal, uid, volume_uuid, device, lease_id):
+    script = '''
+import sqlite3, sys
+journal, uid, volume_uuid, device, lease_id = sys.argv[1:]
+connection = sqlite3.connect(journal)
+connection.execute(
+    """
+        INSERT INTO mounts (
+            lease_id, uid, volume_uuid, device_identifier, source_path,
+            snapshot_name, mount_root, snapshot_manifest, reservation_manifest,
+            reservation_manifest_valid, state, created_at, last_renewed_at
+        ) VALUES (?, ?, ?, ?, '', '', '', '[]', 'not-json', 0, 'released', datetime('now'), datetime('now'))
+    """,
+    (lease_id, int(uid), volume_uuid, device),
+)
+connection.commit()
+connection.close()
+'''
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(journal),
+        str(uid),
+        volume_uuid,
+        device,
+        lease_id,
+    )
+
+
 def delete_fixture_rows(journal, lease_ids):
     script = """
 import sqlite3, sys
@@ -347,6 +379,34 @@ def main():
         assert restarted["result"]["active_mounts"] == 1
         assert restarted["result"]["unknown_blocking_mounts"] == 1
         delete_fixture_rows(journal, [future_state_id])
+        write_malformed_released_row(
+            journal, os.getuid(), volume_uuid, device, malformed_released_id
+        )
+        malformed_reserve = request(
+            ipc,
+            "reserve",
+            uid=os.getuid(),
+            lease_id=str(uuid.uuid4()),
+            volume_uuid=volume_uuid,
+            device_identifier=device,
+            source_path=str(source),
+        )
+        assert malformed_reserve["error"]["code"] == "invalid_request"
+        assert "tombstone inventory changed" in malformed_reserve["error"]["message"]
+        delete_fixture_rows(journal, [malformed_released_id])
+        write_future_state_row(journal, os.getuid(), volume_uuid, device, future_state_id)
+        future_reserve = request(
+            ipc,
+            "reserve",
+            uid=os.getuid(),
+            lease_id=str(uuid.uuid4()),
+            volume_uuid=volume_uuid,
+            device_identifier=device,
+            source_path=str(source),
+        )
+        assert future_reserve["error"]["code"] == "invalid_request"
+        assert "active mount or pending snapshot cleanup" in future_reserve["error"]["message"]
+        delete_fixture_rows(journal, [future_state_id])
         write_fixture_rows(
             journal,
             os.getuid(),
@@ -360,39 +420,18 @@ def main():
             future_state_id,
             malformed_released_id,
         )
-        write_future_state_row(journal, os.getuid(), volume_uuid, device, future_state_id)
         before = request(ipc, "status")
         assert before["ok"]
         status = before["result"]
-        assert status["active_mounts"] == 7
+        assert status["active_mounts"] == 6
         assert status["pending_cleanup"] == 1
         assert status["recoverable_stale_mounts"] == 1
-        assert status["unknown_blocking_mounts"] == 4
+        assert status["unknown_blocking_mounts"] == 3
         assert status["inventory_drift_mounts"] == 1
         assert [row["lease_id"] for row in status["pending_cleanup_leases"]] == [pending_id]
         assert [row["lease_id"] for row in status["recovery_leases"]] == [stale_id]
         assert [row["lease_id"] for row in status["inventory_drift_leases"]] == [released_drift_id]
-        blocked_release = request(
-            ipc,
-            "reserve",
-            uid=os.getuid(),
-            lease_id=str(uuid.uuid4()),
-            volume_uuid=volume_uuid,
-            device_identifier=device,
-            source_path=str(source),
-        )
-        assert not blocked_release["ok"]
         delete_fixture_rows(journal, [malformed_released_id, released_drift_id])
-        blocked_unknown_state = request(
-            ipc,
-            "reserve",
-            uid=os.getuid(),
-            lease_id=str(uuid.uuid4()),
-            volume_uuid=volume_uuid,
-            device_identifier=device,
-            source_path=str(source),
-        )
-        assert not blocked_unknown_state["ok"]
         insert_inventory_drift_row(
             journal, os.getuid(), volume_uuid, device, released_drift_id
         )
@@ -403,10 +442,10 @@ def main():
         after = request(ipc, "status")
         assert after["ok"]
         status = after["result"]
-        assert status["active_mounts"] == 4
+        assert status["active_mounts"] == 3
         assert status["pending_cleanup"] == 0
         assert status["recoverable_stale_mounts"] == 0
-        assert status["unknown_blocking_mounts"] == 3
+        assert status["unknown_blocking_mounts"] == 2
         assert status["inventory_drift_mounts"] == 1
         assert not status["recovery_leases"]
         assert [row["lease_id"] for row in status["inventory_drift_leases"]] == [released_drift_id]
@@ -477,9 +516,9 @@ def main():
         blocked = wait_for_operation(control, blocked_start["result"]["operationId"])
         assert blocked["state"] == "failed"
         assert blocked["error"]["code"] == "snapshot_mount_helper.reconcile_required"
-        assert blocked["error"]["details"]["unknown"] == 3
+        assert blocked["error"]["details"]["unknown"] == 2
 
-        delete_fixture_rows(journal, [unknown_id, malformed_id, future_state_id])
+        delete_fixture_rows(journal, [unknown_id, malformed_id])
         ready = request(ipc, "status")
         assert ready["ok"]
         assert ready["result"]["active_mounts"] == 1

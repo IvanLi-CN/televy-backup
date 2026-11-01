@@ -986,8 +986,11 @@ fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<
                     .get("error")
                     .cloned()
                     .and_then(|value| {
-                        serde_json::from_value::<televy_backup_core::control::ControlError>(value)
-                        .ok()
+                        let parsed =
+                            serde_json::from_value::<televy_backup_core::control::ControlError>(
+                                value,
+                            );
+                        parsed.ok()
                     })
                     .unwrap_or_else(|| televy_backup_core::control::ControlError {
                         code: "snapshot_mount_helper.reconcile_failed".to_string(),
