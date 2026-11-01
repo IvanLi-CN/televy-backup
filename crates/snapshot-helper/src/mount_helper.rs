@@ -134,7 +134,7 @@ pub fn acquire_install_lock() -> Result<MutationFileLock, MountHelperError> {
 fn acquire_file_lock(path: PathBuf, description: &str) -> Result<MutationFileLock, MountHelperError> {
     let parent = path
         .parent()
-        .ok_or_else(|| MountHelperError::Protocol("mutation lock has no parent".into()))?;
+        .ok_or_else(|| MountHelperError::Protocol(format!("{description} has no parent")))?;
     ensure_root_directory(parent)?;
     if let Ok(metadata) = fs::symlink_metadata(&path)
         && (metadata.file_type().is_symlink() || !metadata.is_file())

@@ -187,15 +187,27 @@ fn install_asset_error(error: impl std::fmt::Display) -> CliError {
 }
 
 fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
-    if !fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return Ok(None);
+    match fs::symlink_metadata(path) {
+        Ok(_) if !safe_root_asset(path) => {
+            return Err(install_asset_error(format!(
+                "unsafe existing helper asset: {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(install_asset_error(error)),
     }
     let backup = path.with_extension(format!("backup-{}", std::process::id()));
-    if fs::symlink_metadata(&backup).is_ok() {
-        return Err(install_asset_error(format!(
-            "stale helper backup exists: {}",
-            backup.display()
-        )));
+    match fs::symlink_metadata(&backup) {
+        Ok(_) => {
+            return Err(install_asset_error(format!(
+                "stale helper backup exists: {}",
+                backup.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(install_asset_error(error)),
     }
     fs::rename(path, &backup).map_err(install_asset_error)?;
     Ok(Some(backup))
@@ -203,15 +215,84 @@ fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
 
 fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
     if let Some(backup) = backup {
+        if !safe_root_asset(&backup) {
+            return Err(install_asset_error(format!(
+                "unsafe helper backup cannot be restored: {}",
+                backup.display()
+            )));
+        }
+        match fs::symlink_metadata(path) {
+            Ok(_) if !safe_root_asset(path) => {
+                return Err(install_asset_error(format!(
+                    "unsafe helper asset blocks restore: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(install_asset_error(error)),
+            Ok(_) => {}
+        }
         fs::rename(backup, path).map_err(install_asset_error)?;
     }
     Ok(())
 }
 
-fn bootstrap_restored_helper() {
+fn bootstrap_restored_helper() -> Result<(), CliError> {
     if Path::new(MOUNT_HELPER_PLIST_PATH).is_file() {
-        let _ = launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH]);
+        launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
     }
+    Ok(())
+}
+
+fn restore_committed_assets(
+    binary_backup: Option<PathBuf>,
+    plist_backup: Option<PathBuf>,
+) -> Result<(), CliError> {
+    let mut failures = Vec::new();
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    for (label, path, backup) in [
+        ("binary", binary, binary_backup),
+        ("plist", plist, plist_backup),
+    ] {
+        match backup {
+            Some(backup) => {
+                if let Err(error) = restore_asset(path, Some(backup)) {
+                    failures.push(format!("{label} restore failed: {}", error.message));
+                }
+            }
+            None => match fs::symlink_metadata(path) {
+                Ok(_) if !safe_root_asset(path) => failures.push(format!(
+                    "unsafe candidate {label} blocks rollback: {}",
+                    path.display()
+                )),
+                Ok(_) => {
+                    if let Err(error) = fs::remove_file(path) {
+                        failures.push(format!("candidate {label} removal failed: {error}"));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => failures.push(format!(
+                    "candidate {label} inspection failed: {error}"
+                )),
+            },
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            failures.join("; "),
+        ))
+    }
+}
+
+fn rollback_failure(original: &CliError, rollback: CliError) -> CliError {
+    CliError::retryable(
+        "snapshot_mount_helper.install_rollback_failed",
+        format!("{}; rollback failed: {}", original.message, rollback.message),
+    )
 }
 
 fn commit_staged_assets(
@@ -224,39 +305,86 @@ fn commit_staged_assets(
     let old_plist = match backup_asset(plist) {
         Ok(backup) => backup,
         Err(error) => {
-            restore_asset(binary, old_binary)?;
-            bootstrap_restored_helper();
-            return Err(error);
+            return match restore_asset(binary, old_binary) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback_failure(&error, rollback)),
+            };
         }
     };
     if let Err(error) = fs::rename(staged_binary, binary) {
-        restore_asset(plist, old_plist)?;
-        restore_asset(binary, old_binary)?;
-        bootstrap_restored_helper();
-        return Err(install_asset_error(error));
+        let install_error = install_asset_error(error);
+        return match restore_committed_assets(old_binary, old_plist) {
+            Ok(()) => Err(install_error),
+            Err(rollback) => Err(rollback_failure(&install_error, rollback)),
+        };
     }
     if let Err(error) = fs::rename(staged_plist, plist) {
-        let _ = fs::remove_file(binary);
-        restore_asset(plist, old_plist)?;
-        restore_asset(binary, old_binary)?;
-        bootstrap_restored_helper();
-        return Err(install_asset_error(error));
+        let install_error = install_asset_error(error);
+        return match restore_committed_assets(old_binary, old_plist) {
+            Ok(()) => Err(install_error),
+            Err(rollback) => Err(rollback_failure(&install_error, rollback)),
+        };
     }
     Ok((old_binary, old_plist))
 }
 
-fn rollback_installed_assets(old_binary: Option<PathBuf>, old_plist: Option<PathBuf>) {
+fn rollback_installed_assets(
+    old_binary: Option<PathBuf>,
+    old_plist: Option<PathBuf>,
+) -> Result<(), CliError> {
+    let mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!("cannot reacquire the snapshot mount mutation lock: {error}"),
+        )
+    })?;
+    let status = mount_helper::status().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!("cannot verify the helper is idle before rollback: {error}"),
+        )
+    })?;
+    if status.active_mounts > 0 || status.pending_cleanup.is_some_and(|count| count > 0) {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!(
+                "cannot rollback while the helper reports {} active mount record(s) and {} pending cleanup record(s)",
+                status.active_mounts,
+                status.pending_cleanup.unwrap_or(0)
+            ),
+        ));
+    }
     let service = system_service_target();
-    let _ = bootout_for_mutation(
+    if let Err(error) = bootout_for_mutation(
         &service,
         "install rollback",
         "snapshot_mount_helper.install_failed",
-    );
-    let _ = fs::remove_file(MOUNT_HELPER_INSTALL_PATH);
-    let _ = fs::remove_file(MOUNT_HELPER_PLIST_PATH);
-    let _ = restore_asset(Path::new(MOUNT_HELPER_INSTALL_PATH), old_binary);
-    let _ = restore_asset(Path::new(MOUNT_HELPER_PLIST_PATH), old_plist);
-    bootstrap_restored_helper();
+    ) {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!("cannot stop the candidate helper before rollback: {}", error.message),
+        ));
+    }
+    let restore_result = restore_committed_assets(old_binary, old_plist);
+    drop(mutation_lock);
+    restore_result?;
+    bootstrap_restored_helper()
+}
+
+fn quarantine_uninstall_assets() -> Result<(Option<PathBuf>, Option<PathBuf>), CliError> {
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let old_plist = backup_asset(plist)?;
+    let old_binary = match backup_asset(binary) {
+        Ok(backup) => backup,
+        Err(error) => {
+            return match restore_asset(plist, old_plist) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback_failure(&error, rollback)),
+            };
+        }
+    };
+    Ok((old_binary, old_plist))
 }
 
 fn set_root_owner(path: &Path, description: &str) -> Result<(), CliError> {
@@ -865,7 +993,11 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         Ok(backups) => backups,
         Err(error) => {
             discard_staged(&[&staged_binary, &staged_plist]);
-            return Err(error);
+            drop(mutation_lock);
+            return match bootstrap_restored_helper() {
+                Ok(()) => Err(error),
+                Err(bootstrap_error) => Err(rollback_failure(&error, bootstrap_error)),
+            };
         }
     };
     drop(mutation_lock);
@@ -889,8 +1021,10 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     let status = match install_result {
         Ok(status) => status,
         Err(error) => {
-            rollback_installed_assets(old_binary, old_plist);
-            return Err(error);
+            return match rollback_installed_assets(old_binary, old_plist) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback_failure(&error, rollback)),
+            };
         }
     };
     if let Some(path) = old_binary {
@@ -938,22 +1072,32 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     }
     ensure_uninstall_safe(busy)?;
     let service = system_service_target();
-    bootout_for_mutation(
+    if let Err(error) = bootout_for_mutation(
         &service,
         "uninstall",
         "snapshot_mount_helper.uninstall_failed",
-    )?;
-    if Path::new(MOUNT_HELPER_PLIST_PATH).exists() {
-        fs::remove_file(MOUNT_HELPER_PLIST_PATH).map_err(|error| {
-            CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
-        })?;
+    ) {
+        return Err(error);
     }
-    if Path::new(MOUNT_HELPER_INSTALL_PATH).exists() {
-        fs::remove_file(MOUNT_HELPER_INSTALL_PATH).map_err(|error| {
-            CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
-        })?;
-    }
+    let (old_binary, old_plist) = match quarantine_uninstall_assets() {
+        Ok(backups) => backups,
+        Err(error) => {
+            drop(mutation_lock);
+            return match bootstrap_restored_helper() {
+                Ok(()) => Err(error),
+                Err(bootstrap_error) => Err(rollback_failure(&error, bootstrap_error)),
+            };
+        }
+    };
     drop(mutation_lock);
+    // Quarantined files are root-owned and no longer reachable from the launchd contract. Best
+    // effort cleanup is safe here; retaining one does not make the helper serviceable.
+    if let Some(path) = old_binary {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = old_plist {
+        let _ = fs::remove_file(path);
+    }
     if json_output {
         println!(
             "{}",
