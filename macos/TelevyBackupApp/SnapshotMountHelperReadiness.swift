@@ -201,6 +201,10 @@ struct SnapshotMountHelperReadiness {
         // privileged install transaction performs its own journal/identity
         // checks and fails closed if records are active or ambiguous.
         guard reachable else { return true }
+        // Helper replacement and removal mutate the same system boundary as Snapshot Access.
+        // Keep the action disabled while a lease or cleanup retry is active; the CLI repeats
+        // this check immediately before bootout so a stale UI cannot bypass the boundary.
+        guard snapshotAccessActiveLeases == 0 && snapshotAccessPendingCleanup == 0 else { return false }
         if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe || isStaleCurrentPartialClassification { return true }
         if classificationKnown {
             guard activeMounts != nil else { return false }

@@ -128,6 +128,18 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(!accessPending.canRetryPendingCleanup, "Snapshot Access cleanup must gate helper cleanup retry")
         expectReadiness(accessPending.title == "Snapshot Access cleanup required", "Snapshot Access cleanup must be visible as the blocking operation")
+        let staleAccessBusy = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.0", activeMounts: 0,
+            pendingCleanup: 0, snapshotAccessActiveLeases: 1
+        )
+        expectReadiness(!staleAccessBusy.canUpdate, "Snapshot Access active leases must disable helper replacement")
+        let staleAccessCleanup = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.0", activeMounts: 0,
+            pendingCleanup: 0, snapshotAccessPendingCleanup: 1
+        )
+        expectReadiness(!staleAccessCleanup.canUpdate, "Snapshot Access cleanup retries must disable helper replacement")
         let pendingPrevious = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.1",

@@ -25,7 +25,7 @@ fn system_service_target() -> String {
     format!("system/{MOUNT_HELPER_LABEL}")
 }
 
-fn current_executable_sibling() -> Result<PathBuf, CliError> {
+fn current_executable_sibling() -> Result<fs::File, CliError> {
     let executable = std::env::current_exe().map_err(|error| {
         CliError::new(
             "snapshot_mount_helper.executable_unavailable",
@@ -39,16 +39,29 @@ fn current_executable_sibling() -> Result<PathBuf, CliError> {
         )
     })?;
     let helper = parent.join("televybackup-snapshot-mount-helper");
-    if !fs::symlink_metadata(&helper).is_ok_and(|metadata| metadata.is_file()) {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&helper)
+        .map_err(|error| {
+            CliError::new(
+                "snapshot_mount_helper.executable_unavailable",
+                format!("cannot open snapshot mount helper binary: {error}"),
+            )
+        })?;
+    let metadata = file.metadata().map_err(|error| {
+        CliError::new(
+            "snapshot_mount_helper.executable_unavailable",
+            format!("cannot inspect snapshot mount helper binary: {error}"),
+        )
+    })?;
+    if !metadata.is_file() || metadata.mode() & 0o022 != 0 {
         return Err(CliError::new(
             "snapshot_mount_helper.executable_unavailable",
-            format!(
-                "snapshot mount helper binary not found: {}",
-                helper.display()
-            ),
+            "snapshot mount helper binary is not a safe regular file",
         ));
     }
-    Ok(helper)
+    Ok(file)
 }
 
 fn require_root() -> Result<(), CliError> {
@@ -96,7 +109,7 @@ fn plist_contents() -> &'static str {
 "#
 }
 
-fn stage_copy(source: &Path, destination: &Path) -> Result<(PathBuf, String), CliError> {
+fn stage_copy(source: &mut fs::File, destination: &Path) -> Result<(PathBuf, String), CliError> {
     let parent = destination.parent().ok_or_else(|| {
         CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -107,11 +120,6 @@ fn stage_copy(source: &Path, destination: &Path) -> Result<(PathBuf, String), Cl
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = destination.with_extension(format!("tmp-{}", std::process::id()));
-    let mut source_file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(source)
-        .map_err(install_asset_error)?;
     let mut staged_file = match OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -127,7 +135,7 @@ fn stage_copy(source: &Path, destination: &Path) -> Result<(PathBuf, String), Cl
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        let count = match source_file.read(&mut buffer) {
+        let count = match source.read(&mut buffer) {
             Ok(count) => count,
             Err(error) => {
                 let _ = fs::remove_file(&staged);
@@ -637,14 +645,10 @@ fn rollback_installed_assets(
     })?;
     match mount_helper::status() {
         Ok(status) => {
-            if status.active_mounts > 0 || status.pending_cleanup.is_some_and(|count| count > 0) {
+            if let Some(error) = busy_error("rollback the snapshot mount helper", &status) {
                 return Err(CliError::retryable(
                     "snapshot_mount_helper.install_rollback_failed",
-                    format!(
-                        "cannot rollback while the helper reports {} active mount record(s) and {} pending cleanup record(s)",
-                        status.active_mounts,
-                        status.pending_cleanup.unwrap_or(0)
-                    ),
+                    format!("cannot rollback while helper status is not clear: {}", error.message),
                 ));
             }
         }
@@ -1152,6 +1156,20 @@ fn snapshot_access_status_for_maintenance(
     })
 }
 
+fn ensure_snapshot_access_idle_for_mutation(
+    config_dir: &Path,
+    data_dir: &Path,
+    operation: &str,
+) -> Result<(), CliError> {
+    let status = snapshot_access_status_for_maintenance(config_dir, data_dir, operation)?;
+    ensure_snapshot_access_idle(&status).map_err(|error| {
+        CliError::retryable(
+            error.code,
+            format!("cannot {operation}: {}", error.message),
+        )
+    })
+}
+
 fn wait_for_snapshot_access_idle(
     config_dir: &Path,
     data_dir: &Path,
@@ -1335,10 +1353,17 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         }
     }
     recover_interrupted_helper_transaction(config_dir, data_dir)?;
+    if !replace_legacy_helper {
+        ensure_snapshot_access_idle_for_mutation(
+            config_dir,
+            data_dir,
+            "install or update the snapshot mount helper",
+        )?;
+    }
     let (staged_binary, staged_plist, candidate_hash) = {
-        let source = current_executable_sibling()?;
+        let mut source = current_executable_sibling()?;
         let (staged_binary, candidate_hash) =
-            stage_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
+            stage_copy(&mut source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
         let staged_plist = match stage_write(
             Path::new(MOUNT_HELPER_PLIST_PATH),
             plist_contents().as_bytes(),
@@ -1490,6 +1515,11 @@ pub fn uninstall(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
     }
     recover_interrupted_helper_transaction(config_dir, data_dir)?;
     ensure_uninstall_safe(busy)?;
+    ensure_snapshot_access_idle_for_mutation(
+        config_dir,
+        data_dir,
+        "uninstall the snapshot mount helper",
+    )?;
     let service = system_service_target();
     bootout_for_mutation(
         &service,
