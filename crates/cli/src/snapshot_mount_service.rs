@@ -857,7 +857,6 @@ fn classify_busy_status(
                 && commit.len() == 40
                 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
-        && status.active_mounts > 0
         && status.pending_cleanup.is_some()
         && status.live_mounts.is_some()
         && status.recoverable_stale_mounts.is_some()
@@ -2089,6 +2088,26 @@ mod tests {
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn stale_current_helper_with_zero_rows_enters_guarded_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 0,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
             inventory_drift_mounts: None,
             ..Default::default()
         };

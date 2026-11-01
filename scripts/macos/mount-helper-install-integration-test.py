@@ -165,6 +165,8 @@ def main():
     process = None
     journal_locker = None
     root = None
+    candidate_helper = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
+    candidate_helper_original = candidate_helper.read_bytes()
     # Preserve all fixture state if process shutdown cannot be verified.
     temp = tempfile.mkdtemp(prefix="televy-helper-install-ci-", dir="/private/tmp")
     fixture = Path(temp)
@@ -348,7 +350,6 @@ while True:
         # Same privileged CLI entrypoint as the GUI's password-authorized command.
         if args.bootstrap_failure_rollback:
             assert args.require_readiness, "bootstrap failure fixture requires the candidate readiness check"
-            candidate_helper = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
             candidate_helper.write_text("#!/bin/sh\nexit 78\n")
             candidate_helper.chmod(0o755)
         if args.delay_startup:
@@ -400,7 +401,10 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         if args.orphaned_backup_recovery:
             assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
             assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
-            marker = json.loads(old_helper_marker.read_text())
+            marker = wait_for(
+                lambda: json.loads(old_helper_marker.read_text()),
+                lambda value: value.get("binary") is not None and value.get("plist") is not None,
+            )
             assert marker["binary"] == old_binary_hash
             assert marker["plist"] == old_plist_hash
             print("PASS: interrupted helper backups were recovered before the candidate install", flush=True)
@@ -447,6 +451,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         def absent(reply):
             return reply.returncode != 0 and "could not find service" in (reply.stdout + reply.stderr).lower()
         wait_for(lambda: run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False), absent)
+        candidate_helper.write_bytes(candidate_helper_original)
+        candidate_helper.chmod(0o755)
         # These targets were proved absent before this test created them.
         run(
             "sudo",
