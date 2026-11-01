@@ -278,15 +278,28 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
         ));
     }
     if service_state == Some(HelperServiceState::Loaded) && !backups.is_empty() {
-        let candidate_ready = match mount_helper::status() {
-            Ok(status) => {
-                status.component_version.as_deref()
-                    == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-                    && status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
+        let status = match mount_helper::status() {
+            Ok(status) => status,
+            Err(_) => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.status_unavailable",
+                    "cannot recover an interrupted helper while its loaded service status is unavailable",
+                ));
             }
-            Err(_) => false,
         };
+        let candidate_ready = status.component_version.as_deref()
+            == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            && status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
         if !candidate_ready {
+            if !matches!(
+                classify_busy_status("recover interrupted helper transaction", &status),
+                Ok(BusyCheck::Clear)
+            ) {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.busy",
+                    "cannot recover an interrupted helper while mount records remain active or unclassified",
+                ));
+            }
             let complete_backup_set = paths.iter().all(|path| {
                 backups
                     .iter()
