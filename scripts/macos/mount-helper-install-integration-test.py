@@ -22,6 +22,8 @@ BINARY = Path("/Library/PrivilegedHelperTools") / LABEL
 PLIST = Path("/Library/LaunchDaemons") / (LABEL + ".plist")
 MOUNT_SOCKET = Path("/private/var/run/televybackup/snapshot-mount-helper.sock")
 JOURNAL = Path("/var/db/televybackup/snapshot-mount-helper")
+JOURNAL_SENTINEL_KEY = "ci-fixture"
+JOURNAL_SENTINEL_VALUE = "journal-preserved-v1"
 
 
 def run(*args, check=True):
@@ -113,6 +115,48 @@ os.chmod(db, 0o600)
         lease_id,
     )
     return lease_id
+
+
+def seed_journal_sentinel():
+    """Create fixture-only journal content that install and uninstall must preserve."""
+    script = r'''
+import pathlib, sqlite3, sys
+journal_dir = pathlib.Path(sys.argv[1])
+journal_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+db = journal_dir / "journal.sqlite"
+with sqlite3.connect(db) as connection:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ci_fixture_sentinel (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO ci_fixture_sentinel (key, value) VALUES (?, ?)",
+        (sys.argv[2], sys.argv[3]),
+    )
+    connection.commit()
+db.chmod(0o600)
+'''
+    run(
+        "sudo", "-n", "/usr/bin/python3", "-c", script,
+        str(JOURNAL), JOURNAL_SENTINEL_KEY, JOURNAL_SENTINEL_VALUE,
+    )
+
+
+def read_journal_sentinel():
+    script = r'''
+import pathlib, sqlite3, sys
+db = pathlib.Path(sys.argv[1]) / "journal.sqlite"
+with sqlite3.connect(db) as connection:
+    row = connection.execute(
+        "SELECT value FROM ci_fixture_sentinel WHERE key = ?", (sys.argv[2],)
+    ).fetchone()
+if row is None:
+    raise SystemExit("journal sentinel is missing")
+print(row[0])
+'''
+    return run(
+        "sudo", "-n", "/usr/bin/python3", "-c", script,
+        str(JOURNAL), JOURNAL_SENTINEL_KEY,
+    ).stdout.strip()
 
 
 def main():
@@ -292,6 +336,8 @@ while True:
         run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
         run("sudo", "-n", "chown", "root:wheel", str(root_plist))
         run("sudo", "-n", "chmod", "644", str(root_plist))
+    if args.bootstrap_failure_rollback:
+        seed_journal_sentinel()
     try:
         if not args.orphaned_backup_recovery:
             run(
@@ -326,6 +372,7 @@ while True:
         elif args.uninstall:
             assert before["result"]["mount_helper_reachable"] is False
             uninstall_sentinel = JOURNAL / "uninstall-sentinel"
+            seed_journal_sentinel()
             run("sudo", "-n", "mkdir", "-p", str(JOURNAL))
             run("sudo", "-n", "touch", str(uninstall_sentinel))
             run("sudo", "-n", "chown", "root:wheel", str(uninstall_sentinel))
@@ -402,6 +449,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert restored["result"]["helper_version"] == "0.5.0"
             assert hashlib.sha256(BINARY.read_bytes()).hexdigest() == old_binary_hash
             assert hashlib.sha256(PLIST.read_bytes()).hexdigest() == old_plist_hash
+            assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
             assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
             print("PASS: failed candidate bootstrap restores the previous helper and clears quarantine backups", flush=True)
         else:
@@ -462,6 +510,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert not BINARY.exists() and not PLIST.exists()
             assert uninstall_sentinel is not None and uninstall_sentinel.exists()
             assert JOURNAL.is_dir()
+            assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
             after = wait_for(
                 lambda: request(access_socket, metadata["protocolVersion"]),
                 lambda reply: reply.get("result", {}).get("mount_helper_reachable") is False,
