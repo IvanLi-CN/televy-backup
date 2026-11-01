@@ -1194,9 +1194,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
         };
         (staged_binary, staged_plist, candidate_hash)
     };
-    if replace_legacy_helper
-        && let Err(error) = prepare_legacy_upgrade(config_dir, data_dir)
-    {
+    if replace_legacy_helper && let Err(error) = prepare_legacy_upgrade(config_dir, data_dir) {
         discard_staged(&[&staged_binary, &staged_plist]);
         return Err(error);
     }
