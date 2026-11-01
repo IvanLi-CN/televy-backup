@@ -400,7 +400,7 @@ def main():
             source_path=str(source),
         )
         assert not malformed_reserve["ok"]
-        assert malformed_reserve["code"] == "invalid_request"
+        assert malformed_reserve["code"] == "invalid_request", malformed_reserve
         assert "tombstone inventory changed" in malformed_reserve["message"]
         delete_fixture_rows(journal, [malformed_released_id])
         write_future_state_row(journal, os.getuid(), volume_uuid, device, future_state_id)
@@ -414,7 +414,7 @@ def main():
             source_path=str(source),
         )
         assert not future_reserve["ok"]
-        assert future_reserve["code"] == "invalid_request"
+        assert future_reserve["code"] == "invalid_request", future_reserve
         assert "active mount or pending snapshot cleanup" in future_reserve["message"]
         delete_fixture_rows(journal, [future_state_id])
         write_fixture_rows(
