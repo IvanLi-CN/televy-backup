@@ -1181,7 +1181,12 @@ struct SettingsWindowRootView: View {
                             install: installSnapshotMountHelper,
                             recover: recoverSnapshotMountRecords,
                             retryCleanup: retrySnapshotCleanup,
-                            reconcileInventory: reconcileSnapshotInventory
+                            reconcileInventory: { method in
+                                performSnapshotMountOperation(
+                                    method: method,
+                                    operationLabel: "Snapshot inventory reconciliation"
+                                )
+                            }
                         )
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1276,13 +1281,6 @@ struct SettingsWindowRootView: View {
         performSnapshotMountOperation(
             method: "snapshot.mount_helper.retry_cleanup",
             operationLabel: "Snapshot cleanup retry"
-        )
-    }
-
-    private func reconcileSnapshotInventory() {
-        performSnapshotMountOperation(
-            method: "snapshot.mount_helper.reconcile_inventory",
-            operationLabel: "Snapshot inventory reconciliation"
         )
     }
 

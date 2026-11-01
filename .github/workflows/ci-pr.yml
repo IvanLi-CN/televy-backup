@@ -261,6 +261,7 @@ jobs:
           python3 scripts/macos/test-snapshot-mount-recovery.py \
             --access target/debug/televybackup-snapshot-access \
             --daemon target/debug/televybackupd \
+            --cli target/debug/televybackup \
             --helper target/debug/televybackup-snapshot-mount-helper
 
       - name: Preserve strict Snapshot Access error code

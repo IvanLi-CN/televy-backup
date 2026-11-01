@@ -11,6 +11,9 @@ mount_helper_source="$root_dir/crates/snapshot-helper/src/mount_helper.rs"
 access_source="$root_dir/crates/snapshot-helper/src/main.rs"
 control_source="$root_dir/crates/daemon/src/control_ipc.rs"
 recovery_fixture_source="$root_dir/scripts/macos/test-snapshot-mount-recovery.py"
+control_action_source="$root_dir/macos/TelevyBackupApp/SnapshotMountHelperControlAction.swift"
+control_action_test_source="$root_dir/macos/TelevyBackupAppTests/SnapshotMountHelperControlActionTests.swift"
+status_view_source="$root_dir/macos/TelevyBackupApp/SnapshotMountHelperStatusView.swift"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$main_workflow"
@@ -45,6 +48,9 @@ mount_helper_text="$(<"$mount_helper_source")"
 access_text="$(<"$access_source")"
 control_text="$(<"$control_source")"
 recovery_fixture_text="$(<"$recovery_fixture_source")"
+control_action_text="$(<"$control_action_source")"
+control_action_test_text="$(<"$control_action_test_source")"
+status_view_text="$(<"$status_view_source")"
 
 assert_contains "manual regression job" "$pr_workflow_text" "manual-snapshot-regression"
 assert_contains "manual regression dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
@@ -89,8 +95,10 @@ assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publi
 assert_contains "hosted stale mount recovery fixture" "$main_workflow_text" "test-snapshot-mount-recovery.py"
 assert_contains "PR recovery fixture daemon binary" "$pr_workflow_text" "--daemon target/debug/televybackupd"
 assert_contains "PR recovery fixture access binary" "$pr_workflow_text" "--access target/debug/televybackup-snapshot-access"
+assert_contains "PR recovery fixture CLI binary" "$pr_workflow_text" "--cli target/debug/televybackup"
 assert_contains "main recovery fixture daemon binary" "$main_workflow_text" "--daemon target/debug/televybackupd"
 assert_contains "main recovery fixture access binary" "$main_workflow_text" "--access target/debug/televybackup-snapshot-access"
+assert_contains "main recovery fixture CLI binary" "$main_workflow_text" "--cli target/debug/televybackup"
 # The single-quoted needle intentionally checks the literal shell source.
 # shellcheck disable=SC2016
 assert_contains "orchestrator narrow root cleanup" "$ci_text" 'sudo -n rm -rf -- "$mount_runtime_root"'
@@ -114,6 +122,13 @@ assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot
 assert_contains "recovery fixture daemon control request" "$recovery_fixture_text" '"snapshot.mount_helper.reconcile_inventory"'
 assert_contains "recovery fixture operation polling" "$recovery_fixture_text" '"operation.get"'
 assert_contains "recovery fixture unknown blocker gate" "$recovery_fixture_text" '"snapshot_mount_helper.reconcile_required"'
+assert_contains "recovery fixture CLI invocation" "$recovery_fixture_text" '"snapshot-mount-helper"'
+assert_contains "recovery fixture CLI JSON assertion" "$recovery_fixture_text" 'cli_payload["inventoryDrift"] == 0'
+assert_contains "Swift reconcile action method" "$control_action_text" 'snapshot.mount_helper.reconcile_inventory'
+assert_contains "Swift reconcile action callback" "$control_action_text" 'static func reconcileInventory(using send:'
+assert_contains "Swift reconcile action test" "$control_action_test_text" 'SnapshotMountHelperControlAction.reconcileInventory'
+assert_contains "Swift reconcile button action" "$status_view_text" 'SnapshotMountHelperControlAction.reconcileInventory(using: reconcileInventory)'
+assert_contains "Swift reconcile button identifier" "$status_view_text" 'snapshot-mount-helper-reconcile-inventory'
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
 assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'

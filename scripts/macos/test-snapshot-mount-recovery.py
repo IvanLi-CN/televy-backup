@@ -15,8 +15,8 @@ import time
 import uuid
 
 
-def run(*args, check=True):
-    return subprocess.run(args, capture_output=True, check=check, timeout=45)
+def run(*args, check=True, env=None):
+    return subprocess.run(args, capture_output=True, check=check, timeout=45, env=env)
 
 
 def request(path, method, **fields):
@@ -149,17 +149,63 @@ connection.close()
     )
 
 
+def insert_inventory_drift_row(journal, uid, volume_uuid, device, lease_id):
+    script = '''
+import sqlite3, sys
+journal, uid, volume_uuid, device, lease_id = sys.argv[1:]
+connection = sqlite3.connect(journal)
+connection.execute(
+    """
+        INSERT INTO mounts (
+            lease_id, uid, volume_uuid, device_identifier, source_path,
+            snapshot_name, mount_root, snapshot_manifest, reservation_manifest,
+            reservation_manifest_valid, state, created_at, last_renewed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
+    """,
+    (
+        lease_id,
+        int(uid),
+        volume_uuid,
+        device,
+        '',
+        '',
+        '',
+        '[]',
+        '[{"device_identifier":"%s","uuid":"00000000-0000-0000-0000-000000000001"}]' % device,
+        1,
+        'released',
+    ),
+)
+connection.commit()
+connection.close()
+'''
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(journal),
+        str(uid),
+        volume_uuid,
+        device,
+        lease_id,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--helper", required=True, type=Path)
     parser.add_argument("--access", required=True, type=Path)
     parser.add_argument("--daemon", required=True, type=Path)
+    parser.add_argument("--cli", required=True, type=Path)
     args = parser.parse_args()
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
     helper = args.helper.resolve(strict=True)
     access = args.access.resolve(strict=True)
     daemon = args.daemon.resolve(strict=True)
+    cli = args.cli.resolve(strict=True)
     fixture = Path(tempfile.mkdtemp(prefix="tbs-reconcile-", dir="/private/tmp"))
     os.chmod(fixture, 0o755)
     label = "com.ivan.televybackup.ci-reconcile-" + uuid.uuid4().hex
@@ -351,8 +397,40 @@ def main():
         assert reconciled["result"]["inventoryDrift"] == 0
         final = request(ipc, "status")
         assert final["ok"] and final["result"]["active_mounts"] == 0
+        cli_drift_id = str(uuid.uuid4())
+        insert_inventory_drift_row(journal, os.getuid(), volume_uuid, device, cli_drift_id)
+        cli_environment = {
+            **os.environ,
+            "TELEVYBACKUP_CONFIG_DIR": str(config),
+            "TELEVYBACKUP_DATA_DIR": str(data),
+            "TELEVYBACKUP_DISABLE_KEYCHAIN": "1",
+            "TELEVYBACKUP_SNAPSHOT_SOCKET": str(access_socket),
+            "TELEVYBACKUP_SNAPSHOT_JOURNAL": str(access_journal),
+            "TELEVYBACKUP_SNAPSHOT_MOUNT_SOCKET": str(ipc),
+            "TELEVYBACKUP_SNAPSHOT_MOUNT_JOURNAL": str(journal),
+        }
+        cli_result = run(
+            str(cli),
+            "--json",
+            "--config-dir",
+            str(config),
+            "--data-dir",
+            str(data),
+            "snapshot-mount-helper",
+            "reconcile-inventory",
+            check=False,
+            env=cli_environment,
+        )
+        assert cli_result.returncode == 0, cli_result.stderr.decode(errors="replace")
+        cli_payload = json.loads(cli_result.stdout.decode())
+        assert cli_payload["reconciled"] is True
+        assert cli_payload["records"] == 1
+        assert cli_payload["remaining"] == 0
+        assert cli_payload["inventoryDrift"] == 0
+        cli_final = request(ipc, "status")
+        assert cli_final["ok"] and cli_final["result"]["active_mounts"] == 0
         print(
-            "PASS: helper classification, daemon reconcile gating, and successful inventory reconciliation verified; unknown rows remained blocking until fixture removal",
+            "PASS: helper classification, daemon reconcile gating, CLI inventory reconciliation, and unknown blocker preservation verified",
             flush=True,
         )
     finally:

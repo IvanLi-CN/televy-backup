@@ -17,7 +17,7 @@ struct SnapshotMountHelperStatusView: View {
     let install: () -> Void
     let recover: () -> Void
     let retryCleanup: () -> Void
-    let reconcileInventory: () -> Void
+    let reconcileInventory: (String) -> Void
 
     var body: some View {
         let updateBlockReason = !readiness.isReady
@@ -83,8 +83,12 @@ struct SnapshotMountHelperStatusView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Reconcile snapshot inventory", action: reconcileInventory)
+                Button(
+                    "Reconcile snapshot inventory",
+                    action: SnapshotMountHelperControlAction.reconcileInventory(using: reconcileInventory)
+                )
                     .buttonStyle(.bordered)
+                    .accessibilityIdentifier("snapshot-mount-helper-reconcile-inventory")
                     .disabled(busy || !readiness.canReconcileInventory)
             }
             if !readiness.classificationKnown && readiness.isReady {

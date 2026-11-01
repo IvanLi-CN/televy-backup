@@ -139,7 +139,7 @@ enum BackupFailureHistoryPreview {
                             install: {},
                             recover: {},
                             retryCleanup: {},
-                            reconcileInventory: {}
+                            reconcileInventory: { _ in }
                         )
                     }
                 }
@@ -180,7 +180,7 @@ enum BackupFailureHistoryPreview {
                     install: {},
                     recover: {},
                     retryCleanup: {},
-                    reconcileInventory: {}
+                    reconcileInventory: { _ in }
                 )
             }
             .padding(24)
