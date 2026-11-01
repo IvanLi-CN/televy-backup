@@ -291,7 +291,7 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), test))]
 fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, CliError> {
     let pending_cleanup = status.pending_cleanup.ok_or_else(|| {
         CliError::retryable(
@@ -319,7 +319,7 @@ fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, Cli
         .collect())
 }
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), test))]
 fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
