@@ -72,8 +72,14 @@ def wait_for_operation(path, operation_id):
     raise AssertionError("daemon operation did not reach a terminal state")
 
 
+def bootout_service(service):
+    result = run("sudo", "-n", "launchctl", "bootout", "system", service, check=False)
+    if result.returncode not in (0, 5):
+        result.check_returncode()
+
+
 def restart_root_service(service, plist, socket_path):
-    run("sudo", "-n", "launchctl", "bootout", "system", service)
+    bootout_service(service)
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         if run("sudo", "-n", "launchctl", "print", service, check=False).returncode != 0:
@@ -584,7 +590,7 @@ def main():
                 access_process.kill()
                 access_process.wait(timeout=10)
         if loaded:
-            run("sudo", "-n", "launchctl", "bootout", service)
+            bootout_service(service)
             stopped = run("sudo", "-n", "launchctl", "print", service, check=False)
             assert (
                 stopped.returncode != 0 and b"Could not find service" in stopped.stderr
