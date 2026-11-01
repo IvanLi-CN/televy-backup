@@ -238,7 +238,16 @@ jobs:
           gh release download v0.9.9-rc.122 --repo "${GITHUB_REPOSITORY}" \
             --pattern TelevyBackup-0.9.9-rc.122.dmg --pattern BUILD-MANIFEST.json --pattern SHA256SUMS \
             --dir "${fixture}/download"
-          (cd "${fixture}/download"; grep 'TelevyBackup-0.9.9-rc.122.dmg$' SHA256SUMS | shasum -a 256 -c -)
+          git fetch --force origin \
+            refs/tags/v0.9.9-rc.122:refs/tags/v0.9.9-rc.122
+          python3 .github/scripts/release_chain.py verify-tag-provenance \
+            --tag v0.9.9-rc.122
+          source_tag_commit="$(git rev-list -n 1 v0.9.9-rc.122^{commit})"
+          python3 .github/scripts/release_helper.py verify-assets \
+            --asset-dir "${fixture}/download" \
+            --lock packaging/macos/snapshot-components.lock.json \
+            --source-tag v0.9.9-rc.122 \
+            --expected-source-commit "${source_tag_commit}"
           hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" "${fixture}/download/TelevyBackup-0.9.9-rc.122.dmg"
           trap 'hdiutil detach "${fixture}/mount" >/dev/null' EXIT
           cp -R "${fixture}/mount/TelevyBackup.app" "${fixture}/TelevyBackup.app"
