@@ -216,7 +216,8 @@ jobs:
           fixture="${RUNNER_TEMP}/mount-helper-install-release"
           mkdir -p "${fixture}/download" "${fixture}/mount"
           gh release download v0.9.9-rc.118 --repo "${GITHUB_REPOSITORY}" \
-            --pattern TelevyBackup-0.9.9-rc.118.dmg --dir "${fixture}/download"
+            --pattern TelevyBackup-0.9.9-rc.118.dmg --pattern SHA256SUMS --dir "${fixture}/download"
+          (cd "${fixture}/download"; grep 'TelevyBackup-0.9.9-rc.118.dmg$' SHA256SUMS | shasum -a 256 -c -)
           hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" \
             "${fixture}/download/TelevyBackup-0.9.9-rc.118.dmg"
           trap 'hdiutil detach "${fixture}/mount" >/dev/null' EXIT
