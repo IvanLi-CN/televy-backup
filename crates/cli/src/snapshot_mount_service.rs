@@ -39,7 +39,7 @@ fn current_executable_sibling() -> Result<PathBuf, CliError> {
         )
     })?;
     let helper = parent.join("televybackup-snapshot-mount-helper");
-    if !helper.is_file() {
+    if !fs::symlink_metadata(&helper).is_ok_and(|metadata| metadata.is_file()) {
         return Err(CliError::new(
             "snapshot_mount_helper.executable_unavailable",
             format!(
@@ -96,7 +96,7 @@ fn plist_contents() -> &'static str {
 "#
 }
 
-fn stage_copy(source: &Path, destination: &Path) -> Result<PathBuf, CliError> {
+fn stage_copy(source: &Path, destination: &Path) -> Result<(PathBuf, String), CliError> {
     let parent = destination.parent().ok_or_else(|| {
         CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -120,14 +120,28 @@ fn stage_copy(source: &Path, destination: &Path) -> Result<PathBuf, CliError> {
             return Err(install_asset_error(error));
         }
     };
-    if let Err(error) = std::io::copy(&mut source_file, &mut staged_file)
-        .and_then(|_| staged_file.sync_all())
-    {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match source_file.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                let _ = fs::remove_file(&staged);
+                return Err(install_asset_error(error));
+            }
+        };
+        if count == 0 {
+            break;
+        }
+        if let Err(error) = staged_file.write_all(&buffer[..count]) {
+            let _ = fs::remove_file(&staged);
+            return Err(install_asset_error(error));
+        }
+        digest.update(&buffer[..count]);
+    }
+    if let Err(error) = staged_file.sync_all() {
         let _ = fs::remove_file(&staged);
-        return Err(CliError::new(
-            "snapshot_mount_helper.install_failed",
-            error.to_string(),
-        ));
+        return Err(install_asset_error(error));
     }
     if let Err(error) = staged_file.set_permissions(fs::Permissions::from_mode(0o755)) {
         let _ = fs::remove_file(&staged);
@@ -140,7 +154,7 @@ fn stage_copy(source: &Path, destination: &Path) -> Result<PathBuf, CliError> {
         let _ = fs::remove_file(&staged);
         return Err(error);
     }
-    Ok(staged)
+    Ok((staged, format!("{:x}", digest.finalize())))
 }
 
 fn stage_write(path: &Path, contents: &[u8]) -> Result<PathBuf, CliError> {
@@ -230,6 +244,27 @@ fn backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
     Ok(candidates)
 }
 
+fn staged_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| install_asset_error("helper asset has no parent"))?;
+    let prefix = format!("{}tmp-", backup_prefix(path)?);
+    let mut candidates = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(install_asset_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(install_asset_error)?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
 fn quarantine_backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
     let parent = path
         .parent()
@@ -260,6 +295,7 @@ fn recover_interrupted_helper_transaction(
     let paths = [binary, plist];
     let mut backups = Vec::new();
     let mut quarantine_backups = Vec::new();
+    let mut staged_files = Vec::new();
     for path in paths {
         for backup in backup_candidates(path)? {
             if !safe_root_asset(&backup) {
@@ -279,9 +315,19 @@ fn recover_interrupted_helper_transaction(
             }
             quarantine_backups.push((path, backup));
         }
+        for staged in staged_candidates(path)? {
+            if !safe_root_asset(&staged) {
+                return Err(install_asset_error(format!(
+                    "unsafe helper staging file blocks recovery: {}",
+                    staged.display()
+                )));
+            }
+            staged_files.push(staged);
+        }
     }
     let mut service_state = if backups.is_empty()
         && quarantine_backups.is_empty()
+        && staged_files.is_empty()
         && safe_root_asset(binary) == safe_root_asset(plist)
     {
         None
@@ -293,6 +339,9 @@ fn recover_interrupted_helper_transaction(
             "snapshot_mount_helper.status_unavailable",
             "cannot recover interrupted helper assets while the launchd service state is unknown",
         ));
+    }
+    for staged in staged_files {
+        fs::remove_file(staged).map_err(install_asset_error)?;
     }
     if service_state == Some(HelperServiceState::Loaded) && !backups.is_empty() {
         let candidate_ready = match mount_helper::status() {
@@ -571,6 +620,8 @@ fn commit_staged_assets(
 }
 
 fn rollback_installed_assets(
+    config_dir: &Path,
+    data_dir: &Path,
     old_binary: Option<PathBuf>,
     old_plist: Option<PathBuf>,
 ) -> Result<(), CliError> {
@@ -603,6 +654,29 @@ fn rollback_installed_assets(
                     ),
                 ));
             }
+            let access_status = snapshot_access_status_for_maintenance(
+                config_dir,
+                data_dir,
+                "rolling back the snapshot mount helper",
+            )
+            .map_err(|access_error| {
+                CliError::retryable(
+                    "snapshot_mount_helper.install_rollback_failed",
+                    format!(
+                        "cannot verify Snapshot Access is idle before rollback: {}",
+                        access_error.message
+                    ),
+                )
+            })?;
+            ensure_snapshot_access_idle(&access_status).map_err(|access_error| {
+                CliError::retryable(
+                    "snapshot_mount_helper.install_rollback_failed",
+                    format!(
+                        "cannot rollback while Snapshot Access is not idle: {}",
+                        access_error.message
+                    ),
+                )
+            })?;
             // A failed bootstrap can leave launchd with an absent or loaded-but-unreachable
             // candidate. The mutation lock prevents new journal-changing requests while the
             // service is booted out, and the restored helper will recover any preserved journal
@@ -1255,8 +1329,8 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     recover_interrupted_helper_transaction(config_dir, data_dir)?;
     let (staged_binary, staged_plist, candidate_hash) = {
         let source = current_executable_sibling()?;
-        let candidate_hash = helper_sha256(&source)?;
-        let staged_binary = stage_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
+        let (staged_binary, candidate_hash) =
+            stage_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
         let staged_plist = match stage_write(
             Path::new(MOUNT_HELPER_PLIST_PATH),
             plist_contents().as_bytes(),
@@ -1356,7 +1430,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     let status = match install_result {
         Ok(status) => status,
         Err(error) => {
-            return match rollback_installed_assets(old_binary, old_plist) {
+            return match rollback_installed_assets(config_dir, data_dir, old_binary, old_plist) {
                 Ok(()) => Err(error),
                 Err(rollback) => Err(rollback_failure(&error, rollback)),
             };
