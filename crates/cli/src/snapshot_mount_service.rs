@@ -263,7 +263,7 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
             quarantine_backups.push((path, backup));
         }
     }
-    let service_state = if backups.is_empty()
+    let mut service_state = if backups.is_empty()
         && quarantine_backups.is_empty()
         && safe_root_asset(binary) == safe_root_asset(plist)
     {
@@ -276,6 +276,37 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
             "snapshot_mount_helper.status_unavailable",
             "cannot recover interrupted helper assets while the launchd service state is unknown",
         ));
+    }
+    if service_state == Some(HelperServiceState::Loaded) && !backups.is_empty() {
+        let candidate_ready = match mount_helper::status() {
+            Ok(status) => {
+                status.component_version.as_deref()
+                    == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+                    && status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
+            }
+            Err(_) => false,
+        };
+        if !candidate_ready {
+            let complete_backup_set = paths.iter().all(|path| {
+                backups
+                    .iter()
+                    .filter(|(candidate, _)| candidate.as_os_str() == path.as_os_str())
+                    .count()
+                    == 1
+            });
+            if !complete_backup_set {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.status_unavailable",
+                    "cannot recover an unready helper with an incomplete or ambiguous asset backup",
+                ));
+            }
+            bootout_for_mutation(
+                &system_service_target(),
+                "recover interrupted helper transaction",
+                "snapshot_mount_helper.install_rollback_failed",
+            )?;
+            service_state = Some(HelperServiceState::Absent);
+        }
     }
     for (path, backup) in backups {
         match fs::symlink_metadata(path) {
@@ -992,6 +1023,22 @@ fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
     Ok(())
 }
 
+fn snapshot_access_status_for_maintenance(
+    config_dir: &Path,
+    data_dir: &Path,
+    operation: &str,
+) -> Result<StatusResult, CliError> {
+    super::snapshot_service::status_for_maintenance(config_dir, data_dir).map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.access_unavailable",
+            format!(
+                "cannot verify Snapshot Access before {operation}: {}",
+                error.message
+            ),
+        )
+    })
+}
+
 fn wait_for_snapshot_access_idle(
     config_dir: &Path,
     data_dir: &Path,
@@ -999,16 +1046,7 @@ fn wait_for_snapshot_access_idle(
 ) -> Result<StatusResult, CliError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
-            .map_err(|error| {
-                CliError::retryable(
-                    "snapshot_mount_helper.access_unavailable",
-                    format!(
-                        "cannot verify Snapshot Access before {operation}: {}",
-                        error.message
-                    ),
-                )
-            })?;
+        let status = snapshot_access_status_for_maintenance(config_dir, data_dir, operation)?;
         if status.active_leases > 0 || Instant::now() >= deadline {
             ensure_snapshot_access_idle(&status)?;
         }
@@ -1026,7 +1064,8 @@ fn wait_for_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), Cli
         config_dir,
         data_dir,
         "replacing the legacy snapshot mount helper",
-    )
+    )?;
+    Ok(())
 }
 
 fn check_if_busy(operation: &str) -> Result<BusyCheck, CliError> {
@@ -1213,6 +1252,21 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
                 ));
             }
         };
+        let refreshed_access = match snapshot_access_status_for_maintenance(
+            config_dir,
+            data_dir,
+            "replacing the legacy snapshot mount helper",
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                discard_staged(&[&staged_binary, &staged_plist]);
+                return Err(error);
+            }
+        };
+        if let Err(error) = ensure_snapshot_access_idle(&refreshed_access) {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
         let refreshed_busy = match check_if_busy("install or update the snapshot mount helper") {
             Ok(busy) => busy,
             Err(error) => {
