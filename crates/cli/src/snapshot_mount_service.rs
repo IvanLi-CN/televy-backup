@@ -185,6 +185,21 @@ fn helper_assets_are_installed() -> bool {
         || safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
 }
 
+fn is_uninstall_operation(operation: &str) -> bool {
+    operation == "uninstall the snapshot mount helper"
+}
+
+fn no_assets_busy_check(operation: &str) -> Result<BusyCheck, CliError> {
+    if is_uninstall_operation(operation) {
+        Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            "cannot uninstall the snapshot mount helper while its installed assets and status are unavailable; refusing to proceed",
+        ))
+    } else {
+        Ok(BusyCheck::Clear)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelperServiceState {
     Loaded,
@@ -481,6 +496,25 @@ fn ensure_uninstall_safe(check: BusyCheck) -> Result<(), CliError> {
     }
 }
 
+fn launchctl_service_absent(error: &CliError) -> bool {
+    error.message.contains("Could not find service")
+        || error.message.contains("No such process")
+}
+
+fn bootout_for_uninstall(service: &str) -> Result<(), CliError> {
+    match launchctl(&["bootout", service]) {
+        Ok(()) => Ok(()),
+        Err(error) if launchctl_service_absent(&error) => Ok(()),
+        Err(error) => Err(CliError::retryable(
+            "snapshot_mount_helper.uninstall_failed",
+            format!(
+                "cannot stop the snapshot mount helper before uninstall: {}",
+                error.message
+            ),
+        )),
+    }
+}
+
 fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
     if status.active_leases > 0 {
         return Err(CliError::retryable(
@@ -542,7 +576,7 @@ fn prepare_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliE
 fn check_if_busy(operation: &str) -> Result<BusyCheck, CliError> {
     match mount_helper::status() {
         Ok(status) => classify_busy_status(operation, &status),
-        Err(_error) if !helper_assets_are_installed() => Ok(BusyCheck::Clear),
+        Err(_error) if !helper_assets_are_installed() => no_assets_busy_check(operation),
         Err(error) => match helper_service_state() {
             HelperServiceState::Absent if safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) => {
                 // An explicitly absent helper may have left journal rows behind. The caller must
@@ -742,7 +776,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     }
     ensure_uninstall_safe(busy)?;
     let service = system_service_target();
-    let _ = launchctl(&["bootout", &service]);
+    bootout_for_uninstall(&service)?;
     if Path::new(MOUNT_HELPER_PLIST_PATH).exists() {
         fs::remove_file(MOUNT_HELPER_PLIST_PATH).map_err(|error| {
             CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
@@ -1637,6 +1671,41 @@ mod tests {
                 .code,
             "snapshot_mount_helper.status_unavailable"
         );
+    }
+
+    #[test]
+    fn uninstall_operation_is_distinct_from_installation() {
+        assert!(is_uninstall_operation("uninstall the snapshot mount helper"));
+        assert!(!is_uninstall_operation("install or update the snapshot mount helper"));
+    }
+
+    #[test]
+    fn missing_helper_assets_block_uninstall_but_allow_first_install() {
+        assert_eq!(
+            no_assets_busy_check("uninstall the snapshot mount helper")
+                .unwrap_err()
+                .code,
+            "snapshot_mount_helper.status_unavailable"
+        );
+        assert_eq!(
+            no_assets_busy_check("install or update the snapshot mount helper").unwrap(),
+            BusyCheck::Clear
+        );
+    }
+
+    #[test]
+    fn uninstall_ignores_only_explicit_service_absence() {
+        let absent = CliError::retryable(
+            "snapshot_mount_helper.launchctl_failed",
+            "Could not find service \"system/com.ivan.televybackup.snapshot-mount-helper\"",
+        );
+        assert!(launchctl_service_absent(&absent));
+
+        let unknown = CliError::retryable(
+            "snapshot_mount_helper.launchctl_failed",
+            "Operation not permitted",
+        );
+        assert!(!launchctl_service_absent(&unknown));
     }
 
     #[test]

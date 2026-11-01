@@ -214,23 +214,31 @@ jobs:
         run: |
           set -euo pipefail
           fixture="${RUNNER_TEMP}/mount-helper-install-release"
+          trusted_base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${{ inputs.pr_number }}" --jq '.base.sha')"
+          git fetch --force --no-tags origin "${trusted_base_sha}"
+          trusted_root="${RUNNER_TEMP}/trusted-release-policy"
+          git worktree add --detach "${trusted_root}" "${trusted_base_sha}"
           mkdir -p "${fixture}/download" "${fixture}/mount"
+          cleanup() {
+            hdiutil detach "${fixture}/mount" >/dev/null 2>&1 || true
+            git worktree remove --force "${trusted_root}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
           gh release download v0.9.9-rc.118 --repo "${GITHUB_REPOSITORY}" \
             --pattern TelevyBackup-0.9.9-rc.118.dmg --pattern BUILD-MANIFEST.json \
             --pattern SHA256SUMS --dir "${fixture}/download"
           git fetch --force origin \
             refs/tags/v0.9.9-rc.118:refs/tags/v0.9.9-rc.118
-          python3 .github/scripts/release_chain.py verify-tag-provenance \
+          python3 "${trusted_root}/.github/scripts/release_chain.py" verify-tag-provenance \
             --tag v0.9.9-rc.118
           source_tag_commit="$(git rev-list -n 1 v0.9.9-rc.118^{commit})"
-          python3 .github/scripts/release_helper.py verify-assets \
+          python3 "${trusted_root}/.github/scripts/release_helper.py" verify-assets \
             --asset-dir "${fixture}/download" \
-            --lock packaging/macos/snapshot-components.lock.json \
+            --lock "${trusted_root}/packaging/macos/snapshot-components.lock.json" \
             --source-tag v0.9.9-rc.118 \
             --expected-source-commit "${source_tag_commit}"
           hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" \
             "${fixture}/download/TelevyBackup-0.9.9-rc.118.dmg"
-          trap 'hdiutil detach "${fixture}/mount" >/dev/null' EXIT
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/mount/TelevyBackup.app"
           cp -R "${fixture}/mount/TelevyBackup.app" "${fixture}/TelevyBackup.app"
