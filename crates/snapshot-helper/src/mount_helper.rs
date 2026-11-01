@@ -2955,14 +2955,12 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
             channel: "errno",
             summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
         })?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| MountHelperError::Protocol("snapshot command stdout was unavailable".into()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| MountHelperError::Protocol("snapshot command stderr was unavailable".into()))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        MountHelperError::Protocol("snapshot command stdout was unavailable".into())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        MountHelperError::Protocol("snapshot command stderr was unavailable".into())
+    })?;
     let stdout_reader = thread::spawn(move || {
         let mut bytes = Vec::new();
         let result = stdout.take(8 * 1024 * 1024).read_to_end(&mut bytes);

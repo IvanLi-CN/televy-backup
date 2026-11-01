@@ -813,11 +813,7 @@ pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
 }
 
 #[cfg(unix)]
-pub fn reconcile(
-    _config_dir: &Path,
-    data_dir: &Path,
-    json_output: bool,
-) -> Result<(), CliError> {
+pub fn reconcile(_config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     reconcile_cleanup_via_daemon(data_dir, json_output)
 }
 
