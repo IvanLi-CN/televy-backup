@@ -310,6 +310,8 @@ jobs:
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --bootstrap-failure-rollback
           python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness --orphaned-backup-recovery
+          python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-blocking
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-build-only

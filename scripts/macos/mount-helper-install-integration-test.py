@@ -141,9 +141,14 @@ def main():
         action="store_true",
         help="replace the candidate helper with a failing executable and verify the previous helper is restored",
     )
+    parser.add_argument(
+        "--orphaned-backup-recovery",
+        action="store_true",
+        help="seed root-owned interrupted-install backups and verify the installer recovers them",
+    )
     args = parser.parse_args()
     legacy_fixture = args.legacy_blocking or args.legacy_build_only or args.stale_partial_classification
-    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback)) <= 1, "fixture modes are mutually exclusive"
+    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback, args.orphaned_backup_recovery)) <= 1, "fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -202,6 +207,9 @@ while True:
     elif args.bootstrap_failure_rollback:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
+    elif args.orphaned_backup_recovery:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
     elif args.stale_partial_classification:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"',
@@ -225,14 +233,15 @@ while True:
     }))
     root_plist = root / "old.plist"
     old_binary_hash = None
-    if args.bootstrap_failure_rollback:
+    if args.bootstrap_failure_rollback or args.orphaned_backup_recovery:
         old_binary_source = fixture / "old-helper"
         old_binary_source.write_text("#!/usr/bin/python3\n" + old_server.read_text())
         old_binary_source.chmod(0o755)
         old_binary_hash = hashlib.sha256(old_binary_source.read_bytes()).hexdigest()
-        run("sudo", "-n", "cp", str(old_binary_source), str(BINARY))
-        run("sudo", "-n", "chown", "root:wheel", str(BINARY))
-        run("sudo", "-n", "chmod", "755", str(BINARY))
+        binary_destination = BINARY if args.bootstrap_failure_rollback else BINARY.parent / (BINARY.name + ".backup-fixture")
+        run("sudo", "-n", "cp", str(old_binary_source), str(binary_destination))
+        run("sudo", "-n", "chown", "root:wheel", str(binary_destination))
+        run("sudo", "-n", "chmod", "755", str(binary_destination))
         canonical_plist = fixture / "canonical-old.plist"
         canonical_plist.write_bytes(plistlib.dumps({
             "Label": LABEL,
@@ -240,23 +249,25 @@ while True:
             "RunAtLoad": True,
             "KeepAlive": True,
         }))
-        run("sudo", "-n", "cp", str(canonical_plist), str(PLIST))
-        run("sudo", "-n", "chown", "root:wheel", str(PLIST))
-        run("sudo", "-n", "chmod", "644", str(PLIST))
+        plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.parent / (PLIST.stem + ".backup-fixture")
+        run("sudo", "-n", "cp", str(canonical_plist), str(plist_destination))
+        run("sudo", "-n", "chown", "root:wheel", str(plist_destination))
+        run("sudo", "-n", "chmod", "644", str(plist_destination))
     else:
         run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
         run("sudo", "-n", "chown", "root:wheel", str(root_plist))
         run("sudo", "-n", "chmod", "644", str(root_plist))
     try:
-        run(
-            "sudo",
-            "-n",
-            "/bin/launchctl",
-            "bootstrap",
-            "system",
-            str(PLIST if args.bootstrap_failure_rollback else root_plist),
-        )
-        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture or args.bootstrap_failure_rollback) else 1))
+        if not args.orphaned_backup_recovery:
+            run(
+                "sudo",
+                "-n",
+                "/bin/launchctl",
+                "bootstrap",
+                "system",
+                str(PLIST if args.bootstrap_failure_rollback else root_plist),
+            )
+            wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture or args.bootstrap_failure_rollback) else 1))
         env = os.environ.copy()
         env.update({
             "TELEVYBACKUP_CONFIG_DIR": str(config),
@@ -274,6 +285,9 @@ while True:
         elif args.bootstrap_failure_rollback:
             assert before["result"]["mount_helper_reachable"] is True
             print("SETUP: previous helper is reachable before the failing candidate install", flush=True)
+        elif args.orphaned_backup_recovery:
+            assert before["result"]["mount_helper_reachable"] is False
+            print("SETUP: interrupted helper backups are present while the service is absent", flush=True)
         elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
@@ -356,6 +370,10 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             if not args.bootstrap_failure_rollback:
                 assert installation["helperReady"] is True
                 assert installation["helperVersion"] == "0.5.2"
+        if args.orphaned_backup_recovery:
+            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
+            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            print("PASS: interrupted helper backups were recovered before the candidate install", flush=True)
         if legacy_fixture:
             assert installation["helperVersion"] == "0.5.2"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
@@ -400,7 +418,18 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             return reply.returncode != 0 and "could not find service" in (reply.stdout + reply.stderr).lower()
         wait_for(lambda: run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False), absent)
         # These targets were proved absent before this test created them.
-        run("sudo", "-n", "rm", "-f", str(BINARY), str(PLIST), str(MOUNT_SOCKET), check=False)
+        run(
+            "sudo",
+            "-n",
+            "rm",
+            "-f",
+            str(BINARY),
+            str(PLIST),
+            str(BINARY.parent / (BINARY.name + ".backup-fixture")),
+            str(PLIST.parent / (PLIST.stem + ".backup-fixture")),
+            str(MOUNT_SOCKET),
+            check=False,
+        )
         run("sudo", "-n", "rm", "-rf", str(JOURNAL), str(root), check=False)
         assert not any(os.path.lexists(path) for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), "fixture cleanup incomplete"
         shutil.rmtree(fixture)

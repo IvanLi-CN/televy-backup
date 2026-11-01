@@ -186,6 +186,112 @@ fn install_asset_error(error: impl std::fmt::Display) -> CliError {
     CliError::new("snapshot_mount_helper.install_failed", error.to_string())
 }
 
+fn backup_prefix(path: &Path) -> Result<String, CliError> {
+    let name = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .ok_or_else(|| install_asset_error("helper asset has no file name"))?;
+    Ok(format!("{}.", name.to_string_lossy()))
+}
+
+fn backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| install_asset_error("helper asset has no parent"))?;
+    let prefix = format!("{}backup-", backup_prefix(path)?);
+    let mut candidates = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(install_asset_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(install_asset_error)?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(&prefix) {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    let paths = [binary, plist];
+    let mut backups = Vec::new();
+    for path in paths {
+        for backup in backup_candidates(path)? {
+            if !safe_root_asset(&backup) {
+                return Err(install_asset_error(format!(
+                    "unsafe helper backup blocks recovery: {}",
+                    backup.display()
+                )));
+            }
+            backups.push((path, backup));
+        }
+    }
+    let service_state = if backups.is_empty() && safe_root_asset(binary) == safe_root_asset(plist) {
+        None
+    } else {
+        Some(helper_service_state())
+    };
+    if matches!(service_state, Some(HelperServiceState::Unknown)) {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            "cannot recover interrupted helper assets while the launchd service state is unknown",
+        ));
+    }
+    for (path, backup) in backups {
+        match fs::symlink_metadata(path) {
+            Ok(_) if !safe_root_asset(path) => {
+                return Err(install_asset_error(format!(
+                    "unsafe helper asset blocks recovery: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {
+                if service_state == Some(HelperServiceState::Loaded) {
+                    fs::remove_file(&backup).map_err(install_asset_error)?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if service_state != Some(HelperServiceState::Absent) {
+                    return Err(CliError::retryable(
+                        "snapshot_mount_helper.status_unavailable",
+                        "cannot restore an interrupted helper asset while the service is loaded",
+                    ));
+                }
+                let candidates = backup_candidates(path)?;
+                if candidates.len() != 1 {
+                    return Err(install_asset_error(format!(
+                        "ambiguous helper backup recovery for {}",
+                        path.display()
+                    )));
+                }
+                fs::rename(candidates[0].as_path(), path).map_err(install_asset_error)?;
+            }
+            Err(error) => return Err(install_asset_error(error)),
+        }
+    }
+    if service_state == Some(HelperServiceState::Absent) {
+        let binary_exists = fs::symlink_metadata(binary).is_ok();
+        let plist_exists = fs::symlink_metadata(plist).is_ok();
+        if binary_exists != plist_exists {
+            let orphan = if binary_exists { binary } else { plist };
+            if !safe_root_asset(orphan) {
+                return Err(install_asset_error(format!(
+                    "unsafe partial helper asset blocks recovery: {}",
+                    orphan.display()
+                )));
+            }
+            fs::remove_file(orphan).map_err(install_asset_error)?;
+        }
+    }
+    Ok(())
+}
+
 fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
     match fs::symlink_metadata(path) {
         Ok(_) if !safe_root_asset(path) => {
@@ -979,6 +1085,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             format!("cannot install or update the snapshot mount helper safely: {error}"),
         )
     })?;
+    recover_interrupted_helper_transaction()?;
     let busy = check_if_busy("install or update the snapshot mount helper")?;
     match busy {
         BusyCheck::Clear => {}
@@ -1008,6 +1115,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
+    recover_interrupted_helper_transaction()?;
     let (staged_binary, staged_plist, candidate_hash) = {
         let source = current_executable_sibling()?;
         let candidate_hash = helper_sha256(&source)?;
@@ -1100,6 +1208,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
             format!("cannot uninstall the snapshot mount helper safely: {error}"),
         )
     })?;
+    recover_interrupted_helper_transaction()?;
     let mut busy = check_if_busy("uninstall the snapshot mount helper")?;
     if busy == BusyCheck::RecoveryRequired {
         drop(mutation_lock);
@@ -1112,6 +1221,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
         })?;
         busy = check_if_busy("uninstall the snapshot mount helper")?;
     }
+    recover_interrupted_helper_transaction()?;
     ensure_uninstall_safe(busy)?;
     let service = system_service_target();
     bootout_for_mutation(
