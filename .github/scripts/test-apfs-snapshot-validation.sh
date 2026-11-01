@@ -75,6 +75,7 @@ assert_contains "PR fixture immutable asset verification" "$pr_workflow_text" 'r
 assert_contains "PR fixture release asset API attestation" "$pr_workflow_text" "GitHub Release asset digest does not match downloaded bytes"
 assert_contains "PR fixture release asset automation uploader" "$pr_workflow_text" "github-actions[bot]"
 assert_contains "PR fixture trusted policy checkout" "$pr_workflow_text" "git worktree add --detach \"\${trusted_root}\" \"\${trusted_base_sha}\""
+assert_contains "PR fixture rejects self-trusted policy" "$pr_workflow_text" 'test "${trusted_base_sha}" != "${GITHUB_SHA}"'
 assert_contains "main fixture tag provenance" "$main_workflow_text" "verify-tag-provenance"
 assert_contains "main fixture tag identity" "$main_workflow_text" "--tag v0.9.9-rc.122"
 assert_contains "main fixture immutable asset verification" "$main_workflow_text" 'release_helper.py" verify-assets'

@@ -181,7 +181,14 @@ def main():
     # A pre-upgrade service replies with the historical protocol, not a mock
     # client. The bundled Access executable must surface the exact UI symptom.
     old_server = fixture / "old_server.py"
-    old_server.write_text('''import json, os, socket
+    old_server.write_text('''import hashlib, json, os, pathlib, socket
+marker_path = "__OLD_HELPER_MARKER__"
+binary_path = "__OLD_HELPER_BINARY__"
+plist_path = "__OLD_HELPER_PLIST__"
+pathlib.Path(marker_path).write_text(json.dumps({
+    "binary": hashlib.sha256(pathlib.Path(binary_path).read_bytes()).hexdigest() if pathlib.Path(binary_path).exists() else None,
+    "plist": hashlib.sha256(pathlib.Path(plist_path).read_bytes()).hexdigest() if pathlib.Path(plist_path).exists() else None,
+}))
 path = "/private/var/run/televybackup/snapshot-mount-helper.sock"
 os.makedirs(os.path.dirname(path), mode=0o711, exist_ok=True)
 try:
@@ -201,6 +208,11 @@ while True:
                               "blocked_volume_uuids":[],"recovery_leases":[]}}
         connection.sendall(json.dumps(response).encode() + b"\\n")
 ''')
+    old_helper_marker = fixture / "old-helper-started.json"
+    old_server.write_text(old_server.read_text()
+        .replace('"__OLD_HELPER_MARKER__"', repr(str(old_helper_marker)))
+        .replace('"__OLD_HELPER_BINARY__"', repr(str(BINARY)))
+        .replace('"__OLD_HELPER_PLIST__"', repr(str(PLIST))))
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
@@ -249,10 +261,25 @@ while True:
             "RunAtLoad": True,
             "KeepAlive": True,
         }))
+        old_plist_hash = hashlib.sha256(canonical_plist.read_bytes()).hexdigest()
         plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.parent / (PLIST.stem + ".backup-fixture")
         run("sudo", "-n", "cp", str(canonical_plist), str(plist_destination))
         run("sudo", "-n", "chown", "root:wheel", str(plist_destination))
         run("sudo", "-n", "chmod", "644", str(plist_destination))
+        if args.orphaned_backup_recovery:
+            current_plist = fixture / "interrupted-current.plist"
+            current_plist.write_bytes(plistlib.dumps({
+                "Label": LABEL,
+                "ProgramArguments": ["/usr/bin/false"],
+                "RunAtLoad": True,
+                "KeepAlive": True,
+            }))
+            run("sudo", "-n", "cp", str(app / "Contents/MacOS/televybackup-snapshot-mount-helper"), str(BINARY))
+            run("sudo", "-n", "chown", "root:wheel", str(BINARY))
+            run("sudo", "-n", "chmod", "755", str(BINARY))
+            run("sudo", "-n", "cp", str(current_plist), str(PLIST))
+            run("sudo", "-n", "chown", "root:wheel", str(PLIST))
+            run("sudo", "-n", "chmod", "644", str(PLIST))
     else:
         run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
         run("sudo", "-n", "chown", "root:wheel", str(root_plist))
@@ -373,6 +400,9 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         if args.orphaned_backup_recovery:
             assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
             assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            marker = json.loads(old_helper_marker.read_text())
+            assert marker["binary"] == old_binary_hash
+            assert marker["plist"] == old_plist_hash
             print("PASS: interrupted helper backups were recovered before the candidate install", flush=True)
         if legacy_fixture:
             assert installation["helperVersion"] == "0.5.2"

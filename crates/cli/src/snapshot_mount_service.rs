@@ -216,11 +216,33 @@ fn backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
     Ok(candidates)
 }
 
+fn quarantine_backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| install_asset_error("helper asset has no parent"))?;
+    let prefix = format!("{}uninstall-backup-", backup_prefix(path)?);
+    let mut candidates = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(install_asset_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(install_asset_error)?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
 fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
     let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
     let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
     let paths = [binary, plist];
     let mut backups = Vec::new();
+    let mut quarantine_backups = Vec::new();
     for path in paths {
         for backup in backup_candidates(path)? {
             if !safe_root_asset(&backup) {
@@ -231,8 +253,20 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
             }
             backups.push((path, backup));
         }
+        for backup in quarantine_backup_candidates(path)? {
+            if !safe_root_asset(&backup) {
+                return Err(install_asset_error(format!(
+                    "unsafe uninstall backup blocks recovery: {}",
+                    backup.display()
+                )));
+            }
+            quarantine_backups.push((path, backup));
+        }
     }
-    let service_state = if backups.is_empty() && safe_root_asset(binary) == safe_root_asset(plist) {
+    let service_state = if backups.is_empty()
+        && quarantine_backups.is_empty()
+        && safe_root_asset(binary) == safe_root_asset(plist)
+    {
         None
     } else {
         Some(helper_service_state())
@@ -254,6 +288,15 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
             Ok(_) => {
                 if service_state == Some(HelperServiceState::Loaded) {
                     fs::remove_file(&backup).map_err(install_asset_error)?;
+                } else if service_state == Some(HelperServiceState::Absent) {
+                    let candidates = backup_candidates(path)?;
+                    if candidates.len() != 1 {
+                        return Err(install_asset_error(format!(
+                            "ambiguous helper backup recovery for {}",
+                            path.display()
+                        )));
+                    }
+                    fs::rename(candidates[0].as_path(), path).map_err(install_asset_error)?;
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -275,6 +318,15 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
             Err(error) => return Err(install_asset_error(error)),
         }
     }
+    for (path, backup) in quarantine_backups {
+        if service_state == Some(HelperServiceState::Loaded) && !safe_root_asset(path) {
+            return Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                "cannot discard an interrupted uninstall while the service is loaded without its canonical assets",
+            ));
+        }
+        fs::remove_file(backup).map_err(install_asset_error)?;
+    }
     if service_state == Some(HelperServiceState::Absent) {
         let binary_exists = fs::symlink_metadata(binary).is_ok();
         let plist_exists = fs::symlink_metadata(plist).is_ok();
@@ -292,7 +344,7 @@ fn recover_interrupted_helper_transaction() -> Result<(), CliError> {
     Ok(())
 }
 
-fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
+fn backup_asset_with_suffix(path: &Path, suffix: &str) -> Result<Option<PathBuf>, CliError> {
     match fs::symlink_metadata(path) {
         Ok(_) if !safe_root_asset(path) => {
             return Err(install_asset_error(format!(
@@ -304,7 +356,7 @@ fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(install_asset_error(error)),
     }
-    let backup = path.with_extension(format!("backup-{}", std::process::id()));
+    let backup = path.with_extension(format!("{suffix}-{}", std::process::id()));
     match fs::symlink_metadata(&backup) {
         Ok(_) => {
             return Err(install_asset_error(format!(
@@ -317,6 +369,14 @@ fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
     }
     fs::rename(path, &backup).map_err(install_asset_error)?;
     Ok(Some(backup))
+}
+
+fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    backup_asset_with_suffix(path, "backup")
+}
+
+fn quarantine_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    backup_asset_with_suffix(path, "uninstall-backup")
 }
 
 fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
@@ -499,8 +559,8 @@ fn rollback_installed_assets(
 fn quarantine_uninstall_assets() -> Result<(Option<PathBuf>, Option<PathBuf>), CliError> {
     let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
     let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
-    let old_plist = backup_asset(plist)?;
-    let old_binary = match backup_asset(binary) {
+    let old_plist = quarantine_asset(plist)?;
+    let old_binary = match quarantine_asset(binary) {
         Ok(backup) => backup,
         Err(error) => {
             return match restore_asset(plist, old_plist) {

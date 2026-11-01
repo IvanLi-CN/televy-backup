@@ -217,6 +217,7 @@ jobs:
           fixture="${RUNNER_TEMP}/mount-helper-install-release"
           [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]
           trusted_base_sha="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" --jq '.base.sha')"
+          test "${trusted_base_sha}" != "${GITHUB_SHA}"
           git fetch --force --no-tags origin "${trusted_base_sha}"
           trusted_root="${RUNNER_TEMP}/trusted-release-policy"
           git worktree add --detach "${trusted_root}" "${trusted_base_sha}"
