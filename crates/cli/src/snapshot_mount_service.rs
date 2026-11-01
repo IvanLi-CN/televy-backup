@@ -882,18 +882,28 @@ fn reconcile_cleanup_via_daemon(data_dir: &Path, json_output: bool) -> Result<()
                         details: json!({}),
                     });
                 let code = match error.code.as_str() {
-                    "snapshot_mount_helper.active"
-                    | "snapshot_mount_helper.pending_cleanup"
-                    | "snapshot_mount_helper.reconcile_required"
-                    | "snapshot_mount_helper.status_incomplete"
-                    | "snapshot_mount_helper.status_inconsistent"
-                    | "snapshot_mount_helper.update_required" => error.code.as_str(),
+                    "snapshot_mount_helper.active" => "snapshot_mount_helper.active",
+                    "snapshot_mount_helper.pending_cleanup" => {
+                        "snapshot_mount_helper.pending_cleanup"
+                    }
+                    "snapshot_mount_helper.reconcile_required" => {
+                        "snapshot_mount_helper.reconcile_required"
+                    }
+                    "snapshot_mount_helper.status_incomplete" => {
+                        "snapshot_mount_helper.status_incomplete"
+                    }
+                    "snapshot_mount_helper.status_inconsistent" => {
+                        "snapshot_mount_helper.status_inconsistent"
+                    }
+                    "snapshot_mount_helper.update_required" => {
+                        "snapshot_mount_helper.update_required"
+                    }
                     _ => "snapshot_mount_helper.reconcile_failed",
                 };
                 let message = if error.message.is_empty() {
-                    "snapshot cleanup reconciliation failed"
+                    "snapshot cleanup reconciliation failed".to_string()
                 } else {
-                    error.message.as_str()
+                    error.message.clone()
                 };
                 let cli_error = if error.retryable {
                     CliError::retryable(code, message)

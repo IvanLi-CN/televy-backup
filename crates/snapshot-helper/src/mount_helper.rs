@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use plist::Value;
 use sqlx::{
-    Acquire, Row, SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use thiserror::Error;
