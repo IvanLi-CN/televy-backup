@@ -360,8 +360,7 @@ fn recover_interrupted_helper_transaction(
             Ok(status) => {
                 let candidate_ready = status.component_version.as_deref()
                     == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-                    && status.build_commit.as_deref()
-                        == Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
+                    && status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
                 if !candidate_ready
                     && !matches!(
                         classify_busy_status("recover interrupted helper transaction", &status),
@@ -648,7 +647,10 @@ fn rollback_installed_assets(
             if let Some(error) = busy_error("rollback the snapshot mount helper", &status) {
                 return Err(CliError::retryable(
                     "snapshot_mount_helper.install_rollback_failed",
-                    format!("cannot rollback while helper status is not clear: {}", error.message),
+                    format!(
+                        "cannot rollback while helper status is not clear: {}",
+                        error.message
+                    ),
                 ));
             }
         }
@@ -1163,10 +1165,7 @@ fn ensure_snapshot_access_idle_for_mutation(
 ) -> Result<(), CliError> {
     let status = snapshot_access_status_for_maintenance(config_dir, data_dir, operation)?;
     ensure_snapshot_access_idle(&status).map_err(|error| {
-        CliError::retryable(
-            error.code,
-            format!("cannot {operation}: {}", error.message),
-        )
+        CliError::retryable(error.code, format!("cannot {operation}: {}", error.message))
     })
 }
 
