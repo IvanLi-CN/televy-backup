@@ -372,8 +372,23 @@ fn classify_busy_status(
         && status.recoverable_stale_mounts.is_none()
         && status.unknown_blocking_mounts.is_none()
         && status.inventory_drift_mounts.is_none();
-    let stale_current_partial_classification = status.component_version.as_deref()
-        == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+    let stale_current_partition_is_complete = match (
+        status.pending_cleanup,
+        status.live_mounts,
+        status.recoverable_stale_mounts,
+        status.unknown_blocking_mounts,
+    ) {
+        (Some(pending), Some(live), Some(recoverable), Some(unknown)) => pending
+            .checked_add(live)
+            .and_then(|total| total.checked_add(recoverable))
+            .and_then(|total| total.checked_add(unknown))
+            == Some(status.active_mounts),
+        _ => false,
+    };
+    let stale_current_partial_classification = status.helper_version
+        == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        && status.component_version.as_deref()
+            == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit != env!("TELEVYBACKUP_BUILD_COMMIT")
                 && commit.len() == 40
@@ -384,7 +399,8 @@ fn classify_busy_status(
         && status.live_mounts.is_some()
         && status.recoverable_stale_mounts.is_some()
         && status.unknown_blocking_mounts.is_some()
-        && status.inventory_drift_mounts.is_none();
+        && status.inventory_drift_mounts.is_none()
+        && stale_current_partition_is_complete;
     if stale_current_partial_classification {
         // The previous helper implementation used the current component version but did not
         // report inventory-drift rows. Replace that known stale build only after Snapshot Access
@@ -1524,6 +1540,48 @@ mod tests {
             build_commit: Some(env!("TELEVYBACKUP_BUILD_COMMIT").into()),
             active_mounts: 1,
             pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn stale_current_helper_requires_the_stable_wire_identity() {
+        let mut status = MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+
+        status.helper_version = mount_helper::MOUNT_HELPER_WIRE_VERSION.into();
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn stale_current_helper_rejects_an_inconsistent_known_partition() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(1),
