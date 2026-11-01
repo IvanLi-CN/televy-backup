@@ -208,6 +208,12 @@ fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
     Ok(())
 }
 
+fn bootstrap_restored_helper() {
+    if Path::new(MOUNT_HELPER_PLIST_PATH).is_file() {
+        let _ = launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH]);
+    }
+}
+
 fn commit_staged_assets(
     staged_binary: &Path,
     staged_plist: &Path,
@@ -219,18 +225,21 @@ fn commit_staged_assets(
         Ok(backup) => backup,
         Err(error) => {
             restore_asset(binary, old_binary)?;
+            bootstrap_restored_helper();
             return Err(error);
         }
     };
     if let Err(error) = fs::rename(staged_binary, binary) {
         restore_asset(plist, old_plist)?;
         restore_asset(binary, old_binary)?;
+        bootstrap_restored_helper();
         return Err(install_asset_error(error));
     }
     if let Err(error) = fs::rename(staged_plist, plist) {
         let _ = fs::remove_file(binary);
         restore_asset(plist, old_plist)?;
         restore_asset(binary, old_binary)?;
+        bootstrap_restored_helper();
         return Err(install_asset_error(error));
     }
     Ok((old_binary, old_plist))
@@ -247,9 +256,7 @@ fn rollback_installed_assets(old_binary: Option<PathBuf>, old_plist: Option<Path
     let _ = fs::remove_file(MOUNT_HELPER_PLIST_PATH);
     let _ = restore_asset(Path::new(MOUNT_HELPER_INSTALL_PATH), old_binary);
     let _ = restore_asset(Path::new(MOUNT_HELPER_PLIST_PATH), old_plist);
-    if Path::new(MOUNT_HELPER_PLIST_PATH).is_file() {
-        let _ = launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH]);
-    }
+    bootstrap_restored_helper();
 }
 
 fn set_root_owner(path: &Path, description: &str) -> Result<(), CliError> {
