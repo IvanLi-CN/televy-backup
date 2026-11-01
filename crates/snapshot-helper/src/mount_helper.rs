@@ -1,13 +1,16 @@
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 use plist::Value;
@@ -38,7 +41,10 @@ pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
 const SOCKET_DIRECTORY_MODE: u32 = 0o711;
 const MOUNT_ROOT_BASE: &str = "/private/var/tmp/televybackup-snapshot-mounts";
 const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const STATUS_COMMAND_TIMEOUT: Duration = Duration::from_secs(4);
 const MUTATING_REQUEST_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const MAX_COMMAND_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const RECOVERY_AGE_SECONDS: &str = "-300 seconds";
 const AUTHORIZE_SOURCE_PATH_ARG: &str = "--authorize-source-path";
 
@@ -251,11 +257,29 @@ pub fn release(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelp
     let response = request(MountMethod::Release {
         uid,
         lease_id: lease_id.to_string(),
+        reconcile_inventory: false,
     })?;
     match response.result {
         Some(MountResponseResult::Released(result)) => Ok(result),
         _ => Err(MountHelperError::Protocol(
             "release response missing result".into(),
+        )),
+    }
+}
+
+pub fn reconcile_inventory(
+    uid: u32,
+    lease_id: &str,
+) -> Result<MountReleaseResult, MountHelperError> {
+    let response = request(MountMethod::Release {
+        uid,
+        lease_id: lease_id.to_string(),
+        reconcile_inventory: true,
+    })?;
+    match response.result {
+        Some(MountResponseResult::Released(result)) => Ok(result),
+        _ => Err(MountHelperError::Protocol(
+            "inventory reconciliation response missing result".into(),
         )),
     }
 }
@@ -387,12 +411,15 @@ pub async fn run_server() -> Result<(), MountHelperError> {
     let listener = UnixListener::bind(&socket_path)?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))?;
     let mutation_lock = Arc::new(AsyncMutex::new(()));
+    let status_lock = Arc::new(AsyncMutex::new(()));
     loop {
         let (stream, _) = listener.accept().await?;
         let journal = journal.clone();
         let mutation_lock = Arc::clone(&mutation_lock);
+        let status_lock = Arc::clone(&status_lock);
         tokio::spawn(async move {
-            if let Err(error) = serve_connection(stream, journal, mutation_lock).await {
+            let result = serve_connection(stream, journal, mutation_lock, status_lock).await;
+            if let Err(error) = result {
                 eprintln!("snapshot mount helper connection failed: {error}");
             }
         });
@@ -463,6 +490,15 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), MountHelperError> {
         let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let state: String = row.try_get("state")?;
+        if !matches!(
+            state.as_str(),
+            "reserved" | "prepared" | "active" | "cleanup_pending"
+        ) {
+            // Unknown states belong to a newer or corrupted journal schema. Leave the exact row
+            // untouched so status can report a blocking unknown record; startup recovery must
+            // never mutate an unrecognized state.
+            continue;
+        }
         if state == "reserved" && mount_root.is_empty() && manifest_json == "[]" {
             // Snapshot creation may have completed while the access process was disconnected.
             // Keep the reservation blocked until a later owner can reconcile the post-reservation
@@ -640,6 +676,7 @@ async fn serve_connection(
     stream: TokioUnixStream,
     journal: SqlitePool,
     mutation_lock: Arc<AsyncMutex<()>>,
+    status_lock: Arc<AsyncMutex<()>>,
 ) -> Result<(), MountHelperError> {
     let peer_uid = peer_uid(stream.as_raw_fd())?;
     let (read_half, mut write_half) = stream.into_split();
@@ -658,7 +695,14 @@ async fn serve_connection(
                         | MountMethod::RecordCleanup { .. }
                         | MountMethod::Cleanup { .. }
                 );
-                if needs_file_lock {
+                let needs_status_lock = matches!(
+                    &request.method,
+                    MountMethod::Status | MountMethod::StatusVolume { .. }
+                );
+                if needs_status_lock {
+                    let _status_guard = status_lock.lock().await;
+                    handle_request(request, peer_uid, &journal).await
+                } else if needs_file_lock {
                     let _mutation_guard = mutation_lock.lock().await;
                     match tokio::task::spawn_blocking(acquire_mutation_lock).await {
                         Ok(Ok(_file_lock)) => handle_request(request, peer_uid, &journal).await,
@@ -759,11 +803,13 @@ async fn handle_request(
         )
         .await
         .map(MountResponseResult::Mounted),
-        MountMethod::Release { uid, lease_id } => {
-            release_request(peer_uid, uid, &lease_id, journal)
-                .await
-                .map(MountResponseResult::Released)
-        }
+        MountMethod::Release {
+            uid,
+            lease_id,
+            reconcile_inventory,
+        } => release_request(peer_uid, uid, &lease_id, reconcile_inventory, journal)
+            .await
+            .map(MountResponseResult::Released),
         MountMethod::RecordCleanup { uid, lease_id } => {
             record_cleanup_request(peer_uid, uid, &lease_id, journal)
                 .await
@@ -799,20 +845,6 @@ async fn status_result(
 ) -> Result<MountStatusResult, MountHelperError> {
     let classification =
         classify_status_rows(pool, (peer_uid != 0).then_some(peer_uid), None).await?;
-    let blocked_volume_uuids = if peer_uid == 0 {
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT volume_uuid FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
-        )
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_scalar::<_, String>(
-            "SELECT DISTINCT volume_uuid FROM mounts WHERE uid = ? AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
-        )
-        .bind(i64::from(peer_uid))
-        .fetch_all(pool)
-        .await?
-    };
     Ok(MountStatusResult {
         // Keep the wire compatibility version stable for the approved Snapshot Access
         // artifact. The additive component_version carries the implementation bump.
@@ -821,12 +853,14 @@ async fn status_result(
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: Some(classification.pending_cleanup),
-        blocked_volume_uuids,
+        blocked_volume_uuids: classification.blocked_volume_uuids,
         recovery_leases: classification.recovery_leases,
         pending_cleanup_leases: classification.pending_cleanup_leases,
         live_mounts: Some(classification.live_mounts),
         recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
         unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
+        inventory_drift_mounts: Some(classification.inventory_drift_mounts),
+        inventory_drift_leases: classification.inventory_drift_leases,
     })
 }
 
@@ -843,24 +877,20 @@ async fn status_for_volume_result(
     }
     validate_uuid(volume_uuid)?;
     let classification = classify_status_rows(pool, None, Some((volume_uuid, uid))).await?;
-    let blocked_volume_uuids = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT volume_uuid FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending') AND volume_uuid != ''",
-    )
-    .bind(volume_uuid)
-    .fetch_all(pool)
-    .await?;
     Ok(MountStatusResult {
         helper_version: MOUNT_HELPER_WIRE_VERSION.to_string(),
         component_version: Some(ROOT_MOUNT_HELPER_VERSION.to_string()),
         build_commit: option_env!("TELEVYBACKUP_BUILD_COMMIT").map(str::to_owned),
         active_mounts: classification.active_mounts,
         pending_cleanup: Some(classification.pending_cleanup),
-        blocked_volume_uuids,
+        blocked_volume_uuids: classification.blocked_volume_uuids,
         recovery_leases: classification.recovery_leases,
         pending_cleanup_leases: classification.pending_cleanup_leases,
         live_mounts: Some(classification.live_mounts),
         recoverable_stale_mounts: Some(classification.recoverable_stale_mounts),
         unknown_blocking_mounts: Some(classification.unknown_blocking_mounts),
+        inventory_drift_mounts: Some(classification.inventory_drift_mounts),
+        inventory_drift_leases: classification.inventory_drift_leases,
     })
 }
 
@@ -870,8 +900,11 @@ struct StatusClassification {
     live_mounts: u32,
     recoverable_stale_mounts: u32,
     unknown_blocking_mounts: u32,
+    inventory_drift_mounts: u32,
     recovery_leases: Vec<MountRecoveryLease>,
     pending_cleanup_leases: Vec<MountRecoveryLease>,
+    inventory_drift_leases: Vec<MountRecoveryLease>,
+    blocked_volume_uuids: Vec<String>,
 }
 
 async fn classify_status_rows(
@@ -880,7 +913,7 @@ async fn classify_status_rows(
     volume_scope: Option<(&str, u32)>,
 ) -> Result<StatusClassification, MountHelperError> {
     let mut statement = String::from(
-        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_device, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_device, state, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, CASE WHEN last_renewed_at <= datetime('now', ?) THEN 1 ELSE 0 END AS stale_row, CASE WHEN last_renewed_at > datetime('now', ?) THEN 1 ELSE 0 END AS live_row FROM mounts WHERE state IS NOT 'released'",
     );
     if scope_uid.is_some() {
         statement.push_str(" AND uid = ?");
@@ -904,9 +937,13 @@ async fn classify_status_rows(
         live_mounts: 0,
         recoverable_stale_mounts: 0,
         unknown_blocking_mounts: 0,
+        inventory_drift_mounts: 0,
         recovery_leases: Vec::new(),
         pending_cleanup_leases: Vec::new(),
+        inventory_drift_leases: Vec::new(),
+        blocked_volume_uuids: Vec::new(),
     };
+    let mut inventory_cache: HashMap<String, Option<Vec<MountSnapshotRef>>> = HashMap::new();
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let uid: i64 = row.try_get("uid")?;
@@ -920,6 +957,12 @@ async fn classify_status_rows(
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let stale = row.try_get::<i64, _>("stale_row")? == 1;
         let live = row.try_get::<i64, _>("live_row")? == 1;
+        let volume_is_unblocked =
+            !volume_uuid.is_empty() && !classification.blocked_volume_uuids.contains(&volume_uuid);
+        if volume_is_unblocked {
+            let blocked_volume_uuids = &mut classification.blocked_volume_uuids;
+            blocked_volume_uuids.push(volume_uuid.clone());
+        }
         let manifest_valid = parse_journal_manifest(&snapshot_manifest).is_ok();
         let reservation_valid = reservation_manifest_valid == 1
             && parse_reservation_manifest(&reservation_manifest).is_ok();
@@ -942,12 +985,23 @@ async fn classify_status_rows(
                 .unwrap_or(true)
             && journal_identity_valid
             && matches!(state.as_str(), "reserved" | "prepared" | "active");
+        let owner_matches = volume_scope
+            .map(|(_, owner_uid)| uid == i64::from(owner_uid))
+            .unwrap_or(true);
         let pending_cleanup_candidate = state == "cleanup_pending" && journal_identity_valid;
-        if pending_cleanup_candidate {
+        let known_state = matches!(
+            state.as_str(),
+            "reserved" | "prepared" | "active" | "cleanup_pending"
+        );
+        if !known_state {
+            classification.unknown_blocking_mounts += 1;
+        } else if pending_cleanup_candidate {
             classification.pending_cleanup += 1;
-            classification
-                .pending_cleanup_leases
-                .push(MountRecoveryLease { lease_id, state });
+            if owner_matches {
+                classification
+                    .pending_cleanup_leases
+                    .push(MountRecoveryLease { lease_id, state });
+            }
         } else if recoverable {
             classification.recoverable_stale_mounts += 1;
             classification
@@ -959,6 +1013,90 @@ async fn classify_status_rows(
             classification.unknown_blocking_mounts += 1;
         }
     }
+
+    let mut released_statement = String::from(
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid FROM mounts WHERE state = 'released'",
+    );
+    if scope_uid.is_some() {
+        released_statement.push_str(" AND uid = ?");
+    }
+    if let Some((_, _)) = volume_scope {
+        released_statement.push_str(" AND lower(volume_uuid) = lower(?)");
+    }
+    let mut released_query = sqlx::query(&released_statement);
+    if let Some(scope_uid) = scope_uid {
+        released_query = released_query.bind(i64::from(scope_uid));
+    }
+    if let Some((volume_uuid, _)) = volume_scope {
+        released_query = released_query.bind(volume_uuid);
+    }
+    for row in released_query.fetch_all(pool).await? {
+        let lease_id: String = row.try_get("lease_id")?;
+        let uid: i64 = row.try_get("uid")?;
+        let volume_uuid: String = row.try_get("volume_uuid")?;
+        let device_identifier: String = row.try_get("device_identifier")?;
+        let mount_root: String = row.try_get("mount_root")?;
+        let snapshot_manifest: String = row.try_get("snapshot_manifest")?;
+        let reservation_manifest: String = row.try_get("reservation_manifest")?;
+        let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
+        let baseline = parse_reservation_manifest(&reservation_manifest);
+        let identity_valid = uid > 0
+            && validate_lease_id(&lease_id).is_ok()
+            && validate_uuid(&volume_uuid).is_ok()
+            && validate_device(&device_identifier).is_ok()
+            && mount_root.is_empty()
+            && snapshot_manifest == "[]"
+            && reservation_manifest_valid == 1
+            && baseline.is_ok()
+            && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok();
+        let owner_matches = volume_scope
+            .map(|(_, owner_uid)| uid == i64::from(owner_uid))
+            .unwrap_or(true);
+        if !identity_valid || !owner_matches {
+            classification.active_mounts += 1;
+            classification.unknown_blocking_mounts += 1;
+            if !volume_uuid.is_empty()
+                && !classification.blocked_volume_uuids.contains(&volume_uuid)
+            {
+                classification.blocked_volume_uuids.push(volume_uuid);
+            }
+            continue;
+        }
+        let baseline = baseline.expect("validated reservation manifest");
+        let current_manifest = inventory_cache
+            .entry(device_identifier.clone())
+            .or_insert_with(|| snapshot_inventory_manifest(&device_identifier).ok())
+            .clone();
+        match current_manifest {
+            Some(current_manifest) if manifests_equal(&current_manifest, &baseline) => {}
+            Some(_) => {
+                classification.active_mounts += 1;
+                classification.inventory_drift_mounts += 1;
+                if !volume_uuid.is_empty()
+                    && !classification.blocked_volume_uuids.contains(&volume_uuid)
+                {
+                    classification
+                        .blocked_volume_uuids
+                        .push(volume_uuid.clone());
+                }
+                classification
+                    .inventory_drift_leases
+                    .push(MountRecoveryLease {
+                        lease_id,
+                        state: "released_inventory_drift".to_string(),
+                    });
+            }
+            None => {
+                classification.active_mounts += 1;
+                classification.unknown_blocking_mounts += 1;
+                if !volume_uuid.is_empty()
+                    && !classification.blocked_volume_uuids.contains(&volume_uuid)
+                {
+                    classification.blocked_volume_uuids.push(volume_uuid);
+                }
+            }
+        }
+    }
     Ok(classification)
 }
 
@@ -968,7 +1106,7 @@ async fn audit_released_tombstones(
     device_identifier: &str,
 ) -> Result<(), MountHelperError> {
     let rows = sqlx::query(
-        "SELECT lease_id, device_identifier, reservation_manifest FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released' AND reservation_manifest_valid = 1",
+        "SELECT lease_id, uid, volume_uuid, device_identifier, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid FROM mounts WHERE lower(volume_uuid) = lower(?) AND state = 'released'",
     )
     .bind(volume_uuid)
     .fetch_all(journal)
@@ -979,20 +1117,32 @@ async fn audit_released_tombstones(
     let current_manifest = snapshot_inventory_manifest(device_identifier)?;
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
+        let uid: i64 = row.try_get("uid")?;
+        let stored_volume_uuid: String = row.try_get("volume_uuid")?;
         let stored_device: String = row.try_get("device_identifier")?;
+        let mount_root: String = row.try_get("mount_root")?;
+        let snapshot_manifest: String = row.try_get("snapshot_manifest")?;
         let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
+        let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let baseline = parse_reservation_manifest(&reservation_manifest_json);
-        let matches = stored_device.eq_ignore_ascii_case(device_identifier)
+        let identity_valid = uid > 0
+            && validate_lease_id(&lease_id).is_ok()
+            && stored_volume_uuid.eq_ignore_ascii_case(volume_uuid)
+            && validate_uuid(&stored_volume_uuid).is_ok()
+            && validate_device(&stored_device).is_ok()
+            && validate_device_volume_binding(&stored_device, &stored_volume_uuid).is_ok()
+            && mount_root.is_empty()
+            && snapshot_manifest == "[]"
+            && reservation_manifest_valid == 1;
+        let matches = identity_valid
+            && stored_device.eq_ignore_ascii_case(device_identifier)
             && baseline
                 .as_ref()
                 .is_ok_and(|baseline| manifests_equal(&current_manifest, baseline));
         if !matches {
-            sqlx::query("UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND state = 'released'")
-                .bind(lease_id)
-                .execute(journal)
-                .await?;
             return Err(MountHelperError::Protocol(
-                "released snapshot tombstone inventory changed".into(),
+                "released snapshot tombstone inventory changed; explicit reconciliation required"
+                    .into(),
             ));
         }
     }
@@ -1022,7 +1172,7 @@ async fn reserve_request(
     source.recheck(source_path)?;
     audit_released_tombstones(journal, volume_uuid, device_identifier).await?;
     let blocked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND state IS NOT 'released'",
     )
     .bind(volume_uuid)
     .fetch_one(journal)
@@ -1271,7 +1421,7 @@ async fn mount_request(
     validate_source_mount(source_mount_point, volume_uuid, device_identifier)?;
     validate_snapshot_binding(device_identifier, snapshot_uuid, snapshot_name)?;
     let blocked: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND lease_id != ? AND state IN ('reserved', 'prepared', 'active', 'cleanup_pending')",
+        "SELECT COUNT(*) FROM mounts WHERE lower(volume_uuid) = lower(?) AND lease_id != ? AND state IS NOT 'released'",
     )
     .bind(volume_uuid)
     .bind(lease_id)
@@ -1530,6 +1680,7 @@ async fn release_request(
     peer_uid: u32,
     uid: u32,
     lease_id: &str,
+    reconcile_inventory: bool,
     journal: &SqlitePool,
 ) -> Result<MountReleaseResult, MountHelperError> {
     if peer_uid != uid || uid == 0 {
@@ -1576,11 +1727,33 @@ async fn release_request(
             "mount lease belongs to another user".into(),
         ));
     }
+    if !matches!(
+        state.as_str(),
+        "reserved" | "prepared" | "active" | "cleanup_pending" | "released"
+    ) {
+        return Err(MountHelperError::Protocol(
+            "mount lease has an unknown journal state; explicit repair is required".into(),
+        ));
+    }
     if state == "released" {
-        return Ok(MountReleaseResult {
-            lease_id: lease_id.to_string(),
-            cleanup_state: "released".to_string(),
-        });
+        if !reconcile_inventory {
+            return Ok(MountReleaseResult {
+                lease_id: lease_id.to_string(),
+                cleanup_state: "reconcile_required".to_string(),
+            });
+        }
+        return reconcile_released_tombstone(
+            journal,
+            uid,
+            lease_id,
+            &volume_uuid,
+            &device_identifier,
+            &mount_root,
+            &manifest_json,
+            &reservation_manifest_json,
+            reservation_manifest_valid,
+        )
+        .await;
     }
     if reservation_manifest_valid != 1 {
         update_state(journal, lease_id, "cleanup_pending").await?;
@@ -1692,6 +1865,67 @@ async fn release_request(
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
         cleanup_state: cleanup_state.to_string(),
+    })
+}
+
+/// Re-baseline a released tombstone after an inventory-only change. This is deliberately routed
+/// through Release so the root helper revalidates the journal owner, volume/device binding and
+/// current inventory while holding the mutation lock. It never deletes a snapshot or opens a
+/// source path.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile_released_tombstone(
+    journal: &SqlitePool,
+    uid: u32,
+    lease_id: &str,
+    volume_uuid: &str,
+    device_identifier: &str,
+    mount_root: &str,
+    snapshot_manifest_json: &str,
+    reservation_manifest_json: &str,
+    reservation_manifest_valid: i64,
+) -> Result<MountReleaseResult, MountHelperError> {
+    if !mount_root.is_empty() || snapshot_manifest_json != "[]" || reservation_manifest_valid != 1 {
+        return Err(MountHelperError::Protocol(
+            "released snapshot tombstone is not eligible for inventory reconciliation".into(),
+        ));
+    }
+    validate_uuid(volume_uuid)?;
+    validate_device(device_identifier)?;
+    validate_device_volume_binding(device_identifier, volume_uuid)?;
+    let baseline = parse_reservation_manifest(reservation_manifest_json)?;
+    let current_manifest = snapshot_inventory_manifest(device_identifier)?;
+    if manifests_equal(&current_manifest, &baseline) {
+        return Ok(MountReleaseResult {
+            lease_id: lease_id.to_string(),
+            cleanup_state: "released".to_string(),
+        });
+    }
+    let current_manifest_json = serde_json::to_string(&current_manifest)?;
+    let mut transaction = journal.begin().await?;
+    let updated = sqlx::query(
+        "UPDATE mounts SET reservation_manifest = ?, reservation_manifest_valid = 1 WHERE lease_id = ? AND uid = ? AND state = 'released' AND mount_root = '' AND snapshot_manifest = '[]' AND reservation_manifest_valid = 1 AND reservation_manifest = ?",
+    )
+    .bind(&current_manifest_json)
+    .bind(lease_id)
+    .bind(i64::from(uid))
+    .bind(reservation_manifest_json)
+    .execute(&mut *transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(MountHelperError::Protocol(
+            "released snapshot tombstone changed during reconciliation".into(),
+        ));
+    }
+    let confirmed_manifest = snapshot_inventory_manifest(device_identifier)?;
+    if !manifests_equal(&confirmed_manifest, &current_manifest) {
+        return Err(MountHelperError::Protocol(
+            "released snapshot tombstone inventory changed during reconciliation".into(),
+        ));
+    }
+    transaction.commit().await?;
+    Ok(MountReleaseResult {
+        lease_id: lease_id.to_string(),
+        cleanup_state: "released".to_string(),
     })
 }
 
@@ -2709,21 +2943,157 @@ fn run_command_output<const N: usize, S: AsRef<std::ffi::OsStr>>(
     program: &str,
     args: [S; N],
 ) -> Result<Vec<u8>, MountHelperError> {
-    let output =
-        Command::new(program)
-            .args(args)
-            .output()
-            .map_err(|error| MountHelperError::Command {
+    let timeout = matches!(stage, "snapshot_inventory" | "volume_identity")
+        .then_some(STATUS_COMMAND_TIMEOUT)
+        .unwrap_or(MUTATING_REQUEST_TIMEOUT);
+    let mut command_builder = Command::new(program);
+    command_builder
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Keep descendants in a private process group so a timeout cannot leave a child holding
+    // either output pipe open after the direct command is killed.
+    unsafe {
+        command_builder.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command_builder
+        .spawn()
+        .map_err(|error| MountHelperError::Command {
+            stage,
+            command,
+            status: "not_started".into(),
+            channel: "errno",
+            summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
+        })?;
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        terminate_command_group(&mut child);
+        MountHelperError::Protocol("snapshot command stdout was unavailable".into())
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        terminate_command_group(&mut child);
+        MountHelperError::Protocol("snapshot command stderr was unavailable".into())
+    })?;
+    set_nonblocking(stdout.as_raw_fd()).map_err(|error| {
+        terminate_command_group(&mut child);
+        MountHelperError::Io(error)
+    })?;
+    set_nonblocking(stderr.as_raw_fd()).map_err(|error| {
+        terminate_command_group(&mut child);
+        MountHelperError::Io(error)
+    })?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_closed = false;
+    let mut stderr_closed = false;
+    let mut status = None;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if !stdout_closed {
+            stdout_closed = match drain_command_pipe(&mut stdout, &mut stdout_bytes, deadline) {
+                Ok(closed) => closed,
+                Err(error) => {
+                    terminate_command_group(&mut child);
+                    return Err(MountHelperError::Io(error));
+                }
+            };
+        }
+        if !stderr_closed {
+            stderr_closed = match drain_command_pipe(&mut stderr, &mut stderr_bytes, deadline) {
+                Ok(closed) => closed,
+                Err(error) => {
+                    terminate_command_group(&mut child);
+                    return Err(MountHelperError::Io(error));
+                }
+            };
+        }
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    terminate_command_group(&mut child);
+                    return Err(MountHelperError::Io(error));
+                }
+            };
+        }
+        if status.is_some() && stdout_closed && stderr_closed {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            terminate_command_group(&mut child);
+            return Err(MountHelperError::Command {
                 stage,
                 command,
-                status: "not_started".into(),
-                channel: "errno",
-                summary: format!("errno={}", error.raw_os_error().unwrap_or(0)),
-            })?;
+                status: "timeout".into(),
+                channel: "timeout",
+                summary: format!("timeout={}ms", timeout.as_millis()),
+            });
+        }
+        thread::sleep(COMMAND_POLL_INTERVAL);
+    }
+    let status = status.expect("command status is set before output pipes close");
+    let output = std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    };
     if output.status.success() {
         return Ok(output.stdout);
     }
     Err(command_failure(stage, command, &output))
+}
+
+fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn drain_command_pipe<R: Read>(
+    reader: &mut R,
+    output: &mut Vec<u8>,
+    deadline: std::time::Instant,
+) -> io::Result<bool> {
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        if std::time::Instant::now() >= deadline {
+            return Ok(false);
+        }
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                let remaining = MAX_COMMAND_OUTPUT_BYTES.saturating_sub(output.len());
+                if remaining > 0 {
+                    output.extend_from_slice(&buffer[..count.min(remaining)]);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn terminate_command_group(child: &mut Child) {
+    let pid = child.id() as libc::pid_t;
+    if pid > 0 {
+        // The child was placed in a private process group in pre_exec. Kill the group first so
+        // descendants cannot keep the nonblocking pipes or root-helper mutation lock alive.
+        unsafe {
+            let _ = libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn command_failure(
@@ -3068,6 +3438,7 @@ mod tests {
             request_timeout(&MountMethod::Release {
                 uid: 501,
                 lease_id: "lease".into(),
+                reconcile_inventory: false,
             }),
             MUTATING_REQUEST_TIMEOUT
         );
@@ -3160,6 +3531,54 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state, "reserved");
+    }
+
+    #[tokio::test]
+    async fn recovery_preserves_an_unrecognized_state() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, '', '', '[]', '[]', 1, 'future_state', datetime('now'))",
+        )
+        .bind(lease_id)
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        recover_journal(&journal).await.unwrap();
+
+        let state: String = sqlx::query_scalar("SELECT state FROM mounts WHERE lease_id = ?")
+            .bind(lease_id)
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(state, "future_state");
+    }
+
+    #[tokio::test]
+    async fn ordinary_release_does_not_rebaseline_a_released_tombstone() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at) VALUES (?, ?, ?, ?, '', '', '[]', '[]', 1, 'released', datetime('now'))",
+        )
+        .bind(lease_id)
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let result = release_request(501, 501, lease_id, false, &journal)
+            .await
+            .unwrap();
+        assert_eq!(result.cleanup_state, "reconcile_required");
     }
 
     #[tokio::test]
@@ -3521,6 +3940,30 @@ mod tests {
         assert_eq!(status.pending_cleanup, Some(0));
         assert!(status.pending_cleanup_leases.is_empty());
         assert_eq!(status.unknown_blocking_mounts, Some(1));
+    }
+
+    #[tokio::test]
+    async fn status_keeps_an_unrecognized_state_as_an_unknown_blocker() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', '[]', '[]', 1, 'future_state', datetime('now'), datetime('now'))",
+        )
+        .bind("A8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind(501_i64)
+        .bind("C8A38394-49AE-42F9-85FB-14DD9EA549FA")
+        .bind("disk5s1")
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let status = status_result(&journal, 501).await.unwrap();
+        assert_eq!(status.active_mounts, 1);
+        assert_eq!(status.unknown_blocking_mounts, Some(1));
+        assert_eq!(
+            status.blocked_volume_uuids,
+            vec!["C8A38394-49AE-42F9-85FB-14DD9EA549FA"]
+        );
     }
 
     #[test]

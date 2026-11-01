@@ -12,8 +12,8 @@ identity rather than the caller's source pathname; `Release` unmounts and delete
 recorded for that lease, while `Cleanup` can delete only a manifest already recorded in a prepared
 journal row. Legacy helper status is accepted only for the one-time migration probe; strict lease
 acquisition rejects it before `Reserve`. Status classification is additive: recent rows, pending
-cleanup, verified age-gated stale rows, and unknown rows remain distinct. An explicit reconcile
-stale-record recovery requires the current helper component and build identity, while a pending-cleanup retry may use the current or immediately previous cleanup-capable component only when the v4 wire identity and complete pending-only classification are verified. Each request verifies the legacy aggregate
+cleanup, verified age-gated stale rows, released inventory-drift rows, and unknown rows remain distinct. An explicit reconcile
+stale-record recovery requires the current helper component and build identity, while a pending-cleanup retry may use the current or immediately previous cleanup-capable component only when the v4 wire identity and complete pending-only classification are verified. A separate inventory-reconcile operation may use the same v4 `Release` method for a verified released tombstone whose device/volume identity is unchanged but whose current inventory differs; it may update only that tombstone's baseline and never deletes snapshots or opens source files. Each request verifies the legacy aggregate
 against the complete additive partition and candidate count before and after each release, and
 uses the authenticated-UID-scoped Status and journal-bound Release methods after the user-session
 Access service reports no active or pending lease; a current component with a stale or missing build

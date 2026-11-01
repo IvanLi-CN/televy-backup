@@ -9,6 +9,11 @@ long_read_script="$root_dir/scripts/macos/verify-apfs-snapshot-long-read.sh"
 integration_script="$root_dir/scripts/macos/verify-apfs-snapshot-integration.sh"
 mount_helper_source="$root_dir/crates/snapshot-helper/src/mount_helper.rs"
 access_source="$root_dir/crates/snapshot-helper/src/main.rs"
+control_source="$root_dir/crates/daemon/src/control_ipc.rs"
+recovery_fixture_source="$root_dir/scripts/macos/test-snapshot-mount-recovery.py"
+control_action_source="$root_dir/macos/TelevyBackupApp/SnapshotMountHelperControlAction.swift"
+control_action_test_source="$root_dir/macos/TelevyBackupAppTests/SnapshotMountHelperControlActionTests.swift"
+status_view_source="$root_dir/macos/TelevyBackupApp/SnapshotMountHelperStatusView.swift"
 
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$pr_workflow"
 ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$main_workflow"
@@ -40,7 +45,13 @@ long_read_text="$(<"$long_read_script")"
 integration_text="$(<"$integration_script")"
 mount_helper_integration_text="$(<"$root_dir/scripts/macos/mount-helper-install-integration-test.py")"
 mount_helper_text="$(<"$mount_helper_source")"
+cli_mount_helper_text="$(<"$root_dir/crates/cli/src/snapshot_mount_service.rs")"
 access_text="$(<"$access_source")"
+control_text="$(<"$control_source")"
+recovery_fixture_text="$(<"$recovery_fixture_source")"
+control_action_text="$(<"$control_action_source")"
+control_action_test_text="$(<"$control_action_test_source")"
+status_view_text="$(<"$status_view_source")"
 
 assert_contains "manual regression job" "$pr_workflow_text" "manual-snapshot-regression"
 assert_contains "manual regression dispatch gate" "$pr_workflow_text" "github.event_name == 'workflow_dispatch'"
@@ -83,6 +94,12 @@ assert_not_contains "raw long-read card copy" "$ci_text" 'cp "$a6_output" "$evid
 assert_contains "orchestrator artifact schema" "$ci_text" "televybackup.apfs_snapshot_ci.v1"
 assert_contains "orchestrator no published snapshot assertion" "$ci_text" "publishedSnapshot: false"
 assert_contains "hosted stale mount recovery fixture" "$main_workflow_text" "test-snapshot-mount-recovery.py"
+assert_contains "PR recovery fixture daemon binary" "$pr_workflow_text" "--daemon target/debug/televybackupd"
+assert_contains "PR recovery fixture access binary" "$pr_workflow_text" "--access target/debug/televybackup-snapshot-access"
+assert_contains "PR recovery fixture CLI binary" "$pr_workflow_text" "--cli target/debug/televybackup"
+assert_contains "main recovery fixture daemon binary" "$main_workflow_text" "--daemon target/debug/televybackupd"
+assert_contains "main recovery fixture access binary" "$main_workflow_text" "--access target/debug/televybackup-snapshot-access"
+assert_contains "main recovery fixture CLI binary" "$main_workflow_text" "--cli target/debug/televybackup"
 # The single-quoted needle intentionally checks the literal shell source.
 # shellcheck disable=SC2016
 assert_contains "orchestrator narrow root cleanup" "$ci_text" 'sudo -n rm -rf -- "$mount_runtime_root"'
@@ -101,6 +118,21 @@ assert_contains "timepoint synthetic target guard" "$integration_text" '[[ "$tar
 assert_not_contains "timepoint transcript persistence in sanitized mode" "$integration_text" 'printf '\''%s\\n'\'' "$last_response" >>"$evidence_path"'
 assert_contains "legacy journal seed" "$mount_helper_integration_text" "seed_legacy_stale_journal"
 assert_contains "legacy journal classification assertion" "$mount_helper_integration_text" "recoverable_stale_mounts"
+assert_contains "inventory drift fixture" "$recovery_fixture_text" "inventory_drift_mounts"
+assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot.mount_helper.reconcile_inventory"
+assert_contains "recovery fixture daemon control request" "$recovery_fixture_text" '"snapshot.mount_helper.reconcile_inventory"'
+assert_contains "recovery fixture operation polling" "$recovery_fixture_text" '"operation.get"'
+assert_contains "recovery fixture unknown blocker gate" "$recovery_fixture_text" '"snapshot_mount_helper.reconcile_required"'
+assert_contains "recovery fixture unknown state reserve fence" "$recovery_fixture_text" 'future_state_id'
+assert_contains "recovery fixture malformed released reserve fence" "$recovery_fixture_text" 'malformed_released_id'
+assert_contains "recovery fixture CLI invocation" "$recovery_fixture_text" '"snapshot-mount-helper"'
+assert_contains "recovery fixture CLI JSON assertion" "$recovery_fixture_text" 'cli_payload["inventoryDrift"] == 0'
+assert_contains "CLI cleanup delegates to daemon" "$cli_mount_helper_text" '"snapshot.mount_helper.retry_cleanup"'
+assert_contains "Swift reconcile action method" "$control_action_text" 'snapshot.mount_helper.reconcile_inventory'
+assert_contains "Swift reconcile action callback" "$control_action_text" 'static func reconcileInventory(using send:'
+assert_contains "Swift reconcile action test" "$control_action_test_text" 'SnapshotMountHelperControlAction.reconcileInventory'
+assert_contains "Swift reconcile button action" "$status_view_text" 'SnapshotMountHelperControlAction.reconcileInventory(using: reconcileInventory)'
+assert_contains "Swift reconcile button identifier" "$status_view_text" 'snapshot-mount-helper-reconcile-inventory'
 
 assert_contains "root-owned snapshot creation" "$mount_helper_text" '"/usr/bin/tmutil"'
 assert_contains "snapshot creation diagnostic stage" "$mount_helper_text" '"snapshot_create"'
@@ -111,6 +143,19 @@ assert_contains "release inventory fence" "$mount_helper_text" 'inventory_matche
 assert_contains "released tombstone audit" "$mount_helper_text" 'audit_released_tombstones(journal, volume_uuid, device_identifier)'
 assert_contains "released tombstone has a valid baseline" "$mount_helper_text" 'reservation_manifest_valid = 1'
 assert_contains "stale inventory change reblocks" "$mount_helper_text" "released snapshot tombstone inventory changed"
+assert_contains "inventory drift classification" "$mount_helper_text" "released_inventory_drift"
+assert_contains "inventory drift reconciliation" "$mount_helper_text" "reconcile_released_tombstone"
+assert_contains "unknown journal state classification" "$mount_helper_text" "state IS NOT 'released'"
+assert_contains "unknown journal state reserve fence" "$mount_helper_text" "state IS NOT 'released'"
+assert_not_contains "released tombstone audit skips malformed rows" "$mount_helper_text" "state = 'released' AND reservation_manifest_valid = 1"
+assert_contains "status concurrency gate" "$mount_helper_text" 'status_lock.lock().await'
+assert_contains "explicit inventory reconciliation flag" "$mount_helper_text" 'reconcile_inventory: true'
+assert_contains "reconciliation transaction" "$mount_helper_text" 'let mut transaction = journal.begin().await?'
+assert_contains "status command timeout" "$mount_helper_text" 'STATUS_COMMAND_TIMEOUT'
+assert_contains "command timeout process group" "$mount_helper_text" 'libc::setpgid(0, 0)'
+assert_contains "command timeout kills process group" "$mount_helper_text" 'libc::kill(-pid, libc::SIGKILL)'
+assert_contains "command timeout drains pipes without blocking joins" "$mount_helper_text" 'drain_command_pipe'
+assert_contains "status inventory cache" "$mount_helper_text" 'inventory_cache'
 assert_contains "creation baseline is exact" "$mount_helper_text" 'if !manifests_equal(&current_manifest, &reservation_manifest)'
 assert_contains "deletion requires original baseline" "$mount_helper_text" "A post-deletion inventory change is unowned"
 assert_contains "partial deletion retains unconfirmed manifest" "$mount_helper_text" "retain_unconfirmed_manifest_after_delete_failure"

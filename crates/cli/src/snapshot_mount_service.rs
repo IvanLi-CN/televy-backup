@@ -257,6 +257,19 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
             ));
         }
     };
+    if status.inventory_drift_mounts == Some(status.active_mounts)
+        && status.live_mounts == Some(0)
+        && status.recoverable_stale_mounts == Some(0)
+        && status.unknown_blocking_mounts == Some(0)
+    {
+        let count = status.inventory_drift_mounts.unwrap_or(0);
+        return Some(CliError::new(
+            "snapshot_mount_helper.inventory_drift",
+            format!(
+                "cannot {operation}: {count} released snapshot inventory record(s) require explicit reconciliation"
+            ),
+        ));
+    }
     let in_flight = status.active_mounts.saturating_sub(pending_cleanup);
     if pending_cleanup > 0 && in_flight == 0 {
         return Some(CliError::new(
@@ -278,6 +291,7 @@ fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     ))
 }
 
+#[cfg(any(not(unix), test))]
 fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, CliError> {
     let pending_cleanup = status.pending_cleanup.ok_or_else(|| {
         CliError::retryable(
@@ -286,6 +300,7 @@ fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, Cli
         )
     })?;
     if status.active_mounts != pending_cleanup
+        || status.inventory_drift_mounts != Some(0)
         || pending_cleanup as usize != status.pending_cleanup_leases.len()
         || status
             .pending_cleanup_leases
@@ -304,6 +319,7 @@ fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, Cli
         .collect())
 }
 
+#[cfg(any(not(unix), test))]
 fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
@@ -354,7 +370,19 @@ fn classify_busy_status(
         && status.pending_cleanup.is_none()
         && status.live_mounts.is_none()
         && status.recoverable_stale_mounts.is_none()
-        && status.unknown_blocking_mounts.is_none();
+        && status.unknown_blocking_mounts.is_none()
+        && status.inventory_drift_mounts.is_none();
+    if status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && status.inventory_drift_mounts.is_none()
+        && status.active_mounts > 0
+    {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            format!(
+                "cannot {operation}: the installed snapshot mount helper did not report inventory-drift classification"
+            ),
+        ));
+    }
     let legacy_pending_only = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         && status.component_version.as_deref()
             == Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
@@ -366,6 +394,10 @@ fn classify_busy_status(
         && status.live_mounts == Some(0)
         && status.recoverable_stale_mounts == Some(0)
         && status.unknown_blocking_mounts == Some(0)
+        && status
+            .inventory_drift_mounts
+            .map(|count| count == 0)
+            .unwrap_or(true)
         && status.pending_cleanup_leases.is_empty();
     if legacy_pending_only {
         return Ok(BusyCheck::LegacyUpgrade);
@@ -383,6 +415,7 @@ fn classify_busy_status(
             .pending_cleanup_leases
             .iter()
             .all(|lease| lease.state == "cleanup_pending")
+        && status.inventory_drift_mounts == Some(0)
         && status.build_commit.as_deref() != Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
     if current_pending_only {
         // A current component with a different build can be replaced only when the helper has
@@ -688,6 +721,7 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
 /// This is intentionally a separate explicit command. Status probes and refreshes remain
 /// read-only, while each release still revalidates UID, volume/device identity and inventory in
 /// the root helper before changing the journal.
+#[cfg(not(unix))]
 pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     let uid = unsafe { libc::geteuid() };
     if uid == 0 {
@@ -780,6 +814,369 @@ pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
     Ok(())
 }
 
+#[cfg(unix)]
+pub fn reconcile(_config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    reconcile_cleanup_via_daemon(data_dir, json_output)
+}
+
+#[cfg(unix)]
+fn reconcile_cleanup_via_daemon(data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    let response = super::control_ipc_call_with_timeouts(
+        data_dir,
+        "snapshot.mount_helper.retry_cleanup",
+        json!({}),
+        Duration::from_secs(15),
+        Duration::from_secs(10),
+    )?;
+    let operation_id = response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("operationId"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon did not return a snapshot cleanup operation",
+            )
+        })?
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        let status_response = super::control_ipc_call_with_timeouts(
+            data_dir,
+            "operation.get",
+            json!({"operationId": operation_id}),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?;
+        let status = status_response.result.ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon returned no snapshot cleanup operation status",
+            )
+        })?;
+        match status.get("state").and_then(serde_json::Value::as_str) {
+            Some("succeeded") => {
+                let mut payload = status.get("result").cloned().unwrap_or_else(|| json!({}));
+                if let Some(object) = payload.as_object_mut() {
+                    object.insert("reconciled".to_string(), json!(true));
+                }
+                if json_output {
+                    println!("{payload}");
+                } else {
+                    let released = payload
+                        .get("released")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    println!("snapshot mount cleanup reconciled ({released} record(s) released)");
+                }
+                return Ok(());
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .cloned()
+                    .and_then(decode_control_error)
+                    .unwrap_or_else(|| televy_backup_core::control::ControlError {
+                        code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                        message: "snapshot cleanup reconciliation failed".to_string(),
+                        retryable: true,
+                        details: json!({}),
+                    });
+                let code = match error.code.as_str() {
+                    "snapshot_mount_helper.active" => "snapshot_mount_helper.active",
+                    "snapshot_mount_helper.pending_cleanup" => {
+                        "snapshot_mount_helper.pending_cleanup"
+                    }
+                    "snapshot_mount_helper.reconcile_required" => {
+                        "snapshot_mount_helper.reconcile_required"
+                    }
+                    "snapshot_mount_helper.status_incomplete" => {
+                        "snapshot_mount_helper.status_incomplete"
+                    }
+                    "snapshot_mount_helper.status_inconsistent" => {
+                        "snapshot_mount_helper.status_inconsistent"
+                    }
+                    "snapshot_mount_helper.update_required" => {
+                        "snapshot_mount_helper.update_required"
+                    }
+                    _ => "snapshot_mount_helper.reconcile_failed",
+                };
+                let message = if error.message.is_empty() {
+                    "snapshot cleanup reconciliation failed".to_string()
+                } else {
+                    error.message.clone()
+                };
+                let cli_error = if error.retryable {
+                    CliError::retryable(code, message)
+                } else {
+                    CliError::new(code, message)
+                };
+                return Err(cli_error.with_details(error.details));
+            }
+            Some("pending" | "running") if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Some("pending" | "running") => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_timeout",
+                    "snapshot cleanup reconciliation did not finish before the timeout",
+                ));
+            }
+            _ => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_failed",
+                    "daemon returned an invalid snapshot cleanup operation state",
+                ));
+            }
+        }
+    }
+}
+
+/// Explicitly re-baseline released tombstones whose only verified difference is the current
+/// snapshot inventory. This never deletes snapshots or opens source files.
+#[cfg(not(unix))]
+pub fn reconcile_inventory(
+    config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    let uid = unsafe { libc::geteuid() };
+    if uid == 0 {
+        return Err(CliError::new(
+            "snapshot_mount_helper.invalid_owner",
+            "snapshot inventory reconciliation must run as the signed-in user so the root helper can verify the peer UID",
+        ));
+    }
+    wait_for_snapshot_access_idle(config_dir, data_dir, "reconciling snapshot inventory")?;
+    let status = wait_for_helper_status()?;
+    cleanup_retry_identity(&status)?;
+    let live = status.live_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: live mount classification is unavailable",
+        )
+    })?;
+    let pending = status.pending_cleanup.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: cleanup classification is unavailable",
+        )
+    })?;
+    let recoverable = status.recoverable_stale_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: stale mount classification is unavailable",
+        )
+    })?;
+    let unknown = status.unknown_blocking_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: unknown mount classification is unavailable",
+        )
+    })?;
+    let drift = status.inventory_drift_mounts.ok_or_else(|| {
+        CliError::retryable(
+            "snapshot_mount_helper.status_incomplete",
+            "cannot reconcile snapshot inventory: inventory-drift classification is unavailable",
+        )
+    })?;
+    if live > 0 || pending > 0 || recoverable > 0 || unknown > 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.reconcile_required",
+            format!(
+                "cannot reconcile snapshot inventory while other records remain (live: {live}, pending: {pending}, recoverable: {recoverable}, unknown: {unknown})"
+            ),
+        ));
+    }
+    if status.active_mounts != drift
+        || drift as usize != status.inventory_drift_leases.len()
+        || status
+            .inventory_drift_leases
+            .iter()
+            .any(|lease| lease.state != "released_inventory_drift")
+    {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_inconsistent",
+            "cannot reconcile snapshot inventory: the helper reported an inconsistent drift inventory",
+        ));
+    }
+    let mut reconciled = 0_u32;
+    for lease in &status.inventory_drift_leases {
+        let lease_id = lease.lease_id.clone();
+        let result = mount_helper::reconcile_inventory(uid, &lease_id).map_err(|_| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "a snapshot inventory record could not be safely reconciled",
+            )
+        })?;
+        if result.cleanup_state == "released" {
+            reconciled += 1;
+        }
+    }
+    let final_status = wait_for_helper_status()?;
+    let final_drift = final_status.inventory_drift_mounts.unwrap_or(u32::MAX);
+    let final_unknown = final_status.unknown_blocking_mounts.unwrap_or(u32::MAX);
+    if final_drift > 0 || final_unknown > 0 || final_status.active_mounts != 0 {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.reconcile_required",
+            "snapshot inventory reconciliation did not clear every verified drift record",
+        ));
+    }
+    let payload = json!({
+        "reconciled": true,
+        "records": reconciled,
+        "remaining": final_status.active_mounts,
+        "inventoryDrift": final_drift,
+        "helperVersion": final_status.component_version.as_deref().unwrap_or(&final_status.helper_version),
+        "buildCommit": final_status.build_commit,
+    });
+    if json_output {
+        println!("{payload}");
+    } else {
+        println!("snapshot inventory reconciled ({reconciled} record(s))");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub fn reconcile_inventory(
+    _config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    reconcile_inventory_via_daemon(data_dir, json_output)
+}
+
+#[cfg(unix)]
+fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<(), CliError> {
+    let response = super::control_ipc_call_with_timeouts(
+        data_dir,
+        "snapshot.mount_helper.reconcile_inventory",
+        json!({}),
+        Duration::from_secs(15),
+        Duration::from_secs(10),
+    )?;
+    let operation_id = response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("operationId"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon did not return a snapshot inventory reconciliation operation",
+            )
+        })?
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        let status_response = super::control_ipc_call_with_timeouts(
+            data_dir,
+            "operation.get",
+            json!({"operationId": operation_id}),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?;
+        let status = status_response.result.ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.reconcile_failed",
+                "daemon returned no reconciliation operation status",
+            )
+        })?;
+        match status.get("state").and_then(serde_json::Value::as_str) {
+            Some("succeeded") => {
+                let mut payload = status.get("result").cloned().unwrap_or_else(|| json!({}));
+                if let Some(object) = payload.as_object_mut() {
+                    let reconciled = object
+                        .get("reconciled")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    object.insert("reconciled".to_string(), json!(true));
+                    object.insert("records".to_string(), json!(reconciled));
+                }
+                if json_output {
+                    println!("{payload}");
+                } else {
+                    let records = payload
+                        .get("records")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    println!("snapshot inventory reconciled ({records} record(s))");
+                }
+                return Ok(());
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .cloned()
+                    .and_then(decode_control_error)
+                    .unwrap_or_else(|| televy_backup_core::control::ControlError {
+                        code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                        message: "snapshot inventory reconciliation failed".to_string(),
+                        retryable: true,
+                        details: json!({}),
+                    });
+                let (code, fallback_code) = match error.code.as_str() {
+                    "snapshot_mount_helper.active" => (
+                        "snapshot_mount_helper.active",
+                        "snapshot inventory reconciliation is blocked by an active mount",
+                    ),
+                    "snapshot_mount_helper.pending_cleanup" => (
+                        "snapshot_mount_helper.pending_cleanup",
+                        "snapshot inventory reconciliation is blocked by pending cleanup",
+                    ),
+                    "snapshot_mount_helper.unknown_blocker" => (
+                        "snapshot_mount_helper.unknown_blocker",
+                        "snapshot inventory reconciliation is blocked by an unknown record",
+                    ),
+                    "snapshot_mount_helper.reconcile_required" => (
+                        "snapshot_mount_helper.reconcile_required",
+                        "snapshot inventory reconciliation remains blocked",
+                    ),
+                    _ => (
+                        "snapshot_mount_helper.reconcile_failed",
+                        "snapshot inventory reconciliation failed",
+                    ),
+                };
+                let message = if error.message.is_empty() {
+                    fallback_code
+                } else {
+                    error.message.as_str()
+                };
+                let cli_error = if error.retryable {
+                    CliError::retryable(code, message)
+                } else {
+                    CliError::new(code, message)
+                };
+                return Err(cli_error.with_details(error.details));
+            }
+            Some("pending" | "running") if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Some("pending" | "running") => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_timeout",
+                    "snapshot inventory reconciliation did not finish before the timeout",
+                ));
+            }
+            _ => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.reconcile_failed",
+                    "daemon returned an invalid reconciliation operation state",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn decode_control_error(
+    value: serde_json::Value,
+) -> Option<televy_backup_core::control::ControlError> {
+    serde_json::from_value(value).ok()
+}
+
 pub fn status(json_output: bool) -> Result<(), CliError> {
     let loaded = helper_service_state() == HelperServiceState::Loaded;
     let helper = mount_helper::status().ok();
@@ -793,6 +1190,7 @@ pub fn status(json_output: bool) -> Result<(), CliError> {
         "liveMounts": helper.as_ref().and_then(|status| status.live_mounts),
         "recoverableStaleMounts": helper.as_ref().and_then(|status| status.recoverable_stale_mounts),
         "unknownBlockingMounts": helper.as_ref().and_then(|status| status.unknown_blocking_mounts),
+        "inventoryDriftMounts": helper.as_ref().and_then(|status| status.inventory_drift_mounts),
         "helperVersion": helper.as_ref().map(|status| status.component_version.clone().unwrap_or_else(|| status.helper_version.clone())),
         "buildCommit": helper.as_ref().and_then(|status| status.build_commit.clone()),
         "socket": mount_helper::configured_socket_path(),
@@ -860,6 +1258,22 @@ mod tests {
     }
 
     #[test]
+    fn busy_error_distinguishes_released_inventory_drift() {
+        let status = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(1),
+            ..Default::default()
+        };
+        let error = busy_error("start a strict backup", &status).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.inventory_drift");
+        assert!(error.message.contains("explicit reconciliation"));
+    }
+
+    #[test]
     fn missing_cleanup_status_remains_blocking() {
         let error = busy_error(
             "update the snapshot mount helper",
@@ -884,6 +1298,7 @@ mod tests {
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
             ..Default::default()
         };
         assert_eq!(pending_cleanup_leases(&status).unwrap(), vec!["pending"]);
@@ -895,10 +1310,18 @@ mod tests {
             "snapshot_mount_helper.status_inconsistent"
         );
 
-        let mut mixed = status;
+        let mut mixed = status.clone();
         mixed.active_mounts = 2;
         assert_eq!(
             pending_cleanup_leases(&mixed).unwrap_err().code,
+            "snapshot_mount_helper.status_inconsistent"
+        );
+
+        let mut drift = status;
+        drift.inventory_drift_mounts = Some(1);
+        drift.active_mounts = 2;
+        assert_eq!(
+            pending_cleanup_leases(&drift).unwrap_err().code,
             "snapshot_mount_helper.status_inconsistent"
         );
     }
@@ -925,6 +1348,27 @@ mod tests {
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn legacy_pending_only_status_without_inventory_drift_field_allows_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: None,
             ..Default::default()
         };
         assert_eq!(
@@ -948,6 +1392,7 @@ mod tests {
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
             ..Default::default()
         };
         assert_eq!(
@@ -971,6 +1416,7 @@ mod tests {
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
             ..Default::default()
         };
         let error = classify_busy_status("install or update", &status).unwrap_err();
@@ -988,6 +1434,7 @@ mod tests {
             live_mounts: Some(0),
             recoverable_stale_mounts: Some(0),
             unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
             ..Default::default()
         };
         let error = classify_busy_status("install or update", &status).unwrap_err();

@@ -12,18 +12,22 @@ struct SnapshotMountHelperStatusView: View {
     let liveMounts: UInt32?
     let recoverableStaleMounts: UInt32?
     let unknownBlockingMounts: UInt32?
+    let inventoryDriftMounts: UInt32?
     let busy: Bool
     let install: () -> Void
     let recover: () -> Void
     let retryCleanup: () -> Void
+    let reconcileInventory: (String) -> Void
 
     var body: some View {
-        let updateBlockReason = readiness.isLegacyAggregateStatus || readiness.isLegacyPendingCleanupStatus
-            ? nil
-            : SnapshotMountHelperReadiness.updateBlockReason(
+        let updateBlockReason = !readiness.isReady
+            && !readiness.isLegacyAggregateStatus
+            && !readiness.isLegacyPendingCleanupStatus
+            ? SnapshotMountHelperReadiness.updateBlockReason(
                 activeMounts: activeMounts,
                 pendingCleanup: pendingCleanup
             )
+            : nil
         let statusTitle = !readiness.isOperational && !readiness.isReady && updateBlockReason != nil
             && !readiness.isPendingCleanupUpgradeSafe
             ? "Snapshot mount helper update waiting"
@@ -73,6 +77,19 @@ struct SnapshotMountHelperStatusView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+            if let inventoryDriftMounts, inventoryDriftMounts > 0 {
+                Text("\(inventoryDriftMounts) released snapshot inventory record(s) changed outside the recorded baseline. Reconciliation updates only the journal baseline after identity checks; it does not delete snapshots.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(
+                    "Reconcile snapshot inventory",
+                    action: SnapshotMountHelperControlAction.reconcileInventory(using: reconcileInventory)
+                )
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("snapshot-mount-helper-reconcile-inventory")
+                    .disabled(busy || !readiness.canReconcileInventory)
             }
             if !readiness.classificationKnown && readiness.isReady {
                 Text("The installed helper did not report a complete mount status. Refresh diagnostics before changing it.")

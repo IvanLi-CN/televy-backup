@@ -328,7 +328,14 @@ async fn recover_journal(pool: &SqlitePool) -> Result<(), HelperError> {
         let uid: i64 = sqlx::Row::try_get(&row, "uid")?;
         let _mount_device: i64 = sqlx::Row::try_get(&row, "mount_device").unwrap_or_default();
         let state = match mount_helper::release(uid as u32, &lease_id) {
-            Ok(result) if result.cleanup_state == "released" => "released",
+            Ok(result)
+                if matches!(
+                    result.cleanup_state.as_str(),
+                    "released" | "reconcile_required"
+                ) =>
+            {
+                "released"
+            }
             _ => "cleanup_pending",
         };
         sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
@@ -361,8 +368,13 @@ async fn retry_pending_cleanup(
         let Ok(result) = mount_helper::release(owner_uid, &lease_id) else {
             continue;
         };
+        let cleanup_state = if result.cleanup_state == "reconcile_required" {
+            "released"
+        } else {
+            result.cleanup_state.as_str()
+        };
         sqlx::query("UPDATE leases SET state = ? WHERE lease_id = ?")
-            .bind(&result.cleanup_state)
+            .bind(cleanup_state)
             .bind(&lease_id)
             .execute(journal)
             .await?;
@@ -392,10 +404,15 @@ async fn retry_pending_cleanup_all(pool: &SqlitePool) {
         let Ok(result) = mount_helper::release(uid, &lease_id) else {
             continue;
         };
+        let cleanup_state = if result.cleanup_state == "reconcile_required" {
+            "released"
+        } else {
+            result.cleanup_state.as_str()
+        };
         let _ = sqlx::query(
             "UPDATE leases SET state = ? WHERE lease_id = ? AND state = 'cleanup_pending'",
         )
-        .bind(&result.cleanup_state)
+        .bind(cleanup_state)
         .bind(&lease_id)
         .execute(pool)
         .await;
@@ -1468,6 +1485,7 @@ async fn release_lease(
         inventories.remove(lease_id);
     }
     let cleanup_state = match mount_helper::release(uid, &lease.lease_id) {
+        Ok(result) if result.cleanup_state == "reconcile_required" => "released".to_string(),
         Ok(result) => result.cleanup_state,
         Err(_) => "cleanup_pending".to_string(),
     };
@@ -1506,6 +1524,7 @@ async fn retry_recorded_cleanup(
         return Err(HelperError::Message("lease not found".into()));
     }
     let cleanup_state = match mount_helper::release(uid, lease_id) {
+        Ok(result) if result.cleanup_state == "reconcile_required" => "released".to_string(),
         Ok(result) => result.cleanup_state,
         Err(_) => "cleanup_pending".to_string(),
     };
