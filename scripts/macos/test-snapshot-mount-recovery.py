@@ -311,7 +311,6 @@ def main():
     mount = fixture / "volume"
     mount.mkdir()
     source = mount / "nested" / "source"
-    source.mkdir(parents=True)
     root = fixture / "root"
     image = fixture / "fixture.dmg"
     attached = loaded = False
@@ -341,6 +340,7 @@ def main():
             str(image),
         )
         attached = True
+        source.mkdir(parents=True)
         info = plistlib.loads(run("/usr/sbin/diskutil", "info", "-plist", str(mount)).stdout)
         device = info["DeviceIdentifier"]
         volume_uuid = info.get("APFSVolumeUUID", info.get("VolumeUUID"))
