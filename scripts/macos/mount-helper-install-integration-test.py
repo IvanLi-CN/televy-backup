@@ -170,6 +170,7 @@ def main():
     process = None
     journal_locker = None
     root = None
+    uninstall_sentinel = None
     candidate_helper = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
     candidate_helper_original = candidate_helper.read_bytes()
     # Preserve all fixture state if process shutdown cannot be verified.
@@ -324,6 +325,11 @@ while True:
             print("SETUP: interrupted helper backups are present while the service is absent", flush=True)
         elif args.uninstall:
             assert before["result"]["mount_helper_reachable"] is False
+            uninstall_sentinel = JOURNAL / "uninstall-sentinel"
+            run("sudo", "-n", "mkdir", "-p", str(JOURNAL))
+            run("sudo", "-n", "touch", str(uninstall_sentinel))
+            run("sudo", "-n", "chown", "root:wheel", str(uninstall_sentinel))
+            run("sudo", "-n", "chmod", "600", str(uninstall_sentinel))
             print("SETUP: legacy helper is reachable only through the compatibility probe", flush=True)
         elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
@@ -395,6 +401,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             )
             assert restored["result"]["helper_version"] == "0.5.0"
             assert hashlib.sha256(BINARY.read_bytes()).hexdigest() == old_binary_hash
+            assert hashlib.sha256(PLIST.read_bytes()).hexdigest() == old_plist_hash
             assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
             print("PASS: failed candidate bootstrap restores the previous helper and clears quarantine backups", flush=True)
         else:
@@ -453,6 +460,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             removal = json.loads(removed.stdout)
             assert removal["uninstalled"] is True
             assert not BINARY.exists() and not PLIST.exists()
+            assert uninstall_sentinel is not None and uninstall_sentinel.exists()
+            assert JOURNAL.is_dir()
             after = wait_for(
                 lambda: request(access_socket, metadata["protocolVersion"]),
                 lambda reply: reply.get("result", {}).get("mount_helper_reachable") is False,
@@ -490,7 +499,18 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             str(MOUNT_SOCKET),
             check=False,
         )
+        for path in [
+            *BINARY.parent.glob(BINARY.name + ".backup-*"),
+            *BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"),
+            *PLIST.parent.glob(PLIST.stem + ".backup-*"),
+            *PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"),
+        ]:
+            run("sudo", "-n", "rm", "-f", str(path), check=False)
         run("sudo", "-n", "rm", "-rf", str(JOURNAL), str(root), check=False)
+        assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
+        assert not any(BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"))
+        assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+        assert not any(PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"))
         assert not any(os.path.lexists(path) for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), "fixture cleanup incomplete"
         shutil.rmtree(fixture)
 
