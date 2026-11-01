@@ -501,17 +501,25 @@ fn launchctl_service_absent(error: &CliError) -> bool {
         || error.message.contains("No such process")
 }
 
-fn bootout_for_uninstall(service: &str) -> Result<(), CliError> {
+fn bootout_failure(error: CliError, operation: &str, error_code: &'static str) -> CliError {
+    CliError::retryable(
+        error_code,
+        format!(
+            "cannot stop the snapshot mount helper before {operation}: {}",
+            error.message
+        ),
+    )
+}
+
+fn bootout_for_mutation(
+    service: &str,
+    operation: &str,
+    error_code: &'static str,
+) -> Result<(), CliError> {
     match launchctl(&["bootout", service]) {
         Ok(()) => Ok(()),
         Err(error) if launchctl_service_absent(&error) => Ok(()),
-        Err(error) => Err(CliError::retryable(
-            "snapshot_mount_helper.uninstall_failed",
-            format!(
-                "cannot stop the snapshot mount helper before uninstall: {}",
-                error.message
-            ),
-        )),
+        Err(error) => Err(bootout_failure(error, operation, error_code)),
     }
 }
 
@@ -714,6 +722,12 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
+    let service = system_service_target();
+    bootout_for_mutation(
+        &service,
+        "install",
+        "snapshot_mount_helper.install_failed",
+    )?;
     let candidate_hash = {
         let source = current_executable_sibling()?;
         let candidate_hash = helper_sha256(&source)?;
@@ -722,8 +736,6 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             Path::new(MOUNT_HELPER_PLIST_PATH),
             plist_contents().as_bytes(),
         )?;
-        let service = system_service_target();
-        let _ = launchctl(&["bootout", &service]);
         candidate_hash
         // Release the shared lock before bootstrap: the new root helper must take it during
         // startup recovery before it can create the ready IPC socket.
@@ -776,7 +788,11 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
     }
     ensure_uninstall_safe(busy)?;
     let service = system_service_target();
-    bootout_for_uninstall(&service)?;
+    bootout_for_mutation(
+        &service,
+        "uninstall",
+        "snapshot_mount_helper.uninstall_failed",
+    )?;
     if Path::new(MOUNT_HELPER_PLIST_PATH).exists() {
         fs::remove_file(MOUNT_HELPER_PLIST_PATH).map_err(|error| {
             CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
@@ -1706,6 +1722,20 @@ mod tests {
             "Operation not permitted",
         );
         assert!(!launchctl_service_absent(&unknown));
+    }
+
+    #[test]
+    fn non_absent_bootout_failure_is_returned_before_asset_mutation() {
+        let error = bootout_failure(
+            CliError::retryable(
+                "snapshot_mount_helper.launchctl_failed",
+                "Operation not permitted",
+            ),
+            "install",
+            "snapshot_mount_helper.install_failed",
+        );
+        assert_eq!(error.code, "snapshot_mount_helper.install_failed");
+        assert!(error.message.contains("Operation not permitted"));
     }
 
     #[test]
