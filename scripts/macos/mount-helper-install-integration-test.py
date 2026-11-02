@@ -59,6 +59,11 @@ def asset_backup_glob(path, suffix):
     return path.parent.glob(f"{path.stem}.{suffix}-*")
 
 
+def root_path_exists(path, directory=False):
+    test_flag = "-d" if directory else "-e"
+    return run("sudo", "-n", "/usr/bin/test", test_flag, str(path), check=False).returncode == 0
+
+
 def seed_legacy_stale_journal(uid):
     """Create one age-gated reservation row before the candidate helper starts."""
     lease_id = str(uuid.uuid4())
@@ -532,8 +537,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             removal = json.loads(removed.stdout)
             assert removal["uninstalled"] is True
             assert not BINARY.exists() and not PLIST.exists()
-            assert uninstall_sentinel is not None and uninstall_sentinel.exists()
-            assert JOURNAL.is_dir()
+            assert uninstall_sentinel is not None and root_path_exists(uninstall_sentinel)
+            assert root_path_exists(JOURNAL, directory=True)
             assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
             after = wait_for(
                 lambda: request(access_socket, metadata["protocolVersion"]),
