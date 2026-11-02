@@ -1,8 +1,7 @@
-use std::ffi::CString;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -26,7 +25,7 @@ fn system_service_target() -> String {
     format!("system/{MOUNT_HELPER_LABEL}")
 }
 
-fn current_executable_sibling() -> Result<PathBuf, CliError> {
+fn current_executable_sibling() -> Result<fs::File, CliError> {
     let executable = std::env::current_exe().map_err(|error| {
         CliError::new(
             "snapshot_mount_helper.executable_unavailable",
@@ -40,16 +39,29 @@ fn current_executable_sibling() -> Result<PathBuf, CliError> {
         )
     })?;
     let helper = parent.join("televybackup-snapshot-mount-helper");
-    if !helper.is_file() {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&helper)
+        .map_err(|error| {
+            CliError::new(
+                "snapshot_mount_helper.executable_unavailable",
+                format!("cannot open snapshot mount helper binary: {error}"),
+            )
+        })?;
+    let metadata = file.metadata().map_err(|error| {
+        CliError::new(
+            "snapshot_mount_helper.executable_unavailable",
+            format!("cannot inspect snapshot mount helper binary: {error}"),
+        )
+    })?;
+    if !metadata.is_file() || metadata.mode() & 0o022 != 0 {
         return Err(CliError::new(
             "snapshot_mount_helper.executable_unavailable",
-            format!(
-                "snapshot mount helper binary not found: {}",
-                helper.display()
-            ),
+            "snapshot mount helper binary is not a safe regular file",
         ));
     }
-    Ok(helper)
+    Ok(file)
 }
 
 fn require_root() -> Result<(), CliError> {
@@ -97,7 +109,7 @@ fn plist_contents() -> &'static str {
 "#
 }
 
-fn atomic_copy(source: &Path, destination: &Path) -> Result<(), CliError> {
+fn stage_copy(source: &mut fs::File, destination: &Path) -> Result<(PathBuf, String), CliError> {
     let parent = destination.parent().ok_or_else(|| {
         CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -108,18 +120,56 @@ fn atomic_copy(source: &Path, destination: &Path) -> Result<(), CliError> {
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = destination.with_extension(format!("tmp-{}", std::process::id()));
-    fs::copy(source, &staged).map_err(|error| {
-        CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-    })?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).map_err(|error| {
-        CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-    })?;
-    set_root_owner(&staged, "snapshot mount helper")?;
-    fs::rename(&staged, destination)
-        .map_err(|error| CliError::new("snapshot_mount_helper.install_failed", error.to_string()))
+    let mut staged_file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o755)
+        .open(&staged)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(install_asset_error(error));
+        }
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match source.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) => {
+                let _ = fs::remove_file(&staged);
+                return Err(install_asset_error(error));
+            }
+        };
+        if count == 0 {
+            break;
+        }
+        if let Err(error) = staged_file.write_all(&buffer[..count]) {
+            let _ = fs::remove_file(&staged);
+            return Err(install_asset_error(error));
+        }
+        digest.update(&buffer[..count]);
+    }
+    if let Err(error) = staged_file.sync_all() {
+        let _ = fs::remove_file(&staged);
+        return Err(install_asset_error(error));
+    }
+    if let Err(error) = staged_file.set_permissions(fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = set_root_owner_file(&staged_file, "snapshot mount helper") {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok((staged, format!("{:x}", digest.finalize())))
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
+fn stage_write(path: &Path, contents: &[u8]) -> Result<PathBuf, CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -130,35 +180,557 @@ fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), CliError> {
         CliError::new("snapshot_mount_helper.install_failed", error.to_string())
     })?;
     let staged = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
+    let mut file = match OpenOptions::new()
         .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .mode(0o644)
         .open(&staged)
-        .map_err(|error| {
-            CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-        })?;
-    file.write_all(contents)
-        .and_then(|_| file.sync_all())
-        .map_err(|error| {
-            CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-        })?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o644)).map_err(|error| {
-        CliError::new("snapshot_mount_helper.install_failed", error.to_string())
-    })?;
-    set_root_owner(&staged, "snapshot mount helper plist")?;
-    fs::rename(staged, path)
-        .map_err(|error| CliError::new("snapshot_mount_helper.install_failed", error.to_string()))
+    {
+        Ok(file) => file,
+        Err(error) => {
+            return Err(CliError::new(
+                "snapshot_mount_helper.install_failed",
+                error.to_string(),
+            ));
+        }
+    };
+    if let Err(error) = file.write_all(contents).and_then(|_| file.sync_all()) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o644)) {
+        let _ = fs::remove_file(&staged);
+        return Err(CliError::new(
+            "snapshot_mount_helper.install_failed",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = set_root_owner_file(&file, "snapshot mount helper plist") {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(staged)
 }
 
-fn set_root_owner(path: &Path, description: &str) -> Result<(), CliError> {
-    let encoded = CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        CliError::new(
-            "snapshot_mount_helper.install_failed",
-            format!("{description} path contains a NUL byte"),
+fn discard_staged(paths: &[&Path]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn install_asset_error(error: impl std::fmt::Display) -> CliError {
+    CliError::new("snapshot_mount_helper.install_failed", error.to_string())
+}
+
+fn backup_prefix(path: &Path) -> Result<String, CliError> {
+    let name = path
+        .file_stem()
+        .or_else(|| path.file_name())
+        .ok_or_else(|| install_asset_error("helper asset has no file name"))?;
+    Ok(format!("{}.", name.to_string_lossy()))
+}
+
+fn backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| install_asset_error("helper asset has no parent"))?;
+    let prefix = format!("{}backup-", backup_prefix(path)?);
+    let mut candidates = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(install_asset_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(install_asset_error)?;
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with(&prefix) {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn staged_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| install_asset_error("helper asset has no parent"))?;
+    let prefix = format!("{}tmp-", backup_prefix(path)?);
+    let mut candidates = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(install_asset_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(install_asset_error)?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn quarantine_backup_candidates(path: &Path) -> Result<Vec<PathBuf>, CliError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| install_asset_error("helper asset has no parent"))?;
+    let prefix = format!("{}uninstall-backup-", backup_prefix(path)?);
+    let mut candidates = Vec::new();
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidates),
+        Err(error) => return Err(install_asset_error(error)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(install_asset_error)?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort();
+    Ok(candidates)
+}
+
+fn recover_interrupted_helper_transaction(
+    config_dir: &Path,
+    data_dir: &Path,
+) -> Result<(), CliError> {
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    let paths = [binary, plist];
+    let mut backups = Vec::new();
+    let mut quarantine_backups = Vec::new();
+    let mut staged_files = Vec::new();
+    for path in paths {
+        for backup in backup_candidates(path)? {
+            if !safe_root_asset(&backup) {
+                return Err(install_asset_error(format!(
+                    "unsafe helper backup blocks recovery: {}",
+                    backup.display()
+                )));
+            }
+            backups.push((path, backup));
+        }
+        for backup in quarantine_backup_candidates(path)? {
+            if !safe_root_asset(&backup) {
+                return Err(install_asset_error(format!(
+                    "unsafe uninstall backup blocks recovery: {}",
+                    backup.display()
+                )));
+            }
+            quarantine_backups.push((path, backup));
+        }
+        for staged in staged_candidates(path)? {
+            if !safe_root_asset(&staged) {
+                return Err(install_asset_error(format!(
+                    "unsafe helper staging file blocks recovery: {}",
+                    staged.display()
+                )));
+            }
+            staged_files.push(staged);
+        }
+    }
+    let mut service_state = if backups.is_empty()
+        && quarantine_backups.is_empty()
+        && staged_files.is_empty()
+        && safe_root_asset(binary) == safe_root_asset(plist)
+    {
+        None
+    } else {
+        Some(helper_service_state())
+    };
+    if matches!(service_state, Some(HelperServiceState::Unknown)) {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            "cannot recover interrupted helper assets while the launchd service state is unknown",
+        ));
+    }
+    for staged in staged_files {
+        fs::remove_file(staged).map_err(install_asset_error)?;
+    }
+    if service_state == Some(HelperServiceState::Loaded) && !backups.is_empty() {
+        let candidate_ready = match mount_helper::status() {
+            Ok(status) => {
+                let candidate_ready = status.component_version.as_deref()
+                    == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+                    && status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
+                if !candidate_ready
+                    && !matches!(
+                        classify_busy_status("recover interrupted helper transaction", &status),
+                        Ok(BusyCheck::Clear)
+                    )
+                {
+                    return Err(CliError::retryable(
+                        "snapshot_mount_helper.busy",
+                        "cannot recover an interrupted helper while mount records remain active or unclassified",
+                    ));
+                }
+                candidate_ready
+            }
+            Err(_) => false,
+        };
+        if !candidate_ready {
+            let access_status = snapshot_access_status_for_maintenance(
+                config_dir,
+                data_dir,
+                "recovering an interrupted helper transaction",
+            )?;
+            ensure_snapshot_access_idle(&access_status)?;
+            let complete_backup_set = paths.iter().all(|path| {
+                backups
+                    .iter()
+                    .filter(|(candidate, _)| candidate.as_os_str() == path.as_os_str())
+                    .count()
+                    == 1
+            });
+            if !complete_backup_set {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.status_unavailable",
+                    "cannot recover an unready helper with an incomplete or ambiguous asset backup",
+                ));
+            }
+            bootout_for_mutation(
+                &system_service_target(),
+                "recover interrupted helper transaction",
+                "snapshot_mount_helper.install_rollback_failed",
+            )?;
+            service_state = Some(HelperServiceState::Absent);
+        }
+    }
+    for (path, backup) in backups {
+        match fs::symlink_metadata(path) {
+            Ok(_) if !safe_root_asset(path) => {
+                return Err(install_asset_error(format!(
+                    "unsafe helper asset blocks recovery: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {
+                if service_state == Some(HelperServiceState::Loaded) {
+                    fs::remove_file(&backup).map_err(install_asset_error)?;
+                } else if service_state == Some(HelperServiceState::Absent) {
+                    let candidates = backup_candidates(path)?;
+                    if candidates.len() != 1 {
+                        return Err(install_asset_error(format!(
+                            "ambiguous helper backup recovery for {}",
+                            path.display()
+                        )));
+                    }
+                    fs::rename(candidates[0].as_path(), path).map_err(install_asset_error)?;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if service_state != Some(HelperServiceState::Absent) {
+                    return Err(CliError::retryable(
+                        "snapshot_mount_helper.status_unavailable",
+                        "cannot restore an interrupted helper asset while the service is loaded",
+                    ));
+                }
+                let candidates = backup_candidates(path)?;
+                if candidates.len() != 1 {
+                    return Err(install_asset_error(format!(
+                        "ambiguous helper backup recovery for {}",
+                        path.display()
+                    )));
+                }
+                fs::rename(candidates[0].as_path(), path).map_err(install_asset_error)?;
+            }
+            Err(error) => return Err(install_asset_error(error)),
+        }
+    }
+    for (path, backup) in quarantine_backups {
+        if service_state == Some(HelperServiceState::Loaded) && !safe_root_asset(path) {
+            return Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                "cannot discard an interrupted uninstall while the service is loaded without its canonical assets",
+            ));
+        }
+        fs::remove_file(backup).map_err(install_asset_error)?;
+    }
+    if service_state == Some(HelperServiceState::Absent) {
+        let binary_exists = fs::symlink_metadata(binary).is_ok();
+        let plist_exists = fs::symlink_metadata(plist).is_ok();
+        if binary_exists != plist_exists {
+            let orphan = if binary_exists { binary } else { plist };
+            if !safe_root_asset(orphan) {
+                return Err(install_asset_error(format!(
+                    "unsafe partial helper asset blocks recovery: {}",
+                    orphan.display()
+                )));
+            }
+            fs::remove_file(orphan).map_err(install_asset_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn backup_asset_with_suffix(path: &Path, suffix: &str) -> Result<Option<PathBuf>, CliError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) if !safe_root_asset(path) => {
+            return Err(install_asset_error(format!(
+                "unsafe existing helper asset: {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(install_asset_error(error)),
+    }
+    let backup = path.with_extension(format!("{suffix}-{}", std::process::id()));
+    match fs::symlink_metadata(&backup) {
+        Ok(_) => {
+            return Err(install_asset_error(format!(
+                "stale helper backup exists: {}",
+                backup.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(install_asset_error(error)),
+    }
+    fs::rename(path, &backup).map_err(install_asset_error)?;
+    Ok(Some(backup))
+}
+
+fn backup_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    backup_asset_with_suffix(path, "backup")
+}
+
+fn quarantine_asset(path: &Path) -> Result<Option<PathBuf>, CliError> {
+    backup_asset_with_suffix(path, "uninstall-backup")
+}
+
+fn restore_asset(path: &Path, backup: Option<PathBuf>) -> Result<(), CliError> {
+    if let Some(backup) = backup {
+        if !safe_root_asset(&backup) {
+            return Err(install_asset_error(format!(
+                "unsafe helper backup cannot be restored: {}",
+                backup.display()
+            )));
+        }
+        match fs::symlink_metadata(path) {
+            Ok(_) if !safe_root_asset(path) => {
+                return Err(install_asset_error(format!(
+                    "unsafe helper asset blocks restore: {}",
+                    path.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(install_asset_error(error)),
+            Ok(_) => {}
+        }
+        fs::rename(backup, path).map_err(install_asset_error)?;
+    }
+    Ok(())
+}
+
+fn bootstrap_restored_helper() -> Result<(), CliError> {
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    if safe_root_asset(plist) {
+        launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+        wait_for_helper_status().map(|_| ())?;
+    } else if fs::symlink_metadata(plist).is_ok() {
+        return Err(install_asset_error(
+            "unsafe snapshot mount helper plist blocks bootstrap",
+        ));
+    }
+    Ok(())
+}
+
+fn restore_committed_assets(
+    binary_backup: Option<PathBuf>,
+    plist_backup: Option<PathBuf>,
+) -> Result<(), CliError> {
+    let mut failures = Vec::new();
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    for (label, path, backup) in [
+        ("binary", binary, binary_backup),
+        ("plist", plist, plist_backup),
+    ] {
+        match backup {
+            Some(backup) => {
+                if let Err(error) = restore_asset(path, Some(backup)) {
+                    failures.push(format!("{label} restore failed: {}", error.message));
+                }
+            }
+            None => match fs::symlink_metadata(path) {
+                Ok(_) if !safe_root_asset(path) => failures.push(format!(
+                    "unsafe candidate {label} blocks rollback: {}",
+                    path.display()
+                )),
+                Ok(_) => {
+                    if let Err(error) = fs::remove_file(path) {
+                        failures.push(format!("candidate {label} removal failed: {error}"));
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    failures.push(format!("candidate {label} inspection failed: {error}"))
+                }
+            },
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            failures.join("; "),
+        ))
+    }
+}
+
+fn rollback_failure(original: &CliError, rollback: CliError) -> CliError {
+    CliError::retryable(
+        "snapshot_mount_helper.install_rollback_failed",
+        format!(
+            "{}; rollback failed: {}",
+            original.message, rollback.message
+        ),
+    )
+}
+
+fn commit_staged_assets(
+    staged_binary: &Path,
+    staged_plist: &Path,
+) -> Result<(Option<PathBuf>, Option<PathBuf>), CliError> {
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    let old_binary = backup_asset(binary)?;
+    let old_plist = match backup_asset(plist) {
+        Ok(backup) => backup,
+        Err(error) => {
+            return match restore_asset(binary, old_binary) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback_failure(&error, rollback)),
+            };
+        }
+    };
+    if let Err(error) = fs::rename(staged_binary, binary) {
+        let install_error = install_asset_error(error);
+        return match restore_committed_assets(old_binary, old_plist) {
+            Ok(()) => Err(install_error),
+            Err(rollback) => Err(rollback_failure(&install_error, rollback)),
+        };
+    }
+    if let Err(error) = fs::rename(staged_plist, plist) {
+        let install_error = install_asset_error(error);
+        return match restore_committed_assets(old_binary, old_plist) {
+            Ok(()) => Err(install_error),
+            Err(rollback) => Err(rollback_failure(&install_error, rollback)),
+        };
+    }
+    Ok((old_binary, old_plist))
+}
+
+fn rollback_installed_assets(
+    config_dir: &Path,
+    data_dir: &Path,
+    old_binary: Option<PathBuf>,
+    old_plist: Option<PathBuf>,
+) -> Result<(), CliError> {
+    let mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!("cannot reacquire the snapshot mount mutation lock: {error}"),
         )
     })?;
-    let result = unsafe { libc::chown(encoded.as_ptr(), 0, 0) };
+    match mount_helper::status() {
+        Ok(status) => {
+            if let Some(error) = busy_error("rollback the snapshot mount helper", &status) {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.install_rollback_failed",
+                    format!(
+                        "cannot rollback while helper status is not clear: {}",
+                        error.message
+                    ),
+                ));
+            }
+        }
+        Err(error) => {
+            let service_state = helper_service_state();
+            if service_state == HelperServiceState::Unknown {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.install_rollback_failed",
+                    format!(
+                        "cannot verify the helper is idle before rollback: {error}; service state is {service_state:?}"
+                    ),
+                ));
+            }
+            // A failed bootstrap can leave launchd with an absent or loaded-but-unreachable
+            // candidate. The mutation lock prevents new journal-changing requests while the
+            // service is booted out, and the restored helper will recover any preserved journal
+            // rows on startup. An unknown launchd state remains fail-closed above.
+        }
+    }
+    let access_status = snapshot_access_status_for_maintenance(
+        config_dir,
+        data_dir,
+        "rolling back the snapshot mount helper",
+    )
+    .map_err(|access_error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!(
+                "cannot verify Snapshot Access is idle before rollback: {}",
+                access_error.message
+            ),
+        )
+    })?;
+    ensure_snapshot_access_idle(&access_status).map_err(|access_error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!(
+                "cannot rollback while Snapshot Access is not idle: {}",
+                access_error.message
+            ),
+        )
+    })?;
+    let service = system_service_target();
+    if let Err(error) = bootout_for_mutation(
+        &service,
+        "install rollback",
+        "snapshot_mount_helper.install_failed",
+    ) {
+        return Err(CliError::retryable(
+            "snapshot_mount_helper.install_rollback_failed",
+            format!(
+                "cannot stop the candidate helper before rollback: {}",
+                error.message
+            ),
+        ));
+    }
+    let restore_result = restore_committed_assets(old_binary, old_plist);
+    drop(mutation_lock);
+    restore_result?;
+    bootstrap_restored_helper()
+}
+
+fn quarantine_uninstall_assets() -> Result<(Option<PathBuf>, Option<PathBuf>), CliError> {
+    let plist = Path::new(MOUNT_HELPER_PLIST_PATH);
+    let binary = Path::new(MOUNT_HELPER_INSTALL_PATH);
+    let old_plist = quarantine_asset(plist)?;
+    let old_binary = match quarantine_asset(binary) {
+        Ok(backup) => backup,
+        Err(error) => {
+            return match restore_asset(plist, old_plist) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback_failure(&error, rollback)),
+            };
+        }
+    };
+    Ok((old_binary, old_plist))
+}
+
+fn set_root_owner_file(file: &fs::File, description: &str) -> Result<(), CliError> {
+    let result = unsafe { libc::fchown(file.as_raw_fd(), 0, 0) };
     if result != 0 {
         return Err(CliError::new(
             "snapshot_mount_helper.install_failed",
@@ -183,6 +755,21 @@ fn safe_root_asset(path: &Path) -> bool {
 fn helper_assets_are_installed() -> bool {
     safe_root_asset(Path::new(MOUNT_HELPER_INSTALL_PATH))
         || safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH))
+}
+
+fn is_uninstall_operation(operation: &str) -> bool {
+    operation == "uninstall the snapshot mount helper"
+}
+
+fn no_assets_busy_check(operation: &str) -> Result<BusyCheck, CliError> {
+    if is_uninstall_operation(operation) {
+        Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            "cannot uninstall the snapshot mount helper while its installed assets and status are unavailable; refusing to proceed",
+        ))
+    } else {
+        Ok(BusyCheck::Clear)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,10 +827,36 @@ fn wait_for_helper_status() -> Result<MountStatusResult, CliError> {
 
 fn busy_error(operation: &str, status: &MountStatusResult) -> Option<CliError> {
     if status.active_mounts == 0 {
+        let current_component =
+            status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION);
+        let classification_complete = status.pending_cleanup.is_some()
+            && status.live_mounts.is_some()
+            && status.recoverable_stale_mounts.is_some()
+            && status.unknown_blocking_mounts.is_some()
+            && status.inventory_drift_mounts.is_some();
+        let has_blocking_detail = status.pending_cleanup.is_some_and(|count| count > 0)
+            || status.live_mounts.is_some_and(|count| count > 0)
+            || status
+                .recoverable_stale_mounts
+                .is_some_and(|count| count > 0)
+            || status
+                .unknown_blocking_mounts
+                .is_some_and(|count| count > 0)
+            || status.inventory_drift_mounts.is_some_and(|count| count > 0)
+            || !status.pending_cleanup_leases.is_empty()
+            || !status.recovery_leases.is_empty()
+            || !status.blocked_volume_uuids.is_empty();
+        if (current_component && !classification_complete) || has_blocking_detail {
+            return Some(CliError::retryable(
+                "snapshot_mount_helper.status_incomplete",
+                format!(
+                    "cannot {operation}: the installed snapshot mount helper reported an incomplete or contradictory zero-row status"
+                ),
+            ));
+        }
         // The legacy aggregate includes every blocking journal row, including cleanup-pending
         // rows. A legacy helper that reports zero therefore has no row to protect, even though it
-        // cannot provide the additive classification fields. The replacement transaction still
-        // requires the current component and build identity before acknowledging readiness.
+        // cannot provide the additive classification fields.
         return None;
     }
     let pending_cleanup = match status.pending_cleanup {
@@ -372,6 +985,44 @@ fn classify_busy_status(
         && status.recoverable_stale_mounts.is_none()
         && status.unknown_blocking_mounts.is_none()
         && status.inventory_drift_mounts.is_none();
+    let stale_current_partition_is_complete = match (
+        status.pending_cleanup,
+        status.live_mounts,
+        status.recoverable_stale_mounts,
+        status.unknown_blocking_mounts,
+    ) {
+        (Some(pending), Some(live), Some(recoverable), Some(unknown)) => {
+            pending
+                .checked_add(live)
+                .and_then(|total| total.checked_add(recoverable))
+                .and_then(|total| total.checked_add(unknown))
+                == Some(status.active_mounts)
+        }
+        _ => false,
+    };
+    let stale_current_partial_classification = status.helper_version
+        == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        && status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && status.build_commit.as_deref().is_some_and(|commit| {
+            commit != env!("TELEVYBACKUP_BUILD_COMMIT")
+                && commit.len() == 40
+                && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && status.pending_cleanup.is_some()
+        && status.live_mounts.is_some()
+        && status.recoverable_stale_mounts.is_some()
+        && status.unknown_blocking_mounts.is_some()
+        && status.inventory_drift_mounts.is_none()
+        && status.live_mounts == Some(0)
+        && stale_current_partition_is_complete;
+    if stale_current_partial_classification {
+        // The previous helper implementation used the current component version but did not
+        // report inventory-drift rows. Replace that known stale build only after Snapshot Access
+        // proves idle; the candidate must classify the preserved journal before it can serve a
+        // lease. This avoids a permanent update deadlock without treating the unknown row as
+        // safe or clearing it during the upgrade.
+        return Ok(BusyCheck::LegacyUpgrade);
+    }
     if status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.inventory_drift_mounts.is_none()
         && status.active_mounts > 0
@@ -429,6 +1080,46 @@ fn classify_busy_status(
     busy_error(operation, status).map_or(Ok(BusyCheck::Clear), Err)
 }
 
+fn ensure_uninstall_safe(check: BusyCheck) -> Result<(), CliError> {
+    match check {
+        BusyCheck::Clear => Ok(()),
+        BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => Err(CliError::retryable(
+            "snapshot_mount_helper.busy",
+            "cannot uninstall the snapshot mount helper while snapshot mount records remain; update or reconcile the helper first",
+        )),
+        BusyCheck::RecoveryRequired => Err(CliError::retryable(
+            "snapshot_mount_helper.status_unavailable",
+            "cannot uninstall the snapshot mount helper while its status is unavailable",
+        )),
+    }
+}
+
+fn launchctl_service_absent(error: &CliError) -> bool {
+    error.message.contains("Could not find service") || error.message.contains("No such process")
+}
+
+fn bootout_failure(error: CliError, operation: &str, error_code: &'static str) -> CliError {
+    CliError::retryable(
+        error_code,
+        format!(
+            "cannot stop the snapshot mount helper before {operation}: {}",
+            error.message
+        ),
+    )
+}
+
+fn bootout_for_mutation(
+    service: &str,
+    operation: &str,
+    error_code: &'static str,
+) -> Result<(), CliError> {
+    match launchctl(&["bootout", service]) {
+        Ok(()) => Ok(()),
+        Err(error) if launchctl_service_absent(&error) => Ok(()),
+        Err(error) => Err(bootout_failure(error, operation, error_code)),
+    }
+}
+
 fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
     if status.active_leases > 0 {
         return Err(CliError::retryable(
@@ -451,6 +1142,33 @@ fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
     Ok(())
 }
 
+fn snapshot_access_status_for_maintenance(
+    config_dir: &Path,
+    data_dir: &Path,
+    operation: &str,
+) -> Result<StatusResult, CliError> {
+    super::snapshot_service::status_for_maintenance(config_dir, data_dir).map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.access_unavailable",
+            format!(
+                "cannot verify Snapshot Access before {operation}: {}",
+                error.message
+            ),
+        )
+    })
+}
+
+fn ensure_snapshot_access_idle_for_mutation(
+    config_dir: &Path,
+    data_dir: &Path,
+    operation: &str,
+) -> Result<(), CliError> {
+    let status = snapshot_access_status_for_maintenance(config_dir, data_dir, operation)?;
+    ensure_snapshot_access_idle(&status).map_err(|error| {
+        CliError::retryable(error.code, format!("cannot {operation}: {}", error.message))
+    })
+}
+
 fn wait_for_snapshot_access_idle(
     config_dir: &Path,
     data_dir: &Path,
@@ -458,16 +1176,7 @@ fn wait_for_snapshot_access_idle(
 ) -> Result<StatusResult, CliError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let status = super::snapshot_service::status_for_maintenance(config_dir, data_dir)
-            .map_err(|error| {
-                CliError::retryable(
-                    "snapshot_mount_helper.access_unavailable",
-                    format!(
-                        "cannot verify Snapshot Access before {operation}: {}",
-                        error.message
-                    ),
-                )
-            })?;
+        let status = snapshot_access_status_for_maintenance(config_dir, data_dir, operation)?;
         if status.active_leases > 0 || Instant::now() >= deadline {
             ensure_snapshot_access_idle(&status)?;
         }
@@ -478,19 +1187,21 @@ fn wait_for_snapshot_access_idle(
     }
 }
 
-fn prepare_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+fn wait_for_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+    // Snapshot Access cleanup retries acquire the same cross-process mutation lock as an
+    // installer. Do not hold that lock while waiting, or the cleanup can never make progress.
     wait_for_snapshot_access_idle(
         config_dir,
         data_dir,
         "replacing the legacy snapshot mount helper",
     )?;
-    launchctl(&["bootout", &system_service_target()])
+    Ok(())
 }
 
 fn check_if_busy(operation: &str) -> Result<BusyCheck, CliError> {
     match mount_helper::status() {
         Ok(status) => classify_busy_status(operation, &status),
-        Err(_error) if !helper_assets_are_installed() => Ok(BusyCheck::Clear),
+        Err(_error) if !helper_assets_are_installed() => no_assets_busy_check(operation),
         Err(error) => match helper_service_state() {
             HelperServiceState::Absent if safe_root_asset(Path::new(MOUNT_HELPER_PLIST_PATH)) => {
                 // An explicitly absent helper may have left journal rows behind. The caller must
@@ -574,9 +1285,13 @@ fn wait_for_installed_helper(
 }
 
 fn helper_sha256(path: &Path) -> Result<String, CliError> {
-    let mut file = fs::File::open(path).map_err(|error| {
-        CliError::new("snapshot_mount_helper.identity_failed", error.to_string())
-    })?;
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            CliError::new("snapshot_mount_helper.identity_failed", error.to_string())
+        })?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
@@ -593,17 +1308,25 @@ fn helper_sha256(path: &Path) -> Result<String, CliError> {
 
 pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     require_root()?;
+    let _install_lock = mount_helper::acquire_install_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_lock_unavailable",
+            format!("cannot install or update the snapshot mount helper safely: {error}"),
+        )
+    })?;
     let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
         CliError::retryable(
             "snapshot_mount_helper.lock_unavailable",
             format!("cannot install or update the snapshot mount helper safely: {error}"),
         )
     })?;
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
     let busy = check_if_busy("install or update the snapshot mount helper")?;
+    let mut replace_legacy_helper = false;
     match busy {
         BusyCheck::Clear => {}
         BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
-            prepare_legacy_upgrade(config_dir, data_dir)?
+            replace_legacy_helper = true;
         }
         BusyCheck::RecoveryRequired => {
             drop(mutation_lock);
@@ -617,7 +1340,7 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             match check_if_busy("install or update the snapshot mount helper")? {
                 BusyCheck::Clear => {}
                 BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
-                    prepare_legacy_upgrade(config_dir, data_dir)?
+                    replace_legacy_helper = true;
                 }
                 BusyCheck::RecoveryRequired => {
                     return Err(CliError::retryable(
@@ -628,34 +1351,128 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             }
         }
     }
-    let candidate_hash = {
-        let source = current_executable_sibling()?;
-        let candidate_hash = helper_sha256(&source)?;
-        atomic_copy(&source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
-        atomic_write(
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
+    if !replace_legacy_helper {
+        ensure_snapshot_access_idle_for_mutation(
+            config_dir,
+            data_dir,
+            "install or update the snapshot mount helper",
+        )?;
+    }
+    let (staged_binary, staged_plist, candidate_hash) = {
+        let mut source = current_executable_sibling()?;
+        let (staged_binary, candidate_hash) =
+            stage_copy(&mut source, Path::new(MOUNT_HELPER_INSTALL_PATH))?;
+        let staged_plist = match stage_write(
             Path::new(MOUNT_HELPER_PLIST_PATH),
             plist_contents().as_bytes(),
-        )?;
-        let service = system_service_target();
-        let _ = launchctl(&["bootout", &service]);
-        candidate_hash
-        // Release the shared lock before bootstrap: the new root helper must take it during
-        // startup recovery before it can create the ready IPC socket.
+        ) {
+            Ok(path) => path,
+            Err(error) => {
+                discard_staged(&[&staged_binary]);
+                return Err(error);
+            }
+        };
+        (staged_binary, staged_plist, candidate_hash)
+    };
+    if replace_legacy_helper {
+        drop(mutation_lock);
+        if let Err(error) = wait_for_legacy_upgrade(config_dir, data_dir) {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
+        mutation_lock = match mount_helper::acquire_mutation_lock() {
+            Ok(lock) => lock,
+            Err(error) => {
+                discard_staged(&[&staged_binary, &staged_plist]);
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.lock_unavailable",
+                    format!(
+                        "cannot resume helper installation safely after Snapshot Access cleanup: {error}"
+                    ),
+                ));
+            }
+        };
+        let refreshed_access = match snapshot_access_status_for_maintenance(
+            config_dir,
+            data_dir,
+            "replacing the legacy snapshot mount helper",
+        ) {
+            Ok(status) => status,
+            Err(error) => {
+                discard_staged(&[&staged_binary, &staged_plist]);
+                return Err(error);
+            }
+        };
+        if let Err(error) = ensure_snapshot_access_idle(&refreshed_access) {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
+        let refreshed_busy = match check_if_busy("install or update the snapshot mount helper") {
+            Ok(busy) => busy,
+            Err(error) => {
+                discard_staged(&[&staged_binary, &staged_plist]);
+                return Err(error);
+            }
+        };
+        if refreshed_busy == BusyCheck::RecoveryRequired {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(CliError::retryable(
+                "snapshot_mount_helper.status_unavailable",
+                "snapshot mount helper became unavailable while waiting for Snapshot Access cleanup",
+            ));
+        }
+    }
+    let service = system_service_target();
+    if let Err(error) =
+        bootout_for_mutation(&service, "install", "snapshot_mount_helper.install_failed")
+    {
+        discard_staged(&[&staged_binary, &staged_plist]);
+        return Err(error);
+    }
+    let (old_binary, old_plist) = match commit_staged_assets(&staged_binary, &staged_plist) {
+        Ok(backups) => backups,
+        Err(error) => {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            drop(mutation_lock);
+            return match bootstrap_restored_helper() {
+                Ok(()) => Err(error),
+                Err(bootstrap_error) => Err(rollback_failure(&error, bootstrap_error)),
+            };
+        }
     };
     drop(mutation_lock);
-    launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
-    let started = Instant::now();
-    let status = wait_for_installed_helper(
-        env!("TELEVYBACKUP_BUILD_COMMIT"),
-        mount_helper::status,
-        std::thread::sleep,
-        || started.elapsed(),
-    )?;
-    if helper_sha256(Path::new(MOUNT_HELPER_INSTALL_PATH))? != candidate_hash {
-        return Err(CliError::new(
-            "snapshot_mount_helper.identity_failed",
-            "installed mount helper does not match the candidate binary",
-        ));
+    let install_result = (|| {
+        launchctl(&["bootstrap", "system", MOUNT_HELPER_PLIST_PATH])?;
+        let started = Instant::now();
+        let status = wait_for_installed_helper(
+            env!("TELEVYBACKUP_BUILD_COMMIT"),
+            mount_helper::status,
+            std::thread::sleep,
+            || started.elapsed(),
+        )?;
+        if helper_sha256(Path::new(MOUNT_HELPER_INSTALL_PATH))? != candidate_hash {
+            return Err(CliError::new(
+                "snapshot_mount_helper.identity_failed",
+                "installed mount helper does not match the candidate binary",
+            ));
+        }
+        Ok(status)
+    })();
+    let status = match install_result {
+        Ok(status) => status,
+        Err(error) => {
+            return match rollback_installed_assets(config_dir, data_dir, old_binary, old_plist) {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(rollback_failure(&error, rollback)),
+            };
+        }
+    };
+    if let Some(path) = old_binary {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = old_plist {
+        let _ = fs::remove_file(path);
     }
     if json_output {
         println!(
@@ -668,15 +1485,23 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     Ok(())
 }
 
-pub fn uninstall(json_output: bool) -> Result<(), CliError> {
+pub fn uninstall(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<(), CliError> {
     require_root()?;
+    let _install_lock = mount_helper::acquire_install_lock().map_err(|error| {
+        CliError::retryable(
+            "snapshot_mount_helper.install_lock_unavailable",
+            format!("cannot uninstall the snapshot mount helper safely: {error}"),
+        )
+    })?;
     let mut mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
         CliError::retryable(
             "snapshot_mount_helper.lock_unavailable",
             format!("cannot uninstall the snapshot mount helper safely: {error}"),
         )
     })?;
-    if check_if_busy("uninstall the snapshot mount helper")? == BusyCheck::RecoveryRequired {
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
+    let mut busy = check_if_busy("uninstall the snapshot mount helper")?;
+    if busy == BusyCheck::RecoveryRequired {
         drop(mutation_lock);
         recover_helper_before_mutation()?;
         mutation_lock = mount_helper::acquire_mutation_lock().map_err(|error| {
@@ -685,26 +1510,40 @@ pub fn uninstall(json_output: bool) -> Result<(), CliError> {
                 format!("cannot resume helper removal safely after recovery: {error}"),
             )
         })?;
-        if check_if_busy("uninstall the snapshot mount helper")? == BusyCheck::RecoveryRequired {
-            return Err(CliError::retryable(
-                "snapshot_mount_helper.status_unavailable",
-                "snapshot mount helper remained absent after recovery bootstrap",
-            ));
-        }
+        busy = check_if_busy("uninstall the snapshot mount helper")?;
     }
+    recover_interrupted_helper_transaction(config_dir, data_dir)?;
+    ensure_uninstall_safe(busy)?;
+    ensure_snapshot_access_idle_for_mutation(
+        config_dir,
+        data_dir,
+        "uninstall the snapshot mount helper",
+    )?;
     let service = system_service_target();
-    let _ = launchctl(&["bootout", &service]);
-    if Path::new(MOUNT_HELPER_PLIST_PATH).exists() {
-        fs::remove_file(MOUNT_HELPER_PLIST_PATH).map_err(|error| {
-            CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
-        })?;
-    }
-    if Path::new(MOUNT_HELPER_INSTALL_PATH).exists() {
-        fs::remove_file(MOUNT_HELPER_INSTALL_PATH).map_err(|error| {
-            CliError::new("snapshot_mount_helper.uninstall_failed", error.to_string())
-        })?;
-    }
+    bootout_for_mutation(
+        &service,
+        "uninstall",
+        "snapshot_mount_helper.uninstall_failed",
+    )?;
+    let (old_binary, old_plist) = match quarantine_uninstall_assets() {
+        Ok(backups) => backups,
+        Err(error) => {
+            drop(mutation_lock);
+            return match bootstrap_restored_helper() {
+                Ok(()) => Err(error),
+                Err(bootstrap_error) => Err(rollback_failure(&error, bootstrap_error)),
+            };
+        }
+    };
     drop(mutation_lock);
+    // Quarantined files are root-owned and no longer reachable from the launchd contract. Best
+    // effort cleanup is safe here; retaining one does not make the helper serviceable.
+    if let Some(path) = old_binary {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = old_plist {
+        let _ = fs::remove_file(path);
+    }
     if json_output {
         println!(
             "{}",
@@ -1476,6 +2315,106 @@ mod tests {
     }
 
     #[test]
+    fn stale_current_helper_without_inventory_classification_enters_guarded_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn stale_current_helper_with_zero_rows_enters_guarded_upgrade() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 0,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn current_candidate_without_inventory_classification_stays_incomplete() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some(env!("TELEVYBACKUP_BUILD_COMMIT").into()),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn stale_current_helper_requires_the_stable_wire_identity() {
+        let mut status = MountStatusResult {
+            helper_version: mount_helper::ROOT_MOUNT_HELPER_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+
+        status.helper_version = mount_helper::MOUNT_HELPER_WIRE_VERSION.into();
+        assert_eq!(
+            classify_busy_status("install or update", &status).unwrap(),
+            BusyCheck::LegacyUpgrade
+        );
+    }
+
+    #[test]
+    fn stale_current_helper_rejects_an_inconsistent_known_partition() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = classify_busy_status("install or update", &status).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
     fn legacy_upgrade_requires_snapshot_access_to_be_idle() {
         let mut status = StatusResult::default();
         assert!(ensure_snapshot_access_idle(&status).is_ok());
@@ -1491,6 +2430,76 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_rejects_any_non_clear_mount_status() {
+        assert!(ensure_uninstall_safe(BusyCheck::Clear).is_ok());
+        for check in [BusyCheck::LegacyUpgrade, BusyCheck::PendingCleanupUpgrade] {
+            assert_eq!(
+                ensure_uninstall_safe(check).unwrap_err().code,
+                "snapshot_mount_helper.busy"
+            );
+        }
+        assert_eq!(
+            ensure_uninstall_safe(BusyCheck::RecoveryRequired)
+                .unwrap_err()
+                .code,
+            "snapshot_mount_helper.status_unavailable"
+        );
+    }
+
+    #[test]
+    fn uninstall_operation_is_distinct_from_installation() {
+        assert!(is_uninstall_operation(
+            "uninstall the snapshot mount helper"
+        ));
+        assert!(!is_uninstall_operation(
+            "install or update the snapshot mount helper"
+        ));
+    }
+
+    #[test]
+    fn missing_helper_assets_block_uninstall_but_allow_first_install() {
+        assert_eq!(
+            no_assets_busy_check("uninstall the snapshot mount helper")
+                .unwrap_err()
+                .code,
+            "snapshot_mount_helper.status_unavailable"
+        );
+        assert_eq!(
+            no_assets_busy_check("install or update the snapshot mount helper").unwrap(),
+            BusyCheck::Clear
+        );
+    }
+
+    #[test]
+    fn uninstall_ignores_only_explicit_service_absence() {
+        let absent = CliError::retryable(
+            "snapshot_mount_helper.launchctl_failed",
+            "Could not find service \"system/com.ivan.televybackup.snapshot-mount-helper\"",
+        );
+        assert!(launchctl_service_absent(&absent));
+
+        let unknown = CliError::retryable(
+            "snapshot_mount_helper.launchctl_failed",
+            "Operation not permitted",
+        );
+        assert!(!launchctl_service_absent(&unknown));
+    }
+
+    #[test]
+    fn non_absent_bootout_failure_is_returned_before_asset_mutation() {
+        let error = bootout_failure(
+            CliError::retryable(
+                "snapshot_mount_helper.launchctl_failed",
+                "Operation not permitted",
+            ),
+            "install",
+            "snapshot_mount_helper.install_failed",
+        );
+        assert_eq!(error.code, "snapshot_mount_helper.install_failed");
+        assert!(error.message.contains("Operation not permitted"));
+    }
+
+    #[test]
     fn legacy_zero_aggregate_allows_a_verified_replacement() {
         assert!(
             busy_error(
@@ -1503,6 +2512,34 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn zero_aggregate_with_blocking_classification_is_not_treated_as_clear() {
+        let status = MountStatusResult {
+            active_mounts: 0,
+            pending_cleanup: Some(1),
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &status).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
+    }
+
+    #[test]
+    fn current_helper_zero_aggregate_requires_all_classification_fields() {
+        let status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            active_mounts: 0,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: None,
+            ..Default::default()
+        };
+        let error = busy_error("update the snapshot mount helper", &status).unwrap();
+        assert_eq!(error.code, "snapshot_mount_helper.status_incomplete");
     }
 
     #[test]

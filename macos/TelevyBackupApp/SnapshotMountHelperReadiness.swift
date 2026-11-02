@@ -5,6 +5,7 @@ struct SnapshotMountHelperReadiness {
     let reachable: Bool
     let isReady: Bool
     let buildCommit: String?
+    let expectedBuildCommit: String?
     let helperVersion: String?
     let activeMounts: UInt32?
     let liveMounts: UInt32?
@@ -34,6 +35,7 @@ struct SnapshotMountHelperReadiness {
     ) {
         self.reachable = reachable
         self.buildCommit = buildCommit
+        self.expectedBuildCommit = expectedBuildCommit
         self.helperVersion = helperVersion
         self.activeMounts = activeMounts
         self.liveMounts = liveMounts
@@ -104,6 +106,9 @@ struct SnapshotMountHelperReadiness {
         if isLegacyPendingCleanupStatus {
             return "The installed helper reports pending cleanup without lease candidates. Update it after Snapshot Access is idle to restore the safe cleanup action."
         }
+        if isStaleCurrentPartialClassification {
+            return "The installed helper is an older build that omits inventory-drift classification. Update it after Snapshot Access is idle so the latest helper can verify the preserved journal."
+        }
         return "The installed helper has not been verified for this app. Update it to use the latest fixes."
     }
 
@@ -151,6 +156,36 @@ struct SnapshotMountHelperReadiness {
         return true
     }
 
+    /// A transitional 0.5.2 helper reported the four original classification partitions but did
+    /// not report inventory drift. A mismatched build may be replaced only when those partitions
+    /// form a complete aggregate; the CLI repeats the Snapshot Access idle check before bootout.
+    var isStaleCurrentPartialClassification: Bool {
+        guard reachable,
+              !isReady,
+              helperVersion == "0.5.2",
+              let buildCommit,
+              buildCommit != expectedBuildCommit,
+              buildCommit.utf8.count == 40,
+              buildCommit.utf8.allSatisfy({
+                  (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+              }),
+              let activeMounts,
+              let pendingCleanup,
+              let liveMounts,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts,
+              inventoryDriftMounts == nil,
+              liveMounts == 0
+        else { return false }
+        let (pendingLive, pendingLiveOverflow) = pendingCleanup.addingReportingOverflow(liveMounts)
+        let (withRecoverable, recoverableOverflow) = pendingLive.addingReportingOverflow(recoverableStaleMounts)
+        let (total, unknownOverflow) = withRecoverable.addingReportingOverflow(unknownBlockingMounts)
+        return !pendingLiveOverflow
+            && !recoverableOverflow
+            && !unknownOverflow
+            && total == activeMounts
+    }
+
     var classificationKnown: Bool {
         liveMounts != nil && pendingCleanup != nil && recoverableStaleMounts != nil && unknownBlockingMounts != nil && inventoryDriftMounts != nil
     }
@@ -166,7 +201,11 @@ struct SnapshotMountHelperReadiness {
         // privileged install transaction performs its own journal/identity
         // checks and fails closed if records are active or ambiguous.
         guard reachable else { return true }
-        if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe { return true }
+        // Helper replacement and removal mutate the same system boundary as Snapshot Access.
+        // Keep the action disabled while a lease or cleanup retry is active; the CLI repeats
+        // this check immediately before bootout so a stale UI cannot bypass the boundary.
+        guard snapshotAccessActiveLeases == 0 && snapshotAccessPendingCleanup == 0 else { return false }
+        if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe || isStaleCurrentPartialClassification { return true }
         if classificationKnown {
             guard activeMounts != nil else { return false }
             return !hasBlockingRecords

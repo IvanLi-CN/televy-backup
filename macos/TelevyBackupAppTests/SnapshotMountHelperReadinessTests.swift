@@ -100,6 +100,15 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!staleCurrentPending.canRetryPendingCleanup, "a stale current helper must not expose cleanup retry before replacement")
         expectReadiness(staleCurrentPending.updateExplanation?.contains("all blocking records are verified cleanup candidates") == true, "the guarded update must explain why it is safe")
 
+        let staleCurrentPartialClear = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
+            activeMounts: 0, liveMounts: 0, pendingCleanup: 0,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0
+        )
+        expectReadiness(staleCurrentPartialClear.isStaleCurrentPartialClassification, "a stale current helper with complete zero partitions must be recognized")
+        expectReadiness(staleCurrentPartialClear.canUpdate, "a stale current helper with complete zero partitions must retain its guarded update action")
+
         let staleCurrentMixed = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
@@ -119,6 +128,18 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(!accessPending.canRetryPendingCleanup, "Snapshot Access cleanup must gate helper cleanup retry")
         expectReadiness(accessPending.title == "Snapshot Access cleanup required", "Snapshot Access cleanup must be visible as the blocking operation")
+        let staleAccessBusy = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.0", activeMounts: 0,
+            pendingCleanup: 0, snapshotAccessActiveLeases: 1
+        )
+        expectReadiness(!staleAccessBusy.canUpdate, "Snapshot Access active leases must disable helper replacement")
+        let staleAccessCleanup = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.0", activeMounts: 0,
+            pendingCleanup: 0, snapshotAccessPendingCleanup: 1
+        )
+        expectReadiness(!staleAccessCleanup.canUpdate, "Snapshot Access cleanup retries must disable helper replacement")
         let pendingPrevious = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.1",

@@ -22,6 +22,8 @@ BINARY = Path("/Library/PrivilegedHelperTools") / LABEL
 PLIST = Path("/Library/LaunchDaemons") / (LABEL + ".plist")
 MOUNT_SOCKET = Path("/private/var/run/televybackup/snapshot-mount-helper.sock")
 JOURNAL = Path("/var/db/televybackup/snapshot-mount-helper")
+JOURNAL_SENTINEL_KEY = "ci-fixture"
+JOURNAL_SENTINEL_VALUE = "journal-preserved-v1"
 
 
 def run(*args, check=True):
@@ -115,6 +117,48 @@ os.chmod(db, 0o600)
     return lease_id
 
 
+def seed_journal_sentinel():
+    """Create fixture-only journal content that install and uninstall must preserve."""
+    script = r'''
+import pathlib, sqlite3, sys
+journal_dir = pathlib.Path(sys.argv[1])
+journal_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+db = journal_dir / "journal.sqlite"
+with sqlite3.connect(db) as connection:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS ci_fixture_sentinel (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT OR REPLACE INTO ci_fixture_sentinel (key, value) VALUES (?, ?)",
+        (sys.argv[2], sys.argv[3]),
+    )
+    connection.commit()
+db.chmod(0o600)
+'''
+    run(
+        "sudo", "-n", "/usr/bin/python3", "-c", script,
+        str(JOURNAL), JOURNAL_SENTINEL_KEY, JOURNAL_SENTINEL_VALUE,
+    )
+
+
+def read_journal_sentinel():
+    script = r'''
+import pathlib, sqlite3, sys
+db = pathlib.Path(sys.argv[1]) / "journal.sqlite"
+with sqlite3.connect(db) as connection:
+    row = connection.execute(
+        "SELECT value FROM ci_fixture_sentinel WHERE key = ?", (sys.argv[2],)
+    ).fetchone()
+if row is None:
+    raise SystemExit("journal sentinel is missing")
+print(row[0])
+'''
+    return run(
+        "sudo", "-n", "/usr/bin/python3", "-c", script,
+        str(JOURNAL), JOURNAL_SENTINEL_KEY,
+    ).stdout.strip()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True, type=Path)
@@ -131,9 +175,29 @@ def main():
         action="store_true",
         help="make the intermediate helper report one row with build identity but no classification",
     )
+    parser.add_argument(
+        "--stale-partial-classification",
+        action="store_true",
+        help="make the previous component report a stale build with inventory classification missing",
+    )
+    parser.add_argument(
+        "--bootstrap-failure-rollback",
+        action="store_true",
+        help="replace the candidate helper with a failing executable and verify the previous helper is restored",
+    )
+    parser.add_argument(
+        "--orphaned-backup-recovery",
+        action="store_true",
+        help="seed root-owned interrupted-install backups and verify the installer recovers them",
+    )
+    parser.add_argument(
+        "--uninstall",
+        action="store_true",
+        help="install the candidate, then verify the privileged uninstall transaction removes its assets",
+    )
     args = parser.parse_args()
-    legacy_fixture = args.legacy_blocking or args.legacy_build_only
-    assert not (args.legacy_blocking and args.legacy_build_only), "legacy fixture modes are mutually exclusive"
+    legacy_fixture = args.legacy_blocking or args.legacy_build_only or args.stale_partial_classification
+    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback, args.orphaned_backup_recovery, args.uninstall)) <= 1, "fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -150,6 +214,10 @@ def main():
     process = None
     journal_locker = None
     root = None
+    uninstall_sentinel = None
+    candidate_helper = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
+    candidate_helper_original = candidate_helper.read_bytes()
+    candidate_helper_modified = False
     # Preserve all fixture state if process shutdown cannot be verified.
     temp = tempfile.mkdtemp(prefix="televy-helper-install-ci-", dir="/private/tmp")
     fixture = Path(temp)
@@ -166,9 +234,20 @@ def main():
     # A pre-upgrade service replies with the historical protocol, not a mock
     # client. The bundled Access executable must surface the exact UI symptom.
     old_server = fixture / "old_server.py"
-    old_server.write_text('''import json, os, socket
+    old_server.write_text('''import hashlib, json, os, pathlib, socket
+marker_path = "__OLD_HELPER_MARKER__"
+binary_path = "__OLD_HELPER_BINARY__"
+plist_path = "__OLD_HELPER_PLIST__"
+pathlib.Path(marker_path).write_text(json.dumps({
+    "binary": hashlib.sha256(pathlib.Path(binary_path).read_bytes()).hexdigest() if pathlib.Path(binary_path).exists() else None,
+    "plist": hashlib.sha256(pathlib.Path(plist_path).read_bytes()).hexdigest() if pathlib.Path(plist_path).exists() else None,
+}))
 path = "/private/var/run/televybackup/snapshot-mount-helper.sock"
 os.makedirs(os.path.dirname(path), mode=0o711, exist_ok=True)
+try:
+    os.unlink(path)
+except FileNotFoundError:
+    pass
 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 server.bind(path)
 os.chmod(path, 0o666)
@@ -182,9 +261,26 @@ while True:
                               "blocked_volume_uuids":[],"recovery_leases":[]}}
         connection.sendall(json.dumps(response).encode() + b"\\n")
 ''')
+    old_helper_marker = fixture / "old-helper-started.json"
+    old_server.write_text(old_server.read_text()
+        .replace('"__OLD_HELPER_MARKER__"', repr(str(old_helper_marker)))
+        .replace('"__OLD_HELPER_BINARY__"', repr(str(BINARY)))
+        .replace('"__OLD_HELPER_PLIST__"', repr(str(PLIST))))
     if args.expect_build_commit:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0","build_commit":"' + '0' * 40 + '"'))
+    elif args.bootstrap_failure_rollback:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
+    elif args.orphaned_backup_recovery:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"', '"helper_version":"0.5.0"'))
+    elif args.stale_partial_classification:
+        old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
+            .replace('"helper_version":"0.9.8"',
+                     '"helper_version":"0.5.0","component_version":"0.5.2",'
+                     '"build_commit":"' + '0' * 40 + '","pending_cleanup":0,'
+                     '"live_mounts":0,"recoverable_stale_mounts":0,"unknown_blocking_mounts":1'))
     elif legacy_fixture:
         replacement = '"helper_version":"0.5.0"'
         if args.legacy_build_only:
@@ -201,12 +297,59 @@ while True:
         "KeepAlive": True,
     }))
     root_plist = root / "old.plist"
-    run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
-    run("sudo", "-n", "chown", "root:wheel", str(root_plist))
-    run("sudo", "-n", "chmod", "644", str(root_plist))
+    old_binary_hash = None
+    if args.bootstrap_failure_rollback or args.orphaned_backup_recovery:
+        old_binary_source = fixture / "old-helper"
+        old_binary_source.write_text("#!/usr/bin/python3\n" + old_server.read_text())
+        old_binary_source.chmod(0o755)
+        old_binary_hash = hashlib.sha256(old_binary_source.read_bytes()).hexdigest()
+        binary_destination = BINARY if args.bootstrap_failure_rollback else BINARY.parent / (BINARY.name + ".backup-fixture")
+        run("sudo", "-n", "cp", str(old_binary_source), str(binary_destination))
+        run("sudo", "-n", "chown", "root:wheel", str(binary_destination))
+        run("sudo", "-n", "chmod", "755", str(binary_destination))
+        canonical_plist = fixture / "canonical-old.plist"
+        canonical_plist.write_bytes(plistlib.dumps({
+            "Label": LABEL,
+            "ProgramArguments": [str(BINARY)],
+            "RunAtLoad": True,
+            "KeepAlive": True,
+        }))
+        old_plist_hash = hashlib.sha256(canonical_plist.read_bytes()).hexdigest()
+        plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.parent / (PLIST.stem + ".backup-fixture")
+        run("sudo", "-n", "cp", str(canonical_plist), str(plist_destination))
+        run("sudo", "-n", "chown", "root:wheel", str(plist_destination))
+        run("sudo", "-n", "chmod", "644", str(plist_destination))
+        if args.orphaned_backup_recovery:
+            current_plist = fixture / "interrupted-current.plist"
+            current_plist.write_bytes(plistlib.dumps({
+                "Label": LABEL,
+                "ProgramArguments": ["/usr/bin/false"],
+                "RunAtLoad": True,
+                "KeepAlive": True,
+            }))
+            run("sudo", "-n", "cp", str(app / "Contents/MacOS/televybackup-snapshot-mount-helper"), str(BINARY))
+            run("sudo", "-n", "chown", "root:wheel", str(BINARY))
+            run("sudo", "-n", "chmod", "755", str(BINARY))
+            run("sudo", "-n", "cp", str(current_plist), str(PLIST))
+            run("sudo", "-n", "chown", "root:wheel", str(PLIST))
+            run("sudo", "-n", "chmod", "644", str(PLIST))
+    else:
+        run("sudo", "-n", "cp", str(seed_plist), str(root_plist))
+        run("sudo", "-n", "chown", "root:wheel", str(root_plist))
+        run("sudo", "-n", "chmod", "644", str(root_plist))
+    if args.bootstrap_failure_rollback:
+        seed_journal_sentinel()
     try:
-        run("sudo", "-n", "/bin/launchctl", "bootstrap", "system", str(root_plist))
-        wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture) else 1))
+        if not args.orphaned_backup_recovery:
+            run(
+                "sudo",
+                "-n",
+                "/bin/launchctl",
+                "bootstrap",
+                "system",
+                str(PLIST if args.bootstrap_failure_rollback else root_plist),
+            )
+            wait_for(lambda: request(MOUNT_SOCKET, expected_protocol), lambda reply: reply["version"] == (4 if (args.expect_build_commit or legacy_fixture or args.bootstrap_failure_rollback) else 1))
         env = os.environ.copy()
         env.update({
             "TELEVYBACKUP_CONFIG_DIR": str(config),
@@ -221,14 +364,39 @@ while True:
             stale = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert stale["helper_version"] == "0.5.0" and stale["build_commit"] != args.expect_build_commit
             print("PROBE: same compatible component version has a stale running build", flush=True)
+        elif args.bootstrap_failure_rollback:
+            assert before["result"]["mount_helper_reachable"] is True
+            print("SETUP: previous helper is reachable before the failing candidate install", flush=True)
+        elif args.orphaned_backup_recovery:
+            assert before["result"]["mount_helper_reachable"] is False
+            print("SETUP: interrupted helper backups are present while the service is absent", flush=True)
+        elif args.uninstall:
+            assert before["result"]["mount_helper_reachable"] is False
+            uninstall_sentinel = JOURNAL / "uninstall-sentinel"
+            seed_journal_sentinel()
+            run("sudo", "-n", "mkdir", "-p", str(JOURNAL))
+            run("sudo", "-n", "touch", str(uninstall_sentinel))
+            run("sudo", "-n", "chown", "root:wheel", str(uninstall_sentinel))
+            run("sudo", "-n", "chmod", "600", str(uninstall_sentinel))
+            print("SETUP: legacy helper is reachable only through the compatibility probe", flush=True)
         elif legacy_fixture:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
-            assert "pending_cleanup" not in legacy and "component_version" not in legacy
-            if args.legacy_build_only:
+            if args.stale_partial_classification:
+                assert legacy["component_version"] == "0.5.2"
+                assert legacy["build_commit"] == "0" * 40
+                assert legacy["pending_cleanup"] == 0
+                assert legacy["live_mounts"] == 0
+                assert legacy["recoverable_stale_mounts"] == 0
+                assert legacy["unknown_blocking_mounts"] == 1
+                assert "inventory_drift_mounts" not in legacy
+                print("REPRODUCED: stale current helper omits inventory-drift classification", flush=True)
+            elif args.legacy_build_only:
+                assert "pending_cleanup" not in legacy and "component_version" not in legacy
                 assert legacy["build_commit"] == "0" * 40
                 print("REPRODUCED: intermediate helper reports build identity without mount classification", flush=True)
             else:
+                assert "pending_cleanup" not in legacy and "component_version" not in legacy
                 assert "build_commit" not in legacy
                 print("REPRODUCED: legacy helper reports an unclassified blocking mount row", flush=True)
         else:
@@ -242,6 +410,11 @@ while True:
                 flush=True,
             )
         # Same privileged CLI entrypoint as the GUI's password-authorized command.
+        if args.bootstrap_failure_rollback:
+            assert args.require_readiness, "bootstrap failure fixture requires the candidate readiness check"
+            candidate_helper_modified = True
+            candidate_helper.write_text("#!/bin/sh\nexit 78\n")
+            candidate_helper.chmod(0o755)
         if args.delay_startup:
             assert args.require_readiness, "delayed startup requires the candidate readiness check"
             # Delay real helper initialization with a fixture-only SQLite lock.
@@ -267,11 +440,40 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             wait_for(lambda: locker_ready.exists(), bool)
         install_started = time.monotonic()
         installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
-        installation = json.loads(installed.stdout)
-        assert installation["installed"] is True
+        if args.bootstrap_failure_rollback:
+            assert installed.returncode != 0, "failing candidate unexpectedly installed"
+            error = json.loads(installed.stderr)
+            assert error["code"] == "snapshot_mount_helper.readiness_failed"
+            restored = wait_for(
+                lambda: request(MOUNT_SOCKET, expected_protocol),
+                lambda reply: reply.get("ok") is True and reply.get("result", {}).get("active_mounts") == 0,
+            )
+            assert restored["result"]["helper_version"] == "0.5.0"
+            assert hashlib.sha256(BINARY.read_bytes()).hexdigest() == old_binary_hash
+            assert hashlib.sha256(PLIST.read_bytes()).hexdigest() == old_plist_hash
+            assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
+            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
+            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            print("PASS: failed candidate bootstrap restores the previous helper and clears quarantine backups", flush=True)
+        else:
+            assert installed.returncode == 0, installed.stderr
+        installation = json.loads(installed.stdout) if not args.bootstrap_failure_rollback else {}
+        if not args.bootstrap_failure_rollback:
+            assert installation["installed"] is True
         if args.require_readiness:
-            assert installation["helperReady"] is True
-            assert installation["helperVersion"] == "0.5.2"
+            if not args.bootstrap_failure_rollback:
+                assert installation["helperReady"] is True
+                assert installation["helperVersion"] == "0.5.2"
+        if args.orphaned_backup_recovery:
+            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
+            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            marker = wait_for(
+                lambda: json.loads(old_helper_marker.read_text()),
+                lambda value: value.get("binary") is not None and value.get("plist") is not None,
+            )
+            assert marker["binary"] == old_binary_hash
+            assert marker["plist"] == old_plist_hash
+            print("PASS: interrupted helper backups were recovered before the candidate install", flush=True)
         if legacy_fixture:
             assert installation["helperVersion"] == "0.5.2"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
@@ -300,8 +502,27 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert installation["buildCommit"] == args.expect_build_commit
             assert installation["binarySha256"] == digest == installed_digest
             print("PASS: installed file hash and running IPC build match the candidate", flush=True)
-        after = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
-        assert after["result"]["mount_helper_error"] is None
+        if args.uninstall:
+            removed = run(
+                "sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data),
+                "snapshot-mount-helper", "uninstall",
+            )
+            assert removed.returncode == 0, removed.stderr
+            removal = json.loads(removed.stdout)
+            assert removal["uninstalled"] is True
+            assert not BINARY.exists() and not PLIST.exists()
+            assert uninstall_sentinel is not None and uninstall_sentinel.exists()
+            assert JOURNAL.is_dir()
+            assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
+            after = wait_for(
+                lambda: request(access_socket, metadata["protocolVersion"]),
+                lambda reply: reply.get("result", {}).get("mount_helper_reachable") is False,
+            )
+            assert after["result"]["mount_helper_error"] is not None
+            print("PASS: privileged uninstall removes helper assets and leaves Snapshot Access unreachable", flush=True)
+        else:
+            after = wait_for(lambda: request(access_socket, metadata["protocolVersion"]), lambda reply: reply.get("result", {}).get("mount_helper_reachable") is True)
+            assert after["result"]["mount_helper_error"] is None
         assert process.poll() is None, "Access unexpectedly exited during installation"
         print("PASS: real bundled install replaces the legacy service and the same Access process becomes reachable", flush=True)
     finally:
@@ -315,9 +536,34 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         def absent(reply):
             return reply.returncode != 0 and "could not find service" in (reply.stdout + reply.stderr).lower()
         wait_for(lambda: run("sudo", "-n", "/bin/launchctl", "print", SERVICE, check=False), absent)
+        if candidate_helper_modified:
+            candidate_helper.write_bytes(candidate_helper_original)
+            candidate_helper.chmod(0o755)
         # These targets were proved absent before this test created them.
-        run("sudo", "-n", "rm", "-f", str(BINARY), str(PLIST), str(MOUNT_SOCKET), check=False)
+        run(
+            "sudo",
+            "-n",
+            "rm",
+            "-f",
+            str(BINARY),
+            str(PLIST),
+            str(BINARY.parent / (BINARY.name + ".backup-fixture")),
+            str(PLIST.parent / (PLIST.stem + ".backup-fixture")),
+            str(MOUNT_SOCKET),
+            check=False,
+        )
+        for path in [
+            *BINARY.parent.glob(BINARY.name + ".backup-*"),
+            *BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"),
+            *PLIST.parent.glob(PLIST.stem + ".backup-*"),
+            *PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"),
+        ]:
+            run("sudo", "-n", "rm", "-f", str(path), check=False)
         run("sudo", "-n", "rm", "-rf", str(JOURNAL), str(root), check=False)
+        assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
+        assert not any(BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"))
+        assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+        assert not any(PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"))
         assert not any(os.path.lexists(path) for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), "fixture cleanup incomplete"
         shutil.rmtree(fixture)
 

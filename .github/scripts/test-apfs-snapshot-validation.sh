@@ -62,9 +62,32 @@ assert_contains "manual regression snapshot timepoint fixture" "$pr_workflow_tex
 assert_contains "manual regression mount health fixture" "$pr_workflow_text" "long_read_fails_closed_after_mount_identity_loss"
 assert_contains "manual regression stale mount recovery fixture" "$pr_workflow_text" "test-snapshot-mount-recovery.py"
 assert_contains "legacy helper blocking upgrade fixture" "$pr_workflow_text" "--legacy-blocking"
+assert_contains "bootstrap failure rollback fixture" "$pr_workflow_text" "--bootstrap-failure-rollback"
+assert_contains "orphaned backup recovery fixture" "$pr_workflow_text" "--orphaned-backup-recovery"
+assert_contains "stale partial helper upgrade fixture" "$pr_workflow_text" "--stale-partial-classification"
+assert_contains "main stale partial helper upgrade fixture" "$main_workflow_text" "--stale-partial-classification"
+assert_contains "main bootstrap failure rollback fixture" "$main_workflow_text" "--bootstrap-failure-rollback"
+assert_contains "main orphaned backup recovery fixture" "$main_workflow_text" "--orphaned-backup-recovery"
+assert_contains "PR fixture manifest download" "$pr_workflow_text" "--pattern BUILD-MANIFEST.json"
+assert_contains "PR fixture tag provenance" "$pr_workflow_text" "verify-tag-provenance"
+assert_contains "PR fixture tag identity" "$pr_workflow_text" "--tag v0.9.9-rc.118"
+assert_contains "PR fixture immutable asset verification" "$pr_workflow_text" 'release_helper.py" verify-assets'
+assert_contains "PR fixture release asset API attestation" "$pr_workflow_text" "GitHub Release asset digest does not match downloaded bytes"
+assert_contains "PR fixture release asset automation uploader" "$pr_workflow_text" "github-actions[bot]"
+assert_contains "PR fixture trusted policy checkout" "$pr_workflow_text" "git worktree add --detach \"\${trusted_root}\" \"\${trusted_base_sha}\""
+assert_contains "PR fixture rejects self-trusted policy" "$pr_workflow_text" 'test "${trusted_base_sha}" != "${GITHUB_SHA}"'
+assert_contains "main fixture tag provenance" "$main_workflow_text" "verify-tag-provenance"
+assert_contains "main fixture tag identity" "$main_workflow_text" "--tag v0.9.9-rc.122"
+assert_contains "main fixture immutable asset verification" "$main_workflow_text" 'release_helper.py" verify-assets'
+assert_contains "main fixture release asset API attestation" "$main_workflow_text" "GitHub Release asset digest does not match downloaded bytes"
+assert_contains "main fixture release asset automation uploader" "$main_workflow_text" "github-actions[bot]"
+assert_contains "main fixture trusted policy checkout" "$main_workflow_text" "git worktree add --detach \"\${trusted_root}\" \"\${trusted_base_sha}\""
+assert_contains "main fixture resolves pre-candidate parent" "$main_workflow_text" "gh api \"repos/\${GITHUB_REPOSITORY}/commits/\${GITHUB_SHA}\" --jq '.parents[0].sha'"
+assert_contains "main fixture rejects self-trusted policy" "$main_workflow_text" 'test "${trusted_base_sha}" != "${GITHUB_SHA}"'
 assert_contains "manual regression contract test" "$pr_workflow_text" "test-apfs-snapshot-validation.sh"
 assert_contains "manual regression pinned checkout action" "$pr_workflow_text" "actions/checkout@11d5960a326750d5838078e36cf38b85af677262"
 assert_contains "manual regression pinned toolchain action" "$pr_workflow_text" "dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772"
+assert_not_contains "manual regression shell input interpolation" "$pr_workflow_text" 'pulls/${{ inputs.pr_number }}'
 assert_not_contains "removed unsupported acceptance job" "$pr_workflow_text" "manual-apfs-real-acceptance"
 assert_not_contains "removed unsupported runner label" "$pr_workflow_text" "televybackup-apfs"
 assert_not_contains "removed unsupported acceptance label" "$pr_workflow_text" "apfs-acceptance"
