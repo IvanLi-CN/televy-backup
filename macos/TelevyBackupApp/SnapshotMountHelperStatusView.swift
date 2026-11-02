@@ -63,10 +63,7 @@ struct SnapshotMountHelperStatusView: View {
             && !readiness.isLegacyAggregateStatus
             && !readiness.isLegacyPendingCleanupStatus
             && !readiness.isStaleCurrentPartialClassification
-            ? SnapshotMountHelperReadiness.updateBlockReason(
-                activeMounts: activeMounts,
-                pendingCleanup: pendingCleanup
-            )
+            ? readiness.visibleUpdateBlockReason
             : nil
         let statusTitle = !readiness.isOperational && !readiness.isReady && updateBlockReason != nil
             && !readiness.isPendingCleanupUpgradeSafe

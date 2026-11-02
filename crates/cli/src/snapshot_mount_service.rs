@@ -1044,6 +1044,36 @@ fn classify_busy_status(
         // safe or clearing it during the upgrade.
         return Ok(BusyCheck::LegacyUpgrade);
     }
+    let stale_unknown_only_classification = status.helper_version
+        == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        && matches!(
+            status.component_version.as_deref(),
+            Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+                | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+                | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+                | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+        )
+        && status.build_commit.as_deref().is_some_and(|commit| {
+            commit != env!("TELEVYBACKUP_BUILD_COMMIT")
+                && commit.len() == 40
+                && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && status.active_mounts > 0
+        && status.pending_cleanup == Some(0)
+        && status.live_mounts == Some(0)
+        && status.recoverable_stale_mounts == Some(0)
+        && status.unknown_blocking_mounts == Some(status.active_mounts)
+        && status.inventory_drift_mounts == Some(0)
+        && status.recovery_leases.is_empty()
+        && status.pending_cleanup_leases.is_empty()
+        && status.inventory_drift_leases.is_empty();
+    if stale_unknown_only_classification {
+        // A known older helper can report a complete partition whose only rows are unknown.
+        // Those rows are deliberately not repair candidates yet, so the candidate helper must
+        // be installed before the user can invoke the journal-bound repair operation. Preserve
+        // the journal and recheck Snapshot Access idle before replacing the helper.
+        return Ok(BusyCheck::LegacyUpgrade);
+    }
     if status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.inventory_drift_mounts.is_none()
         && status.active_mounts > 0
@@ -2424,6 +2454,49 @@ mod tests {
                 classify_busy_status("install or update", &status).unwrap(),
                 BusyCheck::LegacyUpgrade,
                 "{component_version} with a complete four-partition status must be replaceable"
+            );
+        }
+    }
+
+    #[test]
+    fn older_helpers_with_complete_unknown_only_partition_keep_a_guarded_upgrade_path() {
+        for component_version in [
+            mount_helper::ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+        ] {
+            let status = MountStatusResult {
+                helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+                component_version: Some(component_version.into()),
+                build_commit: Some("b".repeat(40)),
+                active_mounts: 65,
+                pending_cleanup: Some(0),
+                live_mounts: Some(0),
+                recoverable_stale_mounts: Some(0),
+                unknown_blocking_mounts: Some(65),
+                inventory_drift_mounts: Some(0),
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_busy_status("install or update", &status).unwrap(),
+                BusyCheck::LegacyUpgrade,
+                "{component_version} with an unknown-only partition must be replaceable"
+            );
+
+            let mut mixed = status.clone();
+            mixed
+                .recovery_leases
+                .push(televybackup_snapshot_access::MountRecoveryLease {
+                    lease_id: "recoverable".into(),
+                    state: "active".into(),
+                });
+            assert!(
+                !matches!(
+                    classify_busy_status("install or update", &mixed),
+                    Ok(BusyCheck::LegacyUpgrade)
+                ),
+                "{component_version} with a recovery candidate must remain blocked"
             );
         }
     }
