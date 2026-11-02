@@ -326,36 +326,23 @@ def snapshot_uuids(device):
 
 def create_fixture_snapshot(device):
     before = snapshot_uuids(device)
+    # Use the same production command as the root helper; diskutil only exposes
+    # APFS snapshot inventory/deletion on the hosted macOS image.
     result = run(
         "sudo",
         "-n",
-        "/usr/sbin/diskutil",
-        "apfs",
-        "snapshot",
-        device,
+        "/usr/bin/tmutil",
+        "localsnapshot",
         check=False,
     )
     if result.returncode != 0:
-        help_result = run(
-            "sudo",
-            "-n",
-            "/usr/sbin/diskutil",
-            "apfs",
-            "help",
-            check=False,
-        )
         diagnostics = "\n".join(
             part.decode(errors="replace").strip()
-            for part in (
-                result.stdout,
-                result.stderr,
-                help_result.stdout,
-                help_result.stderr,
-            )
+            for part in (result.stdout, result.stderr)
             if part.strip()
         )
         raise AssertionError(
-            "diskutil APFS snapshot creation failed "
+            "tmutil local snapshot creation failed "
             f"(exit {result.returncode}): {diagnostics[:2048]}"
         )
     created = sorted(snapshot_uuids(device) - before)
