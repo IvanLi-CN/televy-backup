@@ -20,8 +20,8 @@
   validated baseline remain blocked. A stale row with a mounted root is recoverable only when its
   recorded mount-device identity is present and positive; missing identity remains an unknown
   blocker and ordinary cleanup refuses to unmount the path. The explicit legacy-repair operation
-  may backfill that identity only for an age-gated row whose UID, managed root, volume/device
-  binding, reservation manifest and snapshot inventory all validate, then reuses journal-bound
+  may backfill that identity only for an age-gated row whose managed root is absent and whose UID,
+  volume/device binding, reservation manifest and snapshot inventory all validate, then reuses journal-bound
   `Release`; rows that fail any check remain untouched and blocking. If snapshot deletion succeeds before a process
   crash, an exact reservation-baseline retry records the released tombstone idempotently. The
   installed `0.9.8` helper remains

@@ -1258,9 +1258,10 @@ async fn reserve_request(
 /// Repair the legacy journal layout that did not persist the mounted device identity. A row is
 /// eligible only when it is old enough to be stale, belongs to the requesting peer, has a complete
 /// reservation/snapshot manifest, and points at the root-owned helper mount path. The operation
-/// derives a device identity from that path (or its managed parent when the mount is already
-/// gone), persists it under the mutation lock, then reuses the ordinary journal-bound Release
-/// path. Any row that cannot satisfy every check remains untouched and blocking.
+/// derives a device identity from the managed parent after confirming the mount root is absent,
+/// persists it under the mutation lock, then reuses the ordinary journal-bound Release path. A
+/// currently mounted root cannot be proven to be the recorded snapshot without the old device
+/// identity, so it remains untouched and blocking rather than being unmounted speculatively.
 async fn repair_legacy_request(
     peer_uid: u32,
     uid: u32,
@@ -1312,23 +1313,19 @@ async fn repair_legacy_request(
             continue;
         }
         let expected_root = expected_mount_root(i64::from(uid), &lease_id)?;
-        let mounted = match mounted_snapshot_path(&expected_root) {
-            Ok(mounted) => mounted,
-            Err(_) => continue,
-        };
-        let expected_device = if mounted {
-            match fs::metadata(&expected_root) {
-                Ok(metadata) if metadata.dev() != 0 => metadata.dev(),
-                _ => continue,
-            }
-        } else {
-            match expected_root
-                .parent()
-                .and_then(|parent| fs::metadata(parent).ok())
-            {
-                Some(metadata) if metadata.dev() != 0 => metadata.dev(),
-                _ => continue,
-            }
+        match mounted_snapshot_path(&expected_root) {
+            Ok(false) => {}
+            // Without the recorded mount device, a live path could have been replaced by a
+            // different privileged mount. Never infer identity from that replacement or call
+            // Release in a way that could unmount it.
+            Ok(true) | Err(_) => continue,
+        }
+        let expected_device = match expected_root
+            .parent()
+            .and_then(|parent| fs::metadata(parent).ok())
+        {
+            Some(metadata) if metadata.dev() != 0 => metadata.dev(),
+            _ => continue,
         };
         let updated = sqlx::query(
             "UPDATE mounts SET mount_device = ? WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = 0 AND mount_root = ? AND snapshot_manifest = ? AND reservation_manifest = ? AND reservation_manifest_valid = 1",

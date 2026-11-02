@@ -160,6 +160,14 @@ enum SnapshotMountHelperReadinessTests {
             expectReadiness(pendingOlder.isLegacyPendingCleanupStatus, "helper \(version) must retain a guarded pending-cleanup upgrade")
             expectReadiness(pendingOlder.canUpdate, "helper \(version) must remain updateable before cleanup retry")
         }
+        let historicalCleanupRetry = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.1",
+            activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+            pendingCleanupCandidates: 1
+        )
+        expectReadiness(historicalCleanupRetry.canRetryPendingCleanup, "helper 0.5.1 must expose a guarded cleanup retry when its candidates are complete")
         for version in ["0.5.3", "0.5.2", "0.5.1"] {
             let partialOlder = SnapshotMountHelperReadiness(
                 reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),

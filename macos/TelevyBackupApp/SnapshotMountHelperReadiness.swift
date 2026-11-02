@@ -347,6 +347,7 @@ struct SnapshotMountHelperReadiness {
         return (helperVersion == "0.5.4" && isReady)
             || (helperVersion == "0.5.3" && validBuild)
             || (helperVersion == "0.5.2" && validBuild)
+            || (helperVersion == "0.5.1" && validBuild)
     }
 
     /// An unrecognized aggregate-only status is blocking even when the optional

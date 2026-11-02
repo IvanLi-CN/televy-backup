@@ -1441,19 +1441,7 @@ async fn handle_control_ipc_client(
                 final_recoverable_stale_mounts,
                 final_unknown_blocking_mounts,
                 final_inventory_drift_mounts,
-            ) = snapshot_mount_reconcile_counts(&final_status)?;
-            if repaired.repaired == 0 && final_unknown_blocking_mounts > 0 {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.repair_required".to_string(),
-                    message: "No legacy snapshot record passed the safe repair checks; unresolved records remain blocked.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({
-                        "audited": repaired.audited,
-                        "remaining": final_status.active_mounts,
-                        "unknown": final_unknown_blocking_mounts,
-                    }),
-                });
-            }
+            ) = snapshot_mount_reconcile_final_state(&final_status, "legacy repair")?;
             Ok(serde_json::json!({
                 "audited": repaired.audited,
                 "repaired": repaired.repaired,
@@ -4048,6 +4036,24 @@ mod tests {
             .expect_err("unresolved inventory drift must keep recovery blocked");
         assert_eq!(error.code, "snapshot_mount_helper.reconcile_required");
         assert_eq!(error.details["inventoryDrift"], 1);
+
+        let pending = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: Some(1),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
+            pending_cleanup_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "pending".into(),
+                state: "cleanup_pending".into(),
+            }],
+            ..Default::default()
+        };
+        let error = snapshot_mount_reconcile_final_state(&pending, "legacy repair")
+            .expect_err("legacy repair must fail closed when cleanup remains pending");
+        assert_eq!(error.code, "snapshot_mount_helper.reconcile_required");
+        assert_eq!(error.details["pending"], 1);
     }
 
     #[test]
