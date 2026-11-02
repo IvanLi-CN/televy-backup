@@ -326,7 +326,38 @@ def snapshot_uuids(device):
 
 def create_fixture_snapshot(device):
     before = snapshot_uuids(device)
-    run("sudo", "-n", "/usr/sbin/diskutil", "apfs", "snapshot", device)
+    result = run(
+        "sudo",
+        "-n",
+        "/usr/sbin/diskutil",
+        "apfs",
+        "snapshot",
+        device,
+        check=False,
+    )
+    if result.returncode != 0:
+        help_result = run(
+            "sudo",
+            "-n",
+            "/usr/sbin/diskutil",
+            "apfs",
+            "help",
+            check=False,
+        )
+        diagnostics = "\n".join(
+            part.decode(errors="replace").strip()
+            for part in (
+                result.stdout,
+                result.stderr,
+                help_result.stdout,
+                help_result.stderr,
+            )
+            if part.strip()
+        )
+        raise AssertionError(
+            "diskutil APFS snapshot creation failed "
+            f"(exit {result.returncode}): {diagnostics[:2048]}"
+        )
     created = sorted(snapshot_uuids(device) - before)
     assert len(created) == 1, f"expected one fixture snapshot, found {created!r}"
     return created[0]
