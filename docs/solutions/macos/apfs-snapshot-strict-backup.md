@@ -284,7 +284,7 @@ operation because backup history and remote metadata are sensitive.
   updates, compare the embedded helper SHA-256, CodeDirectory hash, and designated requirement;
   this verifies TCC binding without asking the user to re-authorize an unchanged helper.
 
-The installer has one narrowly guarded exception for a stale current-component build that reports the live, pending, recoverable, and unknown partitions but omits only inventory-drift: after Snapshot Access proves idle, it may replace the helper while preserving the journal, and the candidate must reclassify the inherited rows before readiness. A matching-build partial status, an active lease, or an incomplete partition remains blocked.
+The installer has one narrowly guarded exception for a stale current-component build that reports the live, pending, recoverable, and unknown partitions but omits only inventory-drift: after Snapshot Access proves idle, it may replace the helper while preserving the journal, and the candidate must reclassify the inherited rows before readiness. The same guarded replacement applies to an older known helper only when its complete additive partition proves every inherited row is unknown and all other categories and candidate lists are zero; it only breaks the upgrade deadlock and never authorizes a lease or cleanup. A matching-build partial status, an active lease, or an incomplete partition remains blocked.
 
 ## References
 

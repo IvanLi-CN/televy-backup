@@ -109,6 +109,9 @@ struct SnapshotMountHelperReadiness {
         if isStaleCurrentPartialClassification {
             return "The installed helper is an older build that omits inventory-drift classification. Update it after Snapshot Access is idle so the latest helper can verify the preserved journal."
         }
+        if isLegacyUnknownOnlyUpgradeSafe {
+            return nil
+        }
         return "The installed helper has not been verified for this app. Update it to use the latest fixes."
     }
 
@@ -186,6 +189,39 @@ struct SnapshotMountHelperReadiness {
             && total == activeMounts
     }
 
+    /// A 0.5.x helper may report a complete partition while classifying every blocking row as
+    /// unknown. The rows remain untouched; only the guarded helper replacement is enabled so the
+    /// current helper can expose the explicit repair action.
+    var isLegacyUnknownOnlyUpgradeSafe: Bool {
+        guard reachable,
+              !isReady,
+              helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
+              let buildCommit,
+              buildCommit != expectedBuildCommit,
+              buildCommit.utf8.count == 40,
+              buildCommit.utf8.allSatisfy({
+                  (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+              }),
+              classificationKnown,
+              let activeMounts,
+              let pendingCleanup,
+              let pendingCleanupCandidates,
+              let liveMounts,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts,
+              let inventoryDriftMounts
+        else { return false }
+        return activeMounts > 0
+            && pendingCleanup == 0
+            && pendingCleanupCandidates == 0
+            && liveMounts == 0
+            && recoverableStaleMounts == 0
+            && unknownBlockingMounts == activeMounts
+            && inventoryDriftMounts == 0
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
+    }
+
     var classificationKnown: Bool {
         liveMounts != nil && pendingCleanup != nil && recoverableStaleMounts != nil && unknownBlockingMounts != nil && inventoryDriftMounts != nil
     }
@@ -205,7 +241,7 @@ struct SnapshotMountHelperReadiness {
         // Keep the action disabled while a lease or cleanup retry is active; the CLI repeats
         // this check immediately before bootout so a stale UI cannot bypass the boundary.
         guard snapshotAccessActiveLeases == 0 && snapshotAccessPendingCleanup == 0 else { return false }
-        if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe || isStaleCurrentPartialClassification { return true }
+        if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe || isStaleCurrentPartialClassification || isLegacyUnknownOnlyUpgradeSafe { return true }
         if classificationKnown {
             guard activeMounts != nil else { return false }
             return !hasBlockingRecords
@@ -333,6 +369,16 @@ struct SnapshotMountHelperReadiness {
             && snapshotAccessPendingCleanup == 0
             && activeMounts == pendingCleanup
             && pendingCleanupCandidates == pendingCleanup
+    }
+
+    /// The status view has a separate unknown-row explanation. Suppress the aggregate update
+    /// warning for this state so one journal inventory is described exactly once.
+    var visibleUpdateBlockReason: String? {
+        guard !isLegacyUnknownOnlyUpgradeSafe else { return nil }
+        return SnapshotMountHelperReadiness.updateBlockReason(
+            activeMounts: activeMounts,
+            pendingCleanup: pendingCleanup
+        )
     }
 
     /// The cleanup request is protocol-compatible with the current and immediately previous

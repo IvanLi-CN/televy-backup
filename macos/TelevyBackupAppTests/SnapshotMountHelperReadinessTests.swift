@@ -46,6 +46,18 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(stale.canUpdate, "the CLI must be allowed to verify Snapshot Access before replacing a legacy helper")
         expectReadiness(stale.updateExplanation?.contains("verify Snapshot Access is idle") == true, "legacy replacement must explain its guarded preflight")
 
+        let staleUnknownOnly = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.2",
+            activeMounts: 65, liveMounts: 0, pendingCleanup: 0,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 65,
+            inventoryDriftMounts: 0, pendingCleanupCandidates: 0
+        )
+        expectReadiness(staleUnknownOnly.isLegacyUnknownOnlyUpgradeSafe, "a stale helper with a complete unknown-only partition must be replaceable")
+        expectReadiness(staleUnknownOnly.canUpdate, "unknown-only legacy rows must retain a guarded update action")
+        expectReadiness(staleUnknownOnly.updateExplanation == nil, "the unknown-row explanation must not be repeated as an aggregate update warning")
+        expectReadiness(staleUnknownOnly.visibleUpdateBlockReason == nil, "the UI must suppress the duplicate aggregate warning")
+
         let unknownLegacyShape = state(reachable: true, daemonReady: true, commit: nil, helperVersion: "0.6.0", activeMounts: 1, pendingCleanup: nil)
         expectReadiness(!unknownLegacyShape.isLegacyAggregateStatus, "an unrecognized incomplete status must not be treated as a replaceable legacy helper")
         expectReadiness(!unknownLegacyShape.canUpdate, "an unrecognized incomplete status must keep helper mutation disabled")
