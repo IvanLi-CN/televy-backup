@@ -146,6 +146,11 @@ assert_contains "daemon inventory reconcile operation" "$control_text" "snapshot
 assert_contains "recovery fixture daemon control request" "$recovery_fixture_text" '"snapshot.mount_helper.reconcile_inventory"'
 assert_contains "recovery fixture operation polling" "$recovery_fixture_text" '"operation.get"'
 assert_contains "recovery fixture unknown blocker gate" "$recovery_fixture_text" '"snapshot_mount_helper.reconcile_required"'
+assert_contains "daemon legacy repair operation" "$control_text" "snapshot.mount_helper.repair_legacy"
+assert_contains "recovery fixture daemon legacy repair request" "$recovery_fixture_text" '"snapshot.mount_helper.repair_legacy"'
+assert_contains "recovery fixture daemon legacy repair result" "$recovery_fixture_text" 'repaired["result"]["released"] == 1'
+assert_contains "recovery fixture CLI legacy repair command" "$recovery_fixture_text" '"repair-legacy"'
+assert_contains "recovery fixture CLI legacy repair result" "$recovery_fixture_text" 'cli_repair_payload["repaired"] == 1'
 assert_contains "recovery fixture unknown state reserve fence" "$recovery_fixture_text" 'future_state_id'
 assert_contains "recovery fixture malformed released reserve fence" "$recovery_fixture_text" 'malformed_released_id'
 assert_contains "recovery fixture CLI invocation" "$recovery_fixture_text" '"snapshot-mount-helper"'
