@@ -477,8 +477,12 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
                 assert installation["helperReady"] is True
                 assert installation["helperVersion"] == "0.5.4"
         if args.orphaned_backup_recovery:
-            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
-            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            binary_backups = sorted(BINARY.parent.glob(BINARY.name + ".backup-*"))
+            plist_backups = sorted(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            assert not binary_backups and not plist_backups, (
+                "interrupted helper backups remain after recovery: "
+                f"binary={binary_backups!r}, plist={plist_backups!r}"
+            )
             marker = wait_for(
                 lambda: json.loads(old_helper_marker.read_text()),
                 lambda value: value.get("binary") is not None and value.get("plist") is not None,
