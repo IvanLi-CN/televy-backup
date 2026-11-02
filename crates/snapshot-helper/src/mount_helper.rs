@@ -27,15 +27,17 @@ use uuid::Uuid;
 use crate::{
     DEFAULT_MOUNT_HELPER_INSTALL_LOCK, DEFAULT_MOUNT_HELPER_JOURNAL,
     DEFAULT_MOUNT_HELPER_MUTATION_LOCK, DEFAULT_MOUNT_HELPER_SOCKET, MOUNT_HELPER_PROTOCOL_VERSION,
-    MountLeaseResult, MountMethod, MountRecoveryLease, MountReleaseResult, MountRequest,
-    MountResponse, MountResponseResult, MountSnapshotRef, MountStatusResult,
+    MountLeaseResult, MountLegacyRepairResult, MountMethod, MountRecoveryLease, MountReleaseResult,
+    MountRequest, MountResponse, MountResponseResult, MountSnapshotRef, MountStatusResult,
     validate_mount_request,
 };
 
 /// Stable v4 wire identity retained by the byte-identical Snapshot Access artifact.
 pub const MOUNT_HELPER_WIRE_VERSION: &str = "0.5.0";
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
-pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.4";
+pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.3";
+pub const PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
+pub const HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
 /// Compatibility alias for callers that still name the original component release.
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = MOUNT_HELPER_WIRE_VERSION;
 pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
@@ -238,6 +240,8 @@ fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperE
     if result.helper_version != MOUNT_HELPER_WIRE_VERSION
         && result.helper_version != ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     {
         return Err(MountHelperError::Protocol(format!(
@@ -306,6 +310,20 @@ pub fn reconcile_inventory(
         Some(MountResponseResult::Released(result)) => Ok(result),
         _ => Err(MountHelperError::Protocol(
             "inventory reconciliation response missing result".into(),
+        )),
+    }
+}
+
+/// Explicitly repair stale rows written before the helper persisted mount device identity.
+/// Status remains read-only and ordinary Release remains conservative. This operation is the
+/// only path allowed to backfill a missing device identity; the root helper still performs every
+/// journal, path, age, volume/device and inventory check while holding its mutation lock.
+pub fn repair_legacy(uid: u32) -> Result<MountLegacyRepairResult, MountHelperError> {
+    let response = request(MountMethod::RepairLegacy { uid })?;
+    match response.result {
+        Some(MountResponseResult::LegacyRepaired(result)) => Ok(result),
+        _ => Err(MountHelperError::Protocol(
+            "legacy repair response missing result".into(),
         )),
     }
 }
@@ -387,6 +405,7 @@ fn request_timeout(method: &MountMethod) -> Duration {
         | MountMethod::Renew { .. }
         | MountMethod::Mount { .. }
         | MountMethod::Release { .. }
+        | MountMethod::RepairLegacy { .. }
         | MountMethod::RecordCleanup { .. }
         | MountMethod::Cleanup { .. } => MUTATING_REQUEST_TIMEOUT,
     }
@@ -718,6 +737,7 @@ async fn serve_connection(
                         | MountMethod::Renew { .. }
                         | MountMethod::Mount { .. }
                         | MountMethod::Release { .. }
+                        | MountMethod::RepairLegacy { .. }
                         | MountMethod::RecordCleanup { .. }
                         | MountMethod::Cleanup { .. }
                 );
@@ -836,6 +856,9 @@ async fn handle_request(
         } => release_request(peer_uid, uid, &lease_id, reconcile_inventory, journal)
             .await
             .map(MountResponseResult::Released),
+        MountMethod::RepairLegacy { uid } => repair_legacy_request(peer_uid, uid, journal)
+            .await
+            .map(MountResponseResult::LegacyRepaired),
         MountMethod::RecordCleanup { uid, lease_id } => {
             record_cleanup_request(peer_uid, uid, &lease_id, journal)
                 .await
@@ -1230,6 +1253,125 @@ async fn reserve_request(
         lease_id: lease_id.to_string(),
         cleanup_state: "reserved".to_string(),
     })
+}
+
+/// Repair the legacy journal layout that did not persist the mounted device identity. A row is
+/// eligible only when it is old enough to be stale, belongs to the requesting peer, has a complete
+/// reservation/snapshot manifest, and points at the root-owned helper mount path. The operation
+/// derives a device identity from that path (or its managed parent when the mount is already
+/// gone), persists it under the mutation lock, then reuses the ordinary journal-bound Release
+/// path. Any row that cannot satisfy every check remains untouched and blocking.
+async fn repair_legacy_request(
+    peer_uid: u32,
+    uid: u32,
+    journal: &SqlitePool,
+) -> Result<MountLegacyRepairResult, MountHelperError> {
+    if peer_uid != uid || uid == 0 {
+        return Err(MountHelperError::Protocol(
+            "legacy repair UID does not match peer".into(),
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT lease_id, volume_uuid, device_identifier, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND state IS NOT 'released' AND last_renewed_at <= datetime('now', ?)",
+    )
+    .bind(i64::from(uid))
+    .bind(RECOVERY_AGE_SECONDS)
+    .fetch_all(journal)
+    .await?;
+    let mut result = MountLegacyRepairResult {
+        audited: rows.len() as u32,
+        ..Default::default()
+    };
+    for row in rows {
+        let lease_id: String = row.try_get("lease_id")?;
+        let volume_uuid: String = row.try_get("volume_uuid")?;
+        let device_identifier: String = row.try_get("device_identifier")?;
+        let mount_root: String = row.try_get("mount_root")?;
+        let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
+        let snapshot_manifest_json: String = row.try_get("snapshot_manifest")?;
+        let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
+        let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
+        let state: String = row.try_get("state")?;
+        let eligible = !mount_root.is_empty()
+            && mount_device == 0
+            && matches!(state.as_str(), "prepared" | "active" | "cleanup_pending")
+            && validate_lease_id(&lease_id).is_ok()
+            && validate_uuid(&volume_uuid).is_ok()
+            && validate_device(&device_identifier).is_ok()
+            && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok()
+            && reservation_manifest_valid == 1
+            && parse_reservation_manifest(&reservation_manifest_json).is_ok()
+            && parse_journal_manifest(&snapshot_manifest_json)
+                .is_ok_and(|manifest| !manifest.is_empty())
+            && expected_mount_root(i64::from(uid), &lease_id)
+                .ok()
+                .is_some_and(|expected| {
+                    Path::new(&mount_root) == expected && validate_managed_mount_root(&expected)
+                });
+        if !eligible {
+            continue;
+        }
+        let expected_root = expected_mount_root(i64::from(uid), &lease_id)?;
+        let mounted = match mounted_snapshot_path(&expected_root) {
+            Ok(mounted) => mounted,
+            Err(_) => continue,
+        };
+        let expected_device = if mounted {
+            match fs::metadata(&expected_root) {
+                Ok(metadata) if metadata.dev() != 0 => metadata.dev(),
+                _ => continue,
+            }
+        } else {
+            match expected_root
+                .parent()
+                .and_then(|parent| fs::metadata(parent).ok())
+            {
+                Some(metadata) if metadata.dev() != 0 => metadata.dev(),
+                _ => continue,
+            }
+        };
+        let updated = sqlx::query(
+            "UPDATE mounts SET mount_device = ? WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = 0 AND mount_root = ? AND snapshot_manifest = ? AND reservation_manifest = ? AND reservation_manifest_valid = 1",
+        )
+        .bind(i64::try_from(expected_device).unwrap_or(i64::MAX))
+        .bind(&lease_id)
+        .bind(i64::from(uid))
+        .bind(&state)
+        .bind(&mount_root)
+        .bind(&snapshot_manifest_json)
+        .bind(&reservation_manifest_json)
+        .execute(journal)
+        .await?;
+        if updated.rows_affected() != 1 {
+            continue;
+        }
+        match release_request(peer_uid, uid, &lease_id, false, journal).await {
+            Ok(release) => {
+                result.repaired += 1;
+                if release.cleanup_state == "released" {
+                    result.released += 1;
+                }
+            }
+            Err(_) => {
+                // Do not leave a speculative backfill behind when Release rejected the row. The
+                // next explicit repair can retry after the underlying inventory/mount state is
+                // stable; the journal remains fail-closed in the meantime.
+                let _ = sqlx::query(
+                    "UPDATE mounts SET mount_device = 0 WHERE lease_id = ? AND uid = ? AND mount_device = ? AND state = ?",
+                )
+                .bind(&lease_id)
+                .bind(i64::from(uid))
+                .bind(i64::try_from(expected_device).unwrap_or(i64::MAX))
+                .bind(&state)
+                .execute(journal)
+                .await;
+            }
+        }
+    }
+    let status = classify_status_rows(journal, Some(uid), None).await?;
+    result.remaining = status.active_mounts;
+    result.unknown = status.unknown_blocking_mounts;
+    Ok(result)
 }
 
 async fn renew_request(
@@ -3468,6 +3610,85 @@ mod tests {
             }),
             MUTATING_REQUEST_TIMEOUT
         );
+        assert_eq!(
+            request_timeout(&MountMethod::RepairLegacy { uid: 501 }),
+            MUTATING_REQUEST_TIMEOUT
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_repair_rejects_a_peer_uid_mismatch_before_touching_the_journal() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let error = repair_legacy_request(502, 501, &journal).await.unwrap_err();
+        assert!(error.to_string().contains("UID does not match peer"));
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mounts")
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_repair_leaves_an_untrusted_mount_root_blocking() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        let volume_uuid = "B8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        let manifest = serde_json::json!([
+            {"device_identifier": "disk5s1", "uuid": "C8A38394-49AE-42F9-85FB-14DD9EA549FA"}
+        ])
+        .to_string();
+        let reservation = serde_json::json!([]).to_string();
+        sqlx::query(
+            "INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, source_path, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?, ?, ?, ?, '', '', ?, 0, ?, ?, 1, 'cleanup_pending', datetime('now', '-1 day'), datetime('now', '-1 day'))",
+        )
+        .bind(lease_id)
+        .bind(501_i64)
+        .bind(volume_uuid)
+        .bind("disk5s1")
+        .bind("/tmp/user-controlled-mount-root")
+        .bind(&manifest)
+        .bind(&reservation)
+        .execute(&journal)
+        .await
+        .unwrap();
+
+        let result = repair_legacy_request(501, 501, &journal).await.unwrap();
+        assert_eq!(result.audited, 1);
+        assert_eq!(result.repaired, 0);
+        assert_eq!(result.unknown, 1);
+        let row =
+            sqlx::query("SELECT mount_device, state, mount_root FROM mounts WHERE lease_id = ?")
+                .bind(lease_id)
+                .fetch_one(&journal)
+                .await
+                .unwrap();
+        assert_eq!(row.try_get::<i64, _>("mount_device").unwrap(), 0);
+        assert_eq!(
+            row.try_get::<String, _>("state").unwrap(),
+            "cleanup_pending"
+        );
+        assert_eq!(
+            row.try_get::<String, _>("mount_root").unwrap(),
+            "/tmp/user-controlled-mount-root"
+        );
+    }
+
+    #[test]
+    fn legacy_repair_is_an_explicit_wire_operation() {
+        let request = MountRequest {
+            version: MOUNT_HELPER_PROTOCOL_VERSION,
+            request_id: "legacy-repair".into(),
+            method: MountMethod::RepairLegacy { uid: 501 },
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        let decoded: MountRequest = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded.method,
+            MountMethod::RepairLegacy { uid: 501 }
+        ));
+        assert!(validate_mount_request(&decoded).is_ok());
     }
 
     #[test]

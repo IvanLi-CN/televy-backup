@@ -63,7 +63,7 @@ struct SnapshotMountHelperReadiness {
             return "Snapshot Access cleanup required"
         }
         if isReady && (unknownBlockingMounts ?? 0) > 0 {
-            return "Snapshot mount helper verification required"
+            return "Snapshot mount helper legacy repair required"
         }
         if isReady && (inventoryDriftMounts ?? 0) > 0 {
             return "Snapshot inventory reconciliation required"
@@ -156,13 +156,13 @@ struct SnapshotMountHelperReadiness {
         return true
     }
 
-    /// A transitional 0.5.2 helper reported the four original classification partitions but did
+    /// A transitional current helper reported the four original classification partitions but did
     /// not report inventory drift. A mismatched build may be replaced only when those partitions
     /// form a complete aggregate; the CLI repeats the Snapshot Access idle check before bootout.
     var isStaleCurrentPartialClassification: Bool {
         guard reachable,
               !isReady,
-              helperVersion == "0.5.2",
+              helperVersion == "0.5.4",
               let buildCommit,
               buildCommit != expectedBuildCommit,
               buildCommit.utf8.count == 40,
@@ -226,7 +226,7 @@ struct SnapshotMountHelperReadiness {
     var isPendingCleanupUpgradeSafe: Bool {
         guard reachable,
               !isReady,
-              helperVersion == "0.5.2",
+              helperVersion == "0.5.4",
               classificationKnown,
               let activeMounts,
               let liveMounts,
@@ -264,6 +264,29 @@ struct SnapshotMountHelperReadiness {
             && snapshotAccessActiveLeases == 0
             && snapshotAccessPendingCleanup == 0
             && activeMounts == recoverableStaleMounts
+    }
+
+    /// Legacy rows are actionable only when the helper has classified every other partition as
+    /// empty. The daemon repeats this predicate under its maintenance lock; the UI never mutates
+    /// journal state during Refresh.
+    var canRepairLegacyRecords: Bool {
+        guard isReady,
+              classificationKnown,
+              let activeMounts,
+              let liveMounts,
+              let pendingCleanup,
+              let recoverableStaleMounts,
+              let unknownBlockingMounts,
+              let inventoryDriftMounts
+        else { return false }
+        return unknownBlockingMounts > 0
+            && activeMounts == unknownBlockingMounts
+            && liveMounts == 0
+            && pendingCleanup == 0
+            && recoverableStaleMounts == 0
+            && inventoryDriftMounts == 0
+            && snapshotAccessActiveLeases == 0
+            && snapshotAccessPendingCleanup == 0
     }
 
     var canReconcileInventory: Bool {
@@ -321,8 +344,9 @@ struct SnapshotMountHelperReadiness {
             && buildCommit.utf8.allSatisfy {
                 (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
             }
-        return (helperVersion == "0.5.2" && isReady)
-            || (helperVersion == "0.5.1" && validBuild)
+        return (helperVersion == "0.5.4" && isReady)
+            || (helperVersion == "0.5.3" && validBuild)
+            || (helperVersion == "0.5.2" && validBuild)
     }
 
     /// An unrecognized aggregate-only status is blocking even when the optional

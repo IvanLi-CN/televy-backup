@@ -182,6 +182,7 @@ enum SnapshotMountHelperCmd {
     Status,
     Reconcile,
     ReconcileInventory,
+    RepairLegacy,
 }
 
 #[derive(Subcommand)]
@@ -1077,6 +1078,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             }
             SnapshotMountHelperCmd::ReconcileInventory => {
                 snapshot_mount_service::reconcile_inventory(&config_dir, &data_dir, cli.json)
+            }
+            SnapshotMountHelperCmd::RepairLegacy => {
+                snapshot_mount_service::repair_legacy(&config_dir, &data_dir, cli.json)
             }
         },
         Command::Gui { cmd } => match cmd {

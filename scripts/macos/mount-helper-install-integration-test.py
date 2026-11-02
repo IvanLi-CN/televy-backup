@@ -278,7 +278,7 @@ while True:
     elif args.stale_partial_classification:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"',
-                     '"helper_version":"0.5.0","component_version":"0.5.2",'
+                     '"helper_version":"0.5.0","component_version":"0.5.4",'
                      '"build_commit":"' + '0' * 40 + '","pending_cleanup":0,'
                      '"live_mounts":0,"recoverable_stale_mounts":0,"unknown_blocking_mounts":1'))
     elif legacy_fixture:
@@ -383,7 +383,7 @@ while True:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
             if args.stale_partial_classification:
-                assert legacy["component_version"] == "0.5.2"
+                assert legacy["component_version"] == "0.5.4"
                 assert legacy["build_commit"] == "0" * 40
                 assert legacy["pending_cleanup"] == 0
                 assert legacy["live_mounts"] == 0
@@ -463,7 +463,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         if args.require_readiness:
             if not args.bootstrap_failure_rollback:
                 assert installation["helperReady"] is True
-                assert installation["helperVersion"] == "0.5.2"
+                assert installation["helperVersion"] == "0.5.4"
         if args.orphaned_backup_recovery:
             assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
             assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
@@ -475,7 +475,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert marker["plist"] == old_plist_hash
             print("PASS: interrupted helper backups were recovered before the candidate install", flush=True)
         if legacy_fixture:
-            assert installation["helperVersion"] == "0.5.2"
+            assert installation["helperVersion"] == "0.5.4"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
         if journal_locker is not None:
             assert journal_locker.wait(timeout=10) == 0
@@ -494,7 +494,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
                 flush=True,
             )
         if args.expect_build_commit:
-            assert direct["result"]["component_version"] == "0.5.2"
+            assert direct["result"]["component_version"] == "0.5.4"
             candidate = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
             digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
             installed_digest = hashlib.sha256(BINARY.read_bytes()).hexdigest()

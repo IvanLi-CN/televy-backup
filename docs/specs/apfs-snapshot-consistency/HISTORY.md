@@ -1,5 +1,16 @@
 # History
 
+- Legacy root-helper rows that predated persisted mount-device identity could be reported as
+  unknown blockers indefinitely: ordinary Refresh, helper Update and stale cleanup correctly
+  refused to guess whether a mount was still live, but no user-invoked repair path existed. The
+  `0.5.4` helper now exposes an explicit `snapshot.mount_helper.repair_legacy` operation. It is
+  serialized with Snapshot Access, age-gated, peer-UID scoped and restricted to root-owned managed
+  mount roots with valid volume/device bindings, manifests and inventory; eligible rows are
+  backfilled and passed through the existing `Release` boundary, while every ambiguous row remains
+  blocking. The CLI and Settings surface counts and a repair action without exposing paths,
+  identifiers or source bytes. Protocol v4 and the approved Snapshot Access artifact remain
+  unchanged.
+
 - Installer startup could be incorrectly reported as failed because four immediately refused connections exhausted the readiness check before initialization completed. Readiness now uses a monotonic startup window, with regression coverage for delayed initialization, permanent refusal, stale identity and late replies. Mount permission failures retain their fixed operation category for presentation.
 - [PR #181](https://github.com/IvanLi-CN/televy-backup/pull/181) includes a [hosted macOS installer fixture](https://github.com/IvanLi-CN/televy-backup/actions/runs/38865387153/job/116856982379) that delays real journal initialization with a disposable SQLite lock and verifies installation reaches the candidate build without a manual refresh. The source candidate's installer and strict error-propagation checks pass; this fixture does not exercise real FDA or establish full backup completion.
 

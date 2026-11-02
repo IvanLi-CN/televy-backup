@@ -1186,6 +1186,12 @@ struct SettingsWindowRootView: View {
                                     method: method,
                                     operationLabel: "Snapshot inventory reconciliation"
                                 )
+                            },
+                            repairLegacy: {
+                                performSnapshotMountOperation(
+                                    method: "snapshot.mount_helper.repair_legacy",
+                                    operationLabel: "Legacy snapshot repair"
+                                )
                             }
                         )
                     }
@@ -1246,7 +1252,7 @@ struct SettingsWindowRootView: View {
                 mountHelperReachable: !accessMissing && !mountHelperMissing,
                 mountHelperReady: !accessMissing && !mountHelperMissing && !mountHelperOutdated,
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
-                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.2" : nil,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.4" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 mountHelperActiveMounts: SettingsUIDemo.scene == "snapshots-inventory-drift" ? 1 : 0,
                 mountHelperPendingCleanup: 0,

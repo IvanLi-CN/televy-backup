@@ -404,7 +404,7 @@ evidence = {
     "snapshot_access": identity.copy(),
     "root_mount_helper": {
         "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
-        "component_version": "0.5.2",
+        "component_version": "0.5.4",
         "protocol_version": 4,
         "rc1": identity.copy(),
         "rc2": identity.copy(),
@@ -639,8 +639,8 @@ fi
             "snapshot_access": identity.copy(),
             "snapshot_mount_helper": {
                 "install_path": evidence["root_mount_helper"]["install_path"],
-                "component_version": "0.5.2",
-                "compatible_component_versions": ["0.5.2", "0.5.1", "0.5.0", "0.9.8"],
+                "component_version": "0.5.4",
+                "compatible_component_versions": ["0.5.4", "0.5.3", "0.5.2", "0.5.1", "0.5.0", "0.9.8"],
                 "protocol_version": 4,
                 **root_identity,
             },

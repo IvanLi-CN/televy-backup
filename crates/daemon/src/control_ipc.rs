@@ -130,12 +130,24 @@ fn snapshot_mount_reconcile_identity(
 
 fn snapshot_mount_cleanup_identity(status: &MountStatusResult) -> Result<(), ControlError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
+        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+        || status.helper_version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION;
     let component_compatible = match status.component_version.as_deref() {
         Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref() == Some(crate::BUILD_COMMIT)
         }
         Some(version) if version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        Some(version) if version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        Some(version) if version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref().is_some_and(|commit| {
                 commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -217,6 +229,28 @@ fn snapshot_mount_reconcile_final_state(
         return Err(ControlError {
             code: "snapshot_mount_helper.reconcile_required".to_string(),
             message: format!("Snapshot {action} did not clear every verified record."),
+            retryable: true,
+            details: serde_json::json!({
+                "live": live,
+                "pending": pending,
+                "recoverable": recoverable,
+                "unknown": unknown,
+                "inventoryDrift": inventory_drift,
+            }),
+        });
+    }
+    Ok(counts)
+}
+
+fn snapshot_mount_legacy_repair_preflight(
+    status: &MountStatusResult,
+) -> Result<(u32, u32, u32, u32, u32), ControlError> {
+    let counts = snapshot_mount_reconcile_counts(status)?;
+    let (live, pending, recoverable, unknown, inventory_drift) = counts;
+    if live > 0 || pending > 0 || recoverable > 0 || inventory_drift > 0 {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.repair_required".to_string(),
+            message: "Legacy snapshot repair is blocked while other snapshot records are active or already classified for cleanup.".to_string(),
             retryable: true,
             details: serde_json::json!({
                 "live": live,
@@ -1299,6 +1333,136 @@ async fn handle_control_ipc_client(
             Ok(serde_json::json!({
                 "reconciled": reconciled,
                 "remaining": final_status.active_mounts,
+                "inventoryDrift": final_inventory_drift_mounts,
+            }))
+        });
+        write_json_line(
+            &mut w,
+            &ControlResponse::ok(
+                req.id.clone(),
+                serde_json::json!({"operationId": operation_id}),
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if req.method == "snapshot.mount_helper.repair_legacy" {
+        let operation_id = match operation_start() {
+            Ok(operation_id) => operation_id,
+            Err(error) => {
+                write_json_line(&mut w, &ControlResponse::err(req.id.clone(), error)).await?;
+                return Ok(());
+            }
+        };
+        let maintenance = context.snapshot_maintenance.clone();
+        let data_root = context.data_root.clone();
+        let config_root = context.config_root.clone();
+        spawn_operation(operation_id.clone(), async move {
+            let _maintenance_guard = maintenance.lock().await;
+            let client = SnapshotClient::for_environment(&config_root, &data_root);
+            wait_for_snapshot_access_idle(&client, "repairing legacy snapshot records").await?;
+            let uid = unsafe { libc::geteuid() };
+            if uid == 0 {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.invalid_owner".to_string(),
+                    message: "Legacy snapshot repair cannot run as root.".to_string(),
+                    retryable: false,
+                    details: serde_json::json!({}),
+                });
+            }
+            let status = tokio::task::spawn_blocking(mount_helper::status)
+                .await
+                .map_err(|_| {
+                    ControlError::unavailable(
+                        "Snapshot mount status task failed.",
+                        serde_json::json!({}),
+                    )
+                })?
+                .map_err(|_| ControlError {
+                    code: "snapshot_mount_helper.status_failed".to_string(),
+                    message: "Snapshot mount records could not be verified before legacy repair."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"reason": "helper_status_failed"}),
+                })?;
+            snapshot_mount_reconcile_identity(&status, "repairing legacy records")?;
+            let (
+                _live_mounts,
+                _pending_cleanup,
+                _recoverable_stale_mounts,
+                unknown_blocking_mounts,
+                _inventory_drift_mounts,
+            ) = snapshot_mount_legacy_repair_preflight(&status)?;
+            if unknown_blocking_mounts == 0 {
+                return Ok(serde_json::json!({
+                    "audited": 0,
+                    "repaired": 0,
+                    "released": 0,
+                    "remaining": status.active_mounts,
+                    "unknown": 0,
+                }));
+            }
+            let repaired = tokio::task::spawn_blocking(move || mount_helper::repair_legacy(uid))
+                .await
+                .map_err(|_| {
+                    ControlError::unavailable(
+                        "Legacy snapshot repair task failed.",
+                        serde_json::json!({}),
+                    )
+                })?
+                .map_err(|_| ControlError {
+                    code: "snapshot_mount_helper.repair_failed".to_string(),
+                    message: "Legacy snapshot records could not be repaired safely.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"reason": "repair_rejected"}),
+                })?;
+            let final_status = tokio::task::spawn_blocking(|| {
+                mount_helper::status().map_err(|error| error.to_string())
+            })
+            .await
+            .map_err(|_| {
+                ControlError::unavailable(
+                    "Snapshot mount status task failed.",
+                    serde_json::json!({}),
+                )
+            })?
+            .map_err(|_| ControlError {
+                code: "snapshot_mount_helper.status_failed".to_string(),
+                message: "Snapshot mount records could not be verified after legacy repair."
+                    .to_string(),
+                retryable: true,
+                details: serde_json::json!({"reason": "helper_status_failed"}),
+            })?;
+            snapshot_mount_reconcile_identity(&final_status, "repairing legacy records")?;
+            let (
+                final_live_mounts,
+                final_pending_cleanup,
+                final_recoverable_stale_mounts,
+                final_unknown_blocking_mounts,
+                final_inventory_drift_mounts,
+            ) = snapshot_mount_reconcile_counts(&final_status)?;
+            if repaired.repaired == 0 && final_unknown_blocking_mounts > 0 {
+                return Err(ControlError {
+                    code: "snapshot_mount_helper.repair_required".to_string(),
+                    message: "No legacy snapshot record passed the safe repair checks; unresolved records remain blocked.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({
+                        "audited": repaired.audited,
+                        "remaining": final_status.active_mounts,
+                        "unknown": final_unknown_blocking_mounts,
+                    }),
+                });
+            }
+            Ok(serde_json::json!({
+                "audited": repaired.audited,
+                "repaired": repaired.repaired,
+                "released": repaired.released,
+                "remaining": final_status.active_mounts,
+                "live": final_live_mounts,
+                "pending": final_pending_cleanup,
+                "recoverable": final_recoverable_stale_mounts,
+                "unknown": final_unknown_blocking_mounts,
                 "inventoryDrift": final_inventory_drift_mounts,
             }))
         });
@@ -3884,6 +4048,35 @@ mod tests {
             .expect_err("unresolved inventory drift must keep recovery blocked");
         assert_eq!(error.code, "snapshot_mount_helper.reconcile_required");
         assert_eq!(error.details["inventoryDrift"], 1);
+    }
+
+    #[test]
+    fn snapshot_mount_legacy_repair_requires_an_unknown_only_partition() {
+        let unknown_only = MountStatusResult {
+            active_mounts: 2,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(2),
+            inventory_drift_mounts: Some(0),
+            ..Default::default()
+        };
+        let counts = snapshot_mount_legacy_repair_preflight(&unknown_only).unwrap();
+        assert_eq!(counts, (0, 0, 0, 2, 0));
+
+        let mixed = MountStatusResult {
+            active_mounts: 2,
+            pending_cleanup: Some(0),
+            live_mounts: Some(1),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: Some(0),
+            ..Default::default()
+        };
+        let error = snapshot_mount_legacy_repair_preflight(&mixed).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.repair_required");
+        assert_eq!(error.details["live"], 1);
+        assert_eq!(error.details["unknown"], 1);
     }
 
     #[test]
