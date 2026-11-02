@@ -1187,9 +1187,9 @@ struct SettingsWindowRootView: View {
                                     operationLabel: "Snapshot inventory reconciliation"
                                 )
                             },
-                            repairLegacy: {
+                            repairLegacy: SnapshotMountHelperControlAction.repairLegacy { method in
                                 performSnapshotMountOperation(
-                                    method: "snapshot.mount_helper.repair_legacy",
+                                    method: method,
                                     operationLabel: "Legacy snapshot repair"
                                 )
                             }

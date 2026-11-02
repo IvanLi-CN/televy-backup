@@ -1014,9 +1014,16 @@ fn classify_busy_status(
         }
         _ => false,
     };
+    let stale_partial_component = matches!(
+        status.component_version.as_deref(),
+        Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+    );
     let stale_current_partial_classification = status.helper_version
         == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        && status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && stale_partial_component
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit != env!("TELEVYBACKUP_BUILD_COMMIT")
                 && commit.len() == 40
@@ -1048,9 +1055,14 @@ fn classify_busy_status(
             ),
         ));
     }
+    let legacy_pending_component = matches!(
+        status.component_version.as_deref(),
+        Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+    );
     let legacy_pending_only = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        && status.component_version.as_deref()
-            == Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+        && legacy_pending_component
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
@@ -2387,6 +2399,33 @@ mod tests {
             classify_busy_status("install or update", &status).unwrap(),
             BusyCheck::LegacyUpgrade
         );
+    }
+
+    #[test]
+    fn older_classified_helpers_keep_a_guarded_upgrade_path() {
+        for component_version in [
+            mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+        ] {
+            let status = MountStatusResult {
+                helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+                component_version: Some(component_version.into()),
+                build_commit: Some("b".repeat(40)),
+                active_mounts: 1,
+                pending_cleanup: Some(0),
+                live_mounts: Some(0),
+                recoverable_stale_mounts: Some(0),
+                unknown_blocking_mounts: Some(1),
+                inventory_drift_mounts: None,
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_busy_status("install or update", &status).unwrap(),
+                BusyCheck::LegacyUpgrade,
+                "{component_version} with a complete four-partition status must be replaceable"
+            );
+        }
     }
 
     #[test]

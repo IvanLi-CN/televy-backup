@@ -128,11 +128,11 @@ struct SnapshotMountHelperReadiness {
         return true
     }
 
-    /// The previous helper can identify pending rows but cannot expose their lease IDs. A guarded
-    /// replacement is the only safe way to upgrade it before cleanup can be retried explicitly.
+    /// Older helpers can identify pending rows but cannot expose their lease IDs. A guarded
+    /// replacement is the only safe way to upgrade them before cleanup can be retried explicitly.
     var isLegacyPendingCleanupStatus: Bool {
         guard reachable,
-              helperVersion == "0.5.1",
+              helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
               let buildCommit
         else { return false }
         let validBuild = buildCommit.utf8.count == 40
@@ -156,13 +156,13 @@ struct SnapshotMountHelperReadiness {
         return true
     }
 
-    /// A transitional current helper reported the four original classification partitions but did
-    /// not report inventory drift. A mismatched build may be replaced only when those partitions
-    /// form a complete aggregate; the CLI repeats the Snapshot Access idle check before bootout.
+    /// Current and recent helpers reported the four original classification partitions but did not
+    /// report inventory drift. A mismatched build may be replaced only when those partitions form
+    /// a complete aggregate; the CLI repeats the Snapshot Access idle check before bootout.
     var isStaleCurrentPartialClassification: Bool {
         guard reachable,
               !isReady,
-              helperVersion == "0.5.4",
+              helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
               let buildCommit,
               buildCommit != expectedBuildCommit,
               buildCommit.utf8.count == 40,

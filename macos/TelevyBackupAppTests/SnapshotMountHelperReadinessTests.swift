@@ -149,6 +149,27 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(pendingPrevious.isLegacyPendingCleanupStatus, "the previous helper must expose its pending-only upgrade state")
         expectReadiness(pendingPrevious.canUpdate, "the previous helper must retain a guarded update action before cleanup retry")
+        for version in ["0.5.3", "0.5.2", "0.5.1"] {
+            let pendingOlder = SnapshotMountHelperReadiness(
+                reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+                expectedBuildCommit: candidateCommit, helperVersion: version,
+                activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
+                recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
+                pendingCleanupCandidates: 0
+            )
+            expectReadiness(pendingOlder.isLegacyPendingCleanupStatus, "helper \(version) must retain a guarded pending-cleanup upgrade")
+            expectReadiness(pendingOlder.canUpdate, "helper \(version) must remain updateable before cleanup retry")
+        }
+        for version in ["0.5.3", "0.5.2", "0.5.1"] {
+            let partialOlder = SnapshotMountHelperReadiness(
+                reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+                expectedBuildCommit: candidateCommit, helperVersion: version,
+                activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
+                recoverableStaleMounts: 0, unknownBlockingMounts: 1, inventoryDriftMounts: nil
+            )
+            expectReadiness(partialOlder.isStaleCurrentPartialClassification, "helper \(version) must retain a guarded partial-classification upgrade")
+            expectReadiness(partialOlder.canUpdate, "helper \(version) must remain updateable when inventory classification is absent")
+        }
         let inconsistentAggregate = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
