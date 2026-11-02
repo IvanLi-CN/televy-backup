@@ -1,5 +1,12 @@
 # History
 
+- The hosted recovery fixture no longer assumes that a disposable APFS image can create a local
+  snapshot. GitHub-hosted macOS rejects `tmutil localsnapshot` for that image and `diskutil apfs`
+  has no snapshot-create operation. The fixture now proves the safer boundary: an unobservable
+  legacy manifest remains an unknown blocker through both daemon and CLI repair, while successful
+  journal-bound release semantics stay in deterministic helper tests. No CI result claims a
+  snapshot was created or deleted without inventory evidence.
+
 - Legacy root-helper rows that predated persisted mount-device identity could be reported as
   unknown blockers indefinitely: ordinary Refresh, helper Update and stale cleanup correctly
   refused to guess whether a mount was still live, but no user-invoked repair path existed. The

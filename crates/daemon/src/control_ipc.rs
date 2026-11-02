@@ -264,6 +264,22 @@ fn snapshot_mount_legacy_repair_preflight(
     Ok(counts)
 }
 
+fn snapshot_mount_legacy_repair_final_state(
+    status: &MountStatusResult,
+) -> Result<(u32, u32, u32, u32, u32), ControlError> {
+    match snapshot_mount_reconcile_final_state(status, "legacy repair") {
+        Ok(counts) => Ok(counts),
+        Err(mut error) => {
+            if error.code == "snapshot_mount_helper.reconcile_required" {
+                error.code = "snapshot_mount_helper.repair_required".to_string();
+                error.message =
+                    "Legacy snapshot repair did not clear every verified record.".to_string();
+            }
+            Err(error)
+        }
+    }
+}
+
 fn snapshot_mount_pending_cleanup_leases(
     status: &MountStatusResult,
 ) -> Result<&[televybackup_snapshot_access::MountRecoveryLease], ControlError> {
@@ -1441,7 +1457,7 @@ async fn handle_control_ipc_client(
                 final_recoverable_stale_mounts,
                 final_unknown_blocking_mounts,
                 final_inventory_drift_mounts,
-            ) = snapshot_mount_reconcile_final_state(&final_status, "legacy repair")?;
+            ) = snapshot_mount_legacy_repair_final_state(&final_status)?;
             Ok(serde_json::json!({
                 "audited": repaired.audited,
                 "repaired": repaired.repaired,
@@ -4082,6 +4098,26 @@ mod tests {
         let error = snapshot_mount_legacy_repair_preflight(&mixed).unwrap_err();
         assert_eq!(error.code, "snapshot_mount_helper.repair_required");
         assert_eq!(error.details["live"], 1);
+        assert_eq!(error.details["unknown"], 1);
+    }
+
+    #[test]
+    fn snapshot_mount_legacy_repair_uses_a_specific_final_error_code() {
+        let unresolved = MountStatusResult {
+            active_mounts: 1,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(1),
+            inventory_drift_mounts: Some(0),
+            ..Default::default()
+        };
+        let error = snapshot_mount_legacy_repair_final_state(&unresolved).unwrap_err();
+        assert_eq!(error.code, "snapshot_mount_helper.repair_required");
+        assert_eq!(
+            error.message,
+            "Legacy snapshot repair did not clear every verified record."
+        );
         assert_eq!(error.details["unknown"], 1);
     }
 

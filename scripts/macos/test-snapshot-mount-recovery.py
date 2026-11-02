@@ -305,51 +305,6 @@ def ensure_uid_mount_root(uid):
     return uid_root, created
 
 
-def snapshot_uuids(device):
-    payload = plistlib.loads(
-        run(
-            "sudo",
-            "-n",
-            "/usr/sbin/diskutil",
-            "apfs",
-            "listSnapshots",
-            "-plist",
-            device,
-        ).stdout
-    )
-    return {
-        snapshot["SnapshotUUID"]
-        for snapshot in payload.get("Snapshots", [])
-        if isinstance(snapshot, dict) and snapshot.get("SnapshotUUID")
-    }
-
-
-def create_fixture_snapshot(device):
-    before = snapshot_uuids(device)
-    # Use the same production command as the root helper; diskutil only exposes
-    # APFS snapshot inventory/deletion on the hosted macOS image.
-    result = run(
-        "sudo",
-        "-n",
-        "/usr/bin/tmutil",
-        "localsnapshot",
-        check=False,
-    )
-    if result.returncode != 0:
-        diagnostics = "\n".join(
-            part.decode(errors="replace").strip()
-            for part in (result.stdout, result.stderr)
-            if part.strip()
-        )
-        raise AssertionError(
-            "tmutil local snapshot creation failed "
-            f"(exit {result.returncode}): {diagnostics[:2048]}"
-        )
-    created = sorted(snapshot_uuids(device) - before)
-    assert len(created) == 1, f"expected one fixture snapshot, found {created!r}"
-    return created[0]
-
-
 def insert_legacy_repair_row(journal, uid, volume_uuid, device, lease_id, snapshot_uuid):
     """Seed one stale pre-device-identity row whose managed root is already gone."""
     mount_root = Path("/private/var/tmp/televybackup-snapshot-mounts") / str(uid) / lease_id
@@ -420,7 +375,6 @@ def main():
     access_process = daemon_process = None
     managed_root = Path("/private/var/tmp/televybackup-snapshot-mounts")
     managed_root_existed = os.path.lexists(managed_root)
-    fixture_snapshot_uuids = []
     try:
         run(
             "hdiutil",
@@ -679,9 +633,15 @@ def main():
         cli_final = request(ipc, "status")
         assert cli_final["ok"] and cli_final["result"]["active_mounts"] == 0
         uid_root, uid_root_created = ensure_uid_mount_root(os.getuid())
+        # Hosted macOS does not permit creating a local snapshot for a disposable
+        # APFS image (`tmutil localsnapshot` exits 73), and `diskutil apfs` has no
+        # snapshot-create verb. Use a structurally valid but unobservable legacy
+        # manifest to prove the production repair path remains fail-closed when
+        # snapshot identity cannot be proven. The successful journal-bound Release
+        # path is covered by the deterministic helper tests; this fixture must not
+        # claim deletion of a snapshot it could not safely create or inventory.
         legacy_daemon_id = str(uuid.uuid4())
-        legacy_daemon_snapshot_uuid = create_fixture_snapshot(device)
-        fixture_snapshot_uuids.append(legacy_daemon_snapshot_uuid)
+        legacy_daemon_snapshot_uuid = str(uuid.uuid4())
         insert_legacy_repair_row(
             journal,
             os.getuid(),
@@ -697,19 +657,16 @@ def main():
         repair_start = control_request(control, "snapshot.mount_helper.repair_legacy")
         assert repair_start["ok"]
         repaired = wait_for_operation(control, repair_start["result"]["operationId"])
-        assert repaired["state"] == "succeeded", repaired
-        assert repaired["result"]["audited"] == 1
-        assert repaired["result"]["repaired"] == 1
-        assert repaired["result"]["released"] == 1
-        assert repaired["result"]["remaining"] == 0
-        assert repaired["result"]["unknown"] == 0
+        assert repaired["state"] == "failed", repaired
+        assert repaired["error"]["code"] == "snapshot_mount_helper.repair_required"
+        assert repaired["error"]["details"]["unknown"] == 1
         daemon_repair_final = request(ipc, "status")
         assert daemon_repair_final["ok"]
-        assert daemon_repair_final["result"]["active_mounts"] == 0
+        assert daemon_repair_final["result"]["active_mounts"] == 1
+        assert daemon_repair_final["result"]["unknown_blocking_mounts"] == 1
 
         legacy_cli_id = str(uuid.uuid4())
-        legacy_cli_snapshot_uuid = create_fixture_snapshot(device)
-        fixture_snapshot_uuids.append(legacy_cli_snapshot_uuid)
+        legacy_cli_snapshot_uuid = str(uuid.uuid4())
         insert_legacy_repair_row(
             journal,
             os.getuid(),
@@ -730,17 +687,15 @@ def main():
             check=False,
             env=cli_environment,
         )
-        assert cli_repair.returncode == 0, cli_repair.stderr.decode(errors="replace")
-        cli_repair_payload = json.loads(cli_repair.stdout.decode())
-        assert cli_repair_payload["audited"] == 1
-        assert cli_repair_payload["repaired"] == 1
-        assert cli_repair_payload["released"] == 1
-        assert cli_repair_payload["remaining"] == 0
+        assert cli_repair.returncode != 0
+        cli_repair_error = cli_repair.stderr.decode(errors="replace")
+        assert "snapshot_mount_helper.repair_required" in cli_repair_error
         cli_repair_final = request(ipc, "status")
         assert cli_repair_final["ok"]
-        assert cli_repair_final["result"]["active_mounts"] == 0
+        assert cli_repair_final["result"]["active_mounts"] == 2
+        assert cli_repair_final["result"]["unknown_blocking_mounts"] == 2
         print(
-            "PASS: helper classification, daemon/CLI inventory reconciliation, legacy repair, and unknown blocker preservation verified",
+            "PASS: helper classification, daemon/CLI inventory reconciliation, legacy identity uncertainty, and unknown blocker preservation verified",
             flush=True,
         )
     finally:
@@ -770,19 +725,6 @@ def main():
             run("sudo", "-n", "rmdir", str(uid_root))
         if not managed_root_existed and managed_root.exists():
             run("sudo", "-n", "rmdir", str(managed_root))
-        if device is not None:
-            for snapshot_uuid in fixture_snapshot_uuids:
-                run(
-                    "sudo",
-                    "-n",
-                    "/usr/sbin/diskutil",
-                    "apfs",
-                    "deleteSnapshot",
-                    device,
-                    "-uuid",
-                    snapshot_uuid,
-                    check=False,
-                )
         if attached:
             run("hdiutil", "detach", str(mount))
         if root.exists():
