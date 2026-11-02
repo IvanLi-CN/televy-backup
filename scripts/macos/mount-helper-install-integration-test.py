@@ -60,8 +60,25 @@ def asset_backup_glob(path, suffix):
 
 
 def root_path_exists(path, directory=False):
-    test_flag = "-d" if directory else "-e"
-    return run("sudo", "-n", "/usr/bin/test", test_flag, str(path), check=False).returncode == 0
+    kind = "directory" if directory else "path"
+    script = (
+        "import os, stat, sys; "
+        "path = sys.argv[1]; "
+        "metadata = os.stat(path); "
+        "ok = stat.S_ISDIR(metadata.st_mode) if sys.argv[2] == 'directory' else True; "
+        "print('1' if ok else '0')"
+    )
+    result = run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(path),
+        kind,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "1"
 
 
 def root_metadata(path):
