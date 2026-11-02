@@ -54,6 +54,11 @@ def wait_for(probe, assertion):
     raise AssertionError("helper did not reach the expected IPC state within 20 seconds")
 
 
+def asset_backup_glob(path, suffix):
+    """Mirror Rust's Path::with_extension backup naming for dotted asset names."""
+    return path.parent.glob(f"{path.stem}.{suffix}-*")
+
+
 def seed_legacy_stale_journal(uid):
     """Create one age-gated reservation row before the candidate helper starts."""
     lease_id = str(uuid.uuid4())
@@ -303,7 +308,7 @@ while True:
         old_binary_source.write_text("#!/usr/bin/python3\n" + old_server.read_text())
         old_binary_source.chmod(0o755)
         old_binary_hash = hashlib.sha256(old_binary_source.read_bytes()).hexdigest()
-        binary_destination = BINARY if args.bootstrap_failure_rollback else BINARY.parent / (BINARY.name + ".backup-fixture")
+        binary_destination = BINARY if args.bootstrap_failure_rollback else BINARY.with_name(BINARY.stem + ".backup-fixture")
         run("sudo", "-n", "cp", str(old_binary_source), str(binary_destination))
         run("sudo", "-n", "chown", "root:wheel", str(binary_destination))
         run("sudo", "-n", "chmod", "755", str(binary_destination))
@@ -315,7 +320,7 @@ while True:
             "KeepAlive": True,
         }))
         old_plist_hash = hashlib.sha256(canonical_plist.read_bytes()).hexdigest()
-        plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.parent / (PLIST.stem + ".backup-fixture")
+        plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.with_name(PLIST.stem + ".backup-fixture")
         run("sudo", "-n", "cp", str(canonical_plist), str(plist_destination))
         run("sudo", "-n", "chown", "root:wheel", str(plist_destination))
         run("sudo", "-n", "chmod", "644", str(plist_destination))
@@ -464,8 +469,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert hashlib.sha256(BINARY.read_bytes()).hexdigest() == old_binary_hash
             assert hashlib.sha256(PLIST.read_bytes()).hexdigest() == old_plist_hash
             assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
-            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
-            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            assert not any(asset_backup_glob(BINARY, "backup"))
+            assert not any(asset_backup_glob(PLIST, "backup"))
             print("PASS: failed candidate bootstrap restores the previous helper and clears quarantine backups", flush=True)
         else:
             assert installed.returncode == 0, installed.stderr
@@ -477,8 +482,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
                 assert installation["helperReady"] is True
                 assert installation["helperVersion"] == "0.5.4"
         if args.orphaned_backup_recovery:
-            binary_backups = sorted(BINARY.parent.glob(BINARY.name + ".backup-*"))
-            plist_backups = sorted(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            binary_backups = sorted(asset_backup_glob(BINARY, "backup"))
+            plist_backups = sorted(asset_backup_glob(PLIST, "backup"))
             assert not binary_backups and not plist_backups, (
                 "interrupted helper backups remain after recovery: "
                 f"binary={binary_backups!r}, plist={plist_backups!r}"
@@ -563,23 +568,23 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             "-f",
             str(BINARY),
             str(PLIST),
-            str(BINARY.parent / (BINARY.name + ".backup-fixture")),
-            str(PLIST.parent / (PLIST.stem + ".backup-fixture")),
+            str(BINARY.with_name(BINARY.stem + ".backup-fixture")),
+            str(PLIST.with_name(PLIST.stem + ".backup-fixture")),
             str(MOUNT_SOCKET),
             check=False,
         )
         for path in [
-            *BINARY.parent.glob(BINARY.name + ".backup-*"),
-            *BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"),
-            *PLIST.parent.glob(PLIST.stem + ".backup-*"),
-            *PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"),
+            *asset_backup_glob(BINARY, "backup"),
+            *asset_backup_glob(BINARY, "uninstall-backup"),
+            *asset_backup_glob(PLIST, "backup"),
+            *asset_backup_glob(PLIST, "uninstall-backup"),
         ]:
             run("sudo", "-n", "rm", "-f", str(path), check=False)
         run("sudo", "-n", "rm", "-rf", str(JOURNAL), str(root), check=False)
-        assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
-        assert not any(BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"))
-        assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
-        assert not any(PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"))
+        assert not any(asset_backup_glob(BINARY, "backup"))
+        assert not any(asset_backup_glob(BINARY, "uninstall-backup"))
+        assert not any(asset_backup_glob(PLIST, "backup"))
+        assert not any(asset_backup_glob(PLIST, "uninstall-backup"))
         assert not any(os.path.lexists(path) for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), "fixture cleanup incomplete"
         shutil.rmtree(fixture)
 
