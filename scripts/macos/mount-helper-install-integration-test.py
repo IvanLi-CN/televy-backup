@@ -439,7 +439,19 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             ])
             wait_for(lambda: locker_ready.exists(), bool)
         install_started = time.monotonic()
-        installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
+        installed = run(
+            "sudo",
+            "-n",
+            str(cli),
+            "--json",
+            "--config-dir",
+            str(config),
+            "--data-dir",
+            str(data),
+            "snapshot-mount-helper",
+            "install",
+            check=not args.bootstrap_failure_rollback,
+        )
         if args.bootstrap_failure_rollback:
             assert installed.returncode != 0, "failing candidate unexpectedly installed"
             error = json.loads(installed.stderr)
