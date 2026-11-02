@@ -935,12 +935,24 @@ fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, Cli
 #[cfg(any(not(unix), test))]
 fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
+        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+        || status.helper_version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION;
     let component_compatible = match status.component_version.as_deref() {
         Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
         }
         Some(version) if version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        Some(version) if version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        Some(version) if version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref().is_some_and(|commit| {
                 commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -976,6 +988,8 @@ fn classify_busy_status(
     let known_legacy_wire = matches!(
         status.helper_version.as_str(),
         mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+            | mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
+            | mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     );
@@ -1000,9 +1014,16 @@ fn classify_busy_status(
         }
         _ => false,
     };
+    let stale_partial_component = matches!(
+        status.component_version.as_deref(),
+        Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+    );
     let stale_current_partial_classification = status.helper_version
         == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        && status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
+        && stale_partial_component
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit != env!("TELEVYBACKUP_BUILD_COMMIT")
                 && commit.len() == 40
@@ -1034,9 +1055,14 @@ fn classify_busy_status(
             ),
         ));
     }
+    let legacy_pending_component = matches!(
+        status.component_version.as_deref(),
+        Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+    );
     let legacy_pending_only = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        && status.component_version.as_deref()
-            == Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
+        && legacy_pending_component
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
@@ -2009,6 +2035,165 @@ fn reconcile_inventory_via_daemon(data_dir: &Path, json_output: bool) -> Result<
     }
 }
 
+/// Explicitly repair only stale legacy rows whose root-helper identity checks pass. Refresh and
+/// Status never call this operation; the daemon serializes it with Snapshot Access and the root
+/// helper reuses its journal-bound Release path for every candidate.
+#[cfg(unix)]
+pub fn repair_legacy(
+    _config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    let response = super::control_ipc_call_with_timeouts(
+        data_dir,
+        "snapshot.mount_helper.repair_legacy",
+        json!({}),
+        Duration::from_secs(15),
+        Duration::from_secs(10),
+    )?;
+    let operation_id = response
+        .result
+        .as_ref()
+        .and_then(|value| value.get("operationId"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.repair_failed",
+                "daemon did not return a legacy snapshot repair operation",
+            )
+        })?
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(15 * 60);
+    loop {
+        let status_response = super::control_ipc_call_with_timeouts(
+            data_dir,
+            "operation.get",
+            json!({"operationId": operation_id}),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )?;
+        let status = status_response.result.ok_or_else(|| {
+            CliError::retryable(
+                "snapshot_mount_helper.repair_failed",
+                "daemon returned no legacy snapshot repair operation status",
+            )
+        })?;
+        match status.get("state").and_then(serde_json::Value::as_str) {
+            Some("succeeded") => {
+                let payload = status.get("result").cloned().unwrap_or_else(|| json!({}));
+                if json_output {
+                    println!("{payload}");
+                } else {
+                    let repaired = payload
+                        .get("repaired")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    let released = payload
+                        .get("released")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    let remaining = payload
+                        .get("remaining")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    println!(
+                        "legacy snapshot repair completed ({repaired} repaired, {released} released, {remaining} remaining)"
+                    );
+                }
+                return Ok(());
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .cloned()
+                    .and_then(decode_control_error)
+                    .unwrap_or_else(|| televy_backup_core::control::ControlError {
+                        code: "snapshot_mount_helper.repair_failed".to_string(),
+                        message: "legacy snapshot repair failed".to_string(),
+                        retryable: true,
+                        details: json!({}),
+                    });
+                let code = match error.code.as_str() {
+                    "snapshot_mount_helper.active" => "snapshot_mount_helper.active",
+                    "snapshot_mount_helper.repair_required" => {
+                        "snapshot_mount_helper.repair_required"
+                    }
+                    "snapshot_mount_helper.status_incomplete" => {
+                        "snapshot_mount_helper.status_incomplete"
+                    }
+                    "snapshot_mount_helper.status_inconsistent" => {
+                        "snapshot_mount_helper.status_inconsistent"
+                    }
+                    "snapshot_mount_helper.update_required" => {
+                        "snapshot_mount_helper.update_required"
+                    }
+                    _ => "snapshot_mount_helper.repair_failed",
+                };
+                let message = if error.message.is_empty() {
+                    "legacy snapshot repair failed".to_string()
+                } else {
+                    error.message.clone()
+                };
+                let cli_error = if error.retryable {
+                    CliError::retryable(code, message)
+                } else {
+                    CliError::new(code, message)
+                };
+                return Err(cli_error.with_details(error.details));
+            }
+            Some("pending" | "running") if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Some("pending" | "running") => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.repair_timeout",
+                    "legacy snapshot repair did not finish before the timeout",
+                ));
+            }
+            _ => {
+                return Err(CliError::retryable(
+                    "snapshot_mount_helper.repair_failed",
+                    "daemon returned an invalid legacy snapshot repair operation state",
+                ));
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn repair_legacy(
+    config_dir: &Path,
+    data_dir: &Path,
+    json_output: bool,
+) -> Result<(), CliError> {
+    let uid = unsafe { libc::geteuid() };
+    if uid == 0 {
+        return Err(CliError::new(
+            "snapshot_mount_helper.invalid_owner",
+            "legacy snapshot repair must run as the signed-in user",
+        ));
+    }
+    wait_for_snapshot_access_idle(config_dir, data_dir, "repairing legacy snapshot records")?;
+    let result = mount_helper::repair_legacy(uid).map_err(|_| {
+        CliError::retryable(
+            "snapshot_mount_helper.repair_failed",
+            "legacy snapshot records could not be repaired safely",
+        )
+    })?;
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())
+        );
+    } else {
+        println!(
+            "legacy snapshot repair completed ({} repaired, {} released, {} remaining)",
+            result.repaired, result.released, result.remaining
+        );
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn decode_control_error(
     value: serde_json::Value,
@@ -2214,6 +2399,33 @@ mod tests {
             classify_busy_status("install or update", &status).unwrap(),
             BusyCheck::LegacyUpgrade
         );
+    }
+
+    #[test]
+    fn older_classified_helpers_keep_a_guarded_upgrade_path() {
+        for component_version in [
+            mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+        ] {
+            let status = MountStatusResult {
+                helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+                component_version: Some(component_version.into()),
+                build_commit: Some("b".repeat(40)),
+                active_mounts: 1,
+                pending_cleanup: Some(0),
+                live_mounts: Some(0),
+                recoverable_stale_mounts: Some(0),
+                unknown_blocking_mounts: Some(1),
+                inventory_drift_mounts: None,
+                ..Default::default()
+            };
+            assert_eq!(
+                classify_busy_status("install or update", &status).unwrap(),
+                BusyCheck::LegacyUpgrade,
+                "{component_version} with a complete four-partition status must be replaceable"
+            );
+        }
     }
 
     #[test]

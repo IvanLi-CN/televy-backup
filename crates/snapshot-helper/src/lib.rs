@@ -164,6 +164,12 @@ pub enum MountMethod {
         #[serde(default, skip_serializing_if = "is_false")]
         reconcile_inventory: bool,
     },
+    /// Explicitly repair only age-gated legacy rows whose mount identity can be proven from the
+    /// root-owned managed mount path. This is intentionally separate from Status and Release so
+    /// an incomplete legacy record remains fail-closed until the signed-in user asks for repair.
+    RepairLegacy {
+        uid: u32,
+    },
     RecordCleanup {
         uid: u32,
         lease_id: String,
@@ -192,6 +198,7 @@ pub enum MountResponseResult {
     Renewed(MountReleaseResult),
     Mounted(MountLeaseResult),
     Released(MountReleaseResult),
+    LegacyRepaired(MountLegacyRepairResult),
     CleanupRecorded(MountReleaseResult),
     Cleaned(MountReleaseResult),
 }
@@ -258,6 +265,15 @@ pub struct MountLeaseResult {
 pub struct MountReleaseResult {
     pub lease_id: String,
     pub cleanup_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MountLegacyRepairResult {
+    pub audited: u32,
+    pub repaired: u32,
+    pub released: u32,
+    pub remaining: u32,
+    pub unknown: u32,
 }
 
 impl MountResponse {

@@ -291,6 +291,75 @@ connection.close()
     )
 
 
+def ensure_uid_mount_root(uid):
+    """Create only the root-owned per-user parent required by the legacy repair fixture."""
+    managed_root = Path("/private/var/tmp/televybackup-snapshot-mounts")
+    uid_root = managed_root / str(uid)
+    if uid_root.is_symlink() or (uid_root.exists() and not uid_root.is_dir()):
+        raise AssertionError("managed UID mount root is not a directory")
+    created = not uid_root.exists()
+    if created:
+        run("sudo", "-n", "mkdir", "-p", str(uid_root))
+        run("sudo", "-n", "chown", "root:wheel", str(uid_root))
+        run("sudo", "-n", "chmod", "711", str(uid_root))
+    return uid_root, created
+
+
+def insert_legacy_repair_row(
+    journal,
+    uid,
+    volume_uuid,
+    device,
+    lease_id,
+    snapshot_uuid,
+    reservation_snapshot_uuid,
+):
+    """Seed one stale pre-device-identity row whose managed root is already gone."""
+    mount_root = Path("/private/var/tmp/televybackup-snapshot-mounts") / str(uid) / lease_id
+    snapshot_manifest = json.dumps(
+        [{"device_identifier": device, "uuid": snapshot_uuid}],
+        separators=(",", ":"),
+    )
+    reservation_manifest = json.dumps(
+        [{"device_identifier": device, "uuid": reservation_snapshot_uuid}],
+        separators=(",", ":"),
+    )
+    script = '''
+import sqlite3, sys
+journal, uid, volume_uuid, device, lease_id, mount_root, snapshot_manifest, reservation_manifest = sys.argv[1:]
+connection = sqlite3.connect(journal)
+connection.execute(
+    """
+        INSERT INTO mounts (
+            lease_id, uid, volume_uuid, device_identifier, source_path,
+            snapshot_name, mount_root, mount_device, snapshot_manifest,
+            reservation_manifest, reservation_manifest_valid, state,
+            created_at, last_renewed_at
+        ) VALUES (?, ?, ?, ?, '', '', ?, 0, ?, ?, 1, 'cleanup_pending',
+                  datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
+    """,
+    (lease_id, int(uid), volume_uuid, device, mount_root, snapshot_manifest, reservation_manifest),
+)
+connection.commit()
+connection.close()
+'''
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(journal),
+        str(uid),
+        volume_uuid,
+        device,
+        lease_id,
+        str(mount_root),
+        snapshot_manifest,
+        reservation_manifest,
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--helper", required=True, type=Path)
@@ -313,7 +382,9 @@ def main():
     source = mount / "nested" / "source"
     root = fixture / "root"
     image = fixture / "fixture.dmg"
+    device = None
     attached = loaded = False
+    uid_root_created = False
     access_process = daemon_process = None
     managed_root = Path("/private/var/tmp/televybackup-snapshot-mounts")
     managed_root_existed = os.path.lexists(managed_root)
@@ -574,8 +645,78 @@ def main():
         assert cli_payload["inventoryDrift"] == 0
         cli_final = request(ipc, "status")
         assert cli_final["ok"] and cli_final["result"]["active_mounts"] == 0
+        uid_root, uid_root_created = ensure_uid_mount_root(os.getuid())
+        # Hosted macOS does not permit creating a local snapshot for a disposable
+        # APFS image (`tmutil localsnapshot` exits 73), and `diskutil apfs` has no
+        # snapshot-create verb. Use structurally valid but unobservable legacy and
+        # reservation manifests that do not match the empty inventory. This proves
+        # the production repair path remains fail-closed when snapshot identity
+        # cannot be proven; it must retain cleanup_pending rather than release the
+        # row. The successful journal-bound Release path is covered by deterministic
+        # helper tests; this fixture must not claim deletion of a snapshot it could
+        # not safely create or inventory.
+        legacy_daemon_id = str(uuid.uuid4())
+        legacy_daemon_snapshot_uuid = str(uuid.uuid4())
+        legacy_daemon_reservation_uuid = str(uuid.uuid4())
+        insert_legacy_repair_row(
+            journal,
+            os.getuid(),
+            volume_uuid,
+            device,
+            legacy_daemon_id,
+            legacy_daemon_snapshot_uuid,
+            legacy_daemon_reservation_uuid,
+        )
+        legacy_before = request(ipc, "status")
+        assert legacy_before["ok"]
+        assert legacy_before["result"]["active_mounts"] == 1
+        assert legacy_before["result"]["unknown_blocking_mounts"] == 1
+        repair_start = control_request(control, "snapshot.mount_helper.repair_legacy")
+        assert repair_start["ok"]
+        repaired = wait_for_operation(control, repair_start["result"]["operationId"])
+        assert repaired["state"] == "failed", repaired
+        assert repaired["error"]["code"] == "snapshot_mount_helper.repair_required"
+        assert repaired["error"]["details"]["pending"] == 1
+        daemon_repair_final = request(ipc, "status")
+        assert daemon_repair_final["ok"]
+        assert daemon_repair_final["result"]["active_mounts"] == 1
+        assert daemon_repair_final["result"]["pending_cleanup"] == 1
+        assert daemon_repair_final["result"]["unknown_blocking_mounts"] == 0
+
+        legacy_cli_id = str(uuid.uuid4())
+        legacy_cli_snapshot_uuid = str(uuid.uuid4())
+        legacy_cli_reservation_uuid = str(uuid.uuid4())
+        insert_legacy_repair_row(
+            journal,
+            os.getuid(),
+            volume_uuid,
+            device,
+            legacy_cli_id,
+            legacy_cli_snapshot_uuid,
+            legacy_cli_reservation_uuid,
+        )
+        cli_repair = run(
+            str(cli),
+            "--json",
+            "--config-dir",
+            str(config),
+            "--data-dir",
+            str(data),
+            "snapshot-mount-helper",
+            "repair-legacy",
+            check=False,
+            env=cli_environment,
+        )
+        assert cli_repair.returncode != 0
+        cli_repair_error = cli_repair.stderr.decode(errors="replace")
+        assert "snapshot_mount_helper.repair_required" in cli_repair_error
+        cli_repair_final = request(ipc, "status")
+        assert cli_repair_final["ok"]
+        assert cli_repair_final["result"]["active_mounts"] == 2
+        assert cli_repair_final["result"]["pending_cleanup"] == 1
+        assert cli_repair_final["result"]["unknown_blocking_mounts"] == 1
         print(
-            "PASS: helper classification, daemon reconcile gating, CLI inventory reconciliation, and unknown blocker preservation verified",
+            "PASS: helper classification, daemon/CLI inventory reconciliation, legacy repair fencing, and unknown blocker preservation verified",
             flush=True,
         )
     finally:
@@ -601,6 +742,8 @@ def main():
             ), "fixture shutdown unverified; preserving state"
             if ipc.exists():
                 run("sudo", "-n", "rm", "-f", str(ipc))
+        if uid_root_created:
+            run("sudo", "-n", "rmdir", str(uid_root))
         if not managed_root_existed and managed_root.exists():
             run("sudo", "-n", "rmdir", str(managed_root))
         if attached:

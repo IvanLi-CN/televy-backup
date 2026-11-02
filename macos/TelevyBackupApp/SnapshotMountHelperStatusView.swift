@@ -18,6 +18,45 @@ struct SnapshotMountHelperStatusView: View {
     let recover: () -> Void
     let retryCleanup: () -> Void
     let reconcileInventory: (String) -> Void
+    let repairLegacy: () -> Void
+
+    init(
+        readiness: SnapshotMountHelperReadiness,
+        path: String?,
+        version: String?,
+        error: String?,
+        activeMounts: UInt32?,
+        pendingCleanup: UInt32?,
+        pendingCleanupCandidates: UInt32?,
+        liveMounts: UInt32?,
+        recoverableStaleMounts: UInt32?,
+        unknownBlockingMounts: UInt32?,
+        inventoryDriftMounts: UInt32?,
+        busy: Bool,
+        install: @escaping () -> Void,
+        recover: @escaping () -> Void,
+        retryCleanup: @escaping () -> Void,
+        reconcileInventory: @escaping (String) -> Void,
+        repairLegacy: @escaping () -> Void = {}
+    ) {
+        self.readiness = readiness
+        self.path = path
+        self.version = version
+        self.error = error
+        self.activeMounts = activeMounts
+        self.pendingCleanup = pendingCleanup
+        self.pendingCleanupCandidates = pendingCleanupCandidates
+        self.liveMounts = liveMounts
+        self.recoverableStaleMounts = recoverableStaleMounts
+        self.unknownBlockingMounts = unknownBlockingMounts
+        self.inventoryDriftMounts = inventoryDriftMounts
+        self.busy = busy
+        self.install = install
+        self.recover = recover
+        self.retryCleanup = retryCleanup
+        self.reconcileInventory = reconcileInventory
+        self.repairLegacy = repairLegacy
+    }
 
     var body: some View {
         let updateBlockReason = !readiness.isReady
@@ -74,10 +113,14 @@ struct SnapshotMountHelperStatusView: View {
                     .disabled(busy || !readiness.canRecoverStaleMounts)
             }
             if let unknownBlockingMounts, unknownBlockingMounts > 0 {
-                Text("\(unknownBlockingMounts) snapshot record(s) cannot be verified safely. Open Diagnostics and finish or repair the owning run.")
+                Text("\(unknownBlockingMounts) legacy snapshot record(s) need an explicit safe repair. The repair checks the owning user, age, managed mount root, device identity, and snapshot inventory before reusing Release.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                Button("Repair legacy snapshot records", action: repairLegacy)
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("snapshot-mount-helper-repair-legacy")
+                    .disabled(busy || !readiness.canRepairLegacyRecords)
             }
             if let inventoryDriftMounts, inventoryDriftMounts > 0 {
                 Text("\(inventoryDriftMounts) released snapshot inventory record(s) changed outside the recorded baseline. Reconciliation updates only the journal baseline after identity checks; it does not delete snapshots.")

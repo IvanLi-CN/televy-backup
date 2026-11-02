@@ -54,6 +54,40 @@ def wait_for(probe, assertion):
     raise AssertionError("helper did not reach the expected IPC state within 20 seconds")
 
 
+def asset_backup_glob(path, suffix):
+    """Mirror Rust's Path::with_extension backup naming for dotted asset names."""
+    return path.parent.glob(f"{path.stem}.{suffix}-*")
+
+
+def root_path_exists(path, directory=False):
+    kind = "directory" if directory else "path"
+    script = (
+        "import os, stat, sys; "
+        "path = sys.argv[1]; "
+        "metadata = os.stat(path); "
+        "ok = stat.S_ISDIR(metadata.st_mode) if sys.argv[2] == 'directory' else True; "
+        "print('1' if ok else '0')"
+    )
+    result = run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(path),
+        kind,
+        check=False,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
+def root_metadata(path):
+    script = "import os, sys; stat = os.stat(sys.argv[1]); print(stat.st_uid, stat.st_gid, oct(stat.st_mode & 0o7777))"
+    output = run("sudo", "-n", "/usr/bin/python3", "-c", script, str(path)).stdout.strip()
+    uid, gid, mode = output.split()
+    return int(uid), int(gid), int(mode, 8)
+
+
 def seed_legacy_stale_journal(uid):
     """Create one age-gated reservation row before the candidate helper starts."""
     lease_id = str(uuid.uuid4())
@@ -278,7 +312,7 @@ while True:
     elif args.stale_partial_classification:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"',
-                     '"helper_version":"0.5.0","component_version":"0.5.2",'
+                     '"helper_version":"0.5.0","component_version":"0.5.4",'
                      '"build_commit":"' + '0' * 40 + '","pending_cleanup":0,'
                      '"live_mounts":0,"recoverable_stale_mounts":0,"unknown_blocking_mounts":1'))
     elif legacy_fixture:
@@ -303,7 +337,7 @@ while True:
         old_binary_source.write_text("#!/usr/bin/python3\n" + old_server.read_text())
         old_binary_source.chmod(0o755)
         old_binary_hash = hashlib.sha256(old_binary_source.read_bytes()).hexdigest()
-        binary_destination = BINARY if args.bootstrap_failure_rollback else BINARY.parent / (BINARY.name + ".backup-fixture")
+        binary_destination = BINARY if args.bootstrap_failure_rollback else BINARY.with_name(BINARY.stem + ".backup-fixture")
         run("sudo", "-n", "cp", str(old_binary_source), str(binary_destination))
         run("sudo", "-n", "chown", "root:wheel", str(binary_destination))
         run("sudo", "-n", "chmod", "755", str(binary_destination))
@@ -315,7 +349,7 @@ while True:
             "KeepAlive": True,
         }))
         old_plist_hash = hashlib.sha256(canonical_plist.read_bytes()).hexdigest()
-        plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.parent / (PLIST.stem + ".backup-fixture")
+        plist_destination = PLIST if args.bootstrap_failure_rollback else PLIST.with_name(PLIST.stem + ".backup-fixture")
         run("sudo", "-n", "cp", str(canonical_plist), str(plist_destination))
         run("sudo", "-n", "chown", "root:wheel", str(plist_destination))
         run("sudo", "-n", "chmod", "644", str(plist_destination))
@@ -383,7 +417,7 @@ while True:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
             if args.stale_partial_classification:
-                assert legacy["component_version"] == "0.5.2"
+                assert legacy["component_version"] == "0.5.4"
                 assert legacy["build_commit"] == "0" * 40
                 assert legacy["pending_cleanup"] == 0
                 assert legacy["live_mounts"] == 0
@@ -439,7 +473,19 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             ])
             wait_for(lambda: locker_ready.exists(), bool)
         install_started = time.monotonic()
-        installed = run("sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data), "snapshot-mount-helper", "install")
+        installed = run(
+            "sudo",
+            "-n",
+            str(cli),
+            "--json",
+            "--config-dir",
+            str(config),
+            "--data-dir",
+            str(data),
+            "snapshot-mount-helper",
+            "install",
+            check=not args.bootstrap_failure_rollback,
+        )
         if args.bootstrap_failure_rollback:
             assert installed.returncode != 0, "failing candidate unexpectedly installed"
             error = json.loads(installed.stderr)
@@ -452,8 +498,8 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert hashlib.sha256(BINARY.read_bytes()).hexdigest() == old_binary_hash
             assert hashlib.sha256(PLIST.read_bytes()).hexdigest() == old_plist_hash
             assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
-            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
-            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            assert not any(asset_backup_glob(BINARY, "backup"))
+            assert not any(asset_backup_glob(PLIST, "backup"))
             print("PASS: failed candidate bootstrap restores the previous helper and clears quarantine backups", flush=True)
         else:
             assert installed.returncode == 0, installed.stderr
@@ -463,10 +509,14 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
         if args.require_readiness:
             if not args.bootstrap_failure_rollback:
                 assert installation["helperReady"] is True
-                assert installation["helperVersion"] == "0.5.2"
+                assert installation["helperVersion"] == "0.5.4"
         if args.orphaned_backup_recovery:
-            assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
-            assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
+            binary_backups = sorted(asset_backup_glob(BINARY, "backup"))
+            plist_backups = sorted(asset_backup_glob(PLIST, "backup"))
+            assert not binary_backups and not plist_backups, (
+                "interrupted helper backups remain after recovery: "
+                f"binary={binary_backups!r}, plist={plist_backups!r}"
+            )
             marker = wait_for(
                 lambda: json.loads(old_helper_marker.read_text()),
                 lambda value: value.get("binary") is not None and value.get("plist") is not None,
@@ -475,7 +525,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert marker["plist"] == old_plist_hash
             print("PASS: interrupted helper backups were recovered before the candidate install", flush=True)
         if legacy_fixture:
-            assert installation["helperVersion"] == "0.5.2"
+            assert installation["helperVersion"] == "0.5.4"
             print("PASS: privileged CLI reports the replacement helper ready", flush=True)
         if journal_locker is not None:
             assert journal_locker.wait(timeout=10) == 0
@@ -494,7 +544,7 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
                 flush=True,
             )
         if args.expect_build_commit:
-            assert direct["result"]["component_version"] == "0.5.2"
+            assert direct["result"]["component_version"] == "0.5.4"
             candidate = app / "Contents/MacOS/televybackup-snapshot-mount-helper"
             digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
             installed_digest = hashlib.sha256(BINARY.read_bytes()).hexdigest()
@@ -511,8 +561,11 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             removal = json.loads(removed.stdout)
             assert removal["uninstalled"] is True
             assert not BINARY.exists() and not PLIST.exists()
-            assert uninstall_sentinel is not None and uninstall_sentinel.exists()
-            assert JOURNAL.is_dir()
+            assert uninstall_sentinel is not None and root_path_exists(uninstall_sentinel)
+            assert root_path_exists(JOURNAL, directory=True)
+            assert root_metadata(JOURNAL) == (0, 0, 0o700)
+            assert root_metadata(JOURNAL / "journal.sqlite") == (0, 0, 0o600)
+            assert root_metadata(uninstall_sentinel) == (0, 0, 0o600)
             assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
             after = wait_for(
                 lambda: request(access_socket, metadata["protocolVersion"]),
@@ -547,23 +600,23 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             "-f",
             str(BINARY),
             str(PLIST),
-            str(BINARY.parent / (BINARY.name + ".backup-fixture")),
-            str(PLIST.parent / (PLIST.stem + ".backup-fixture")),
+            str(BINARY.with_name(BINARY.stem + ".backup-fixture")),
+            str(PLIST.with_name(PLIST.stem + ".backup-fixture")),
             str(MOUNT_SOCKET),
             check=False,
         )
         for path in [
-            *BINARY.parent.glob(BINARY.name + ".backup-*"),
-            *BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"),
-            *PLIST.parent.glob(PLIST.stem + ".backup-*"),
-            *PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"),
+            *asset_backup_glob(BINARY, "backup"),
+            *asset_backup_glob(BINARY, "uninstall-backup"),
+            *asset_backup_glob(PLIST, "backup"),
+            *asset_backup_glob(PLIST, "uninstall-backup"),
         ]:
             run("sudo", "-n", "rm", "-f", str(path), check=False)
         run("sudo", "-n", "rm", "-rf", str(JOURNAL), str(root), check=False)
-        assert not any(BINARY.parent.glob(BINARY.name + ".backup-*"))
-        assert not any(BINARY.parent.glob(BINARY.name + ".uninstall-backup-*"))
-        assert not any(PLIST.parent.glob(PLIST.stem + ".backup-*"))
-        assert not any(PLIST.parent.glob(PLIST.stem + ".uninstall-backup-*"))
+        assert not any(asset_backup_glob(BINARY, "backup"))
+        assert not any(asset_backup_glob(BINARY, "uninstall-backup"))
+        assert not any(asset_backup_glob(PLIST, "backup"))
+        assert not any(asset_backup_glob(PLIST, "uninstall-backup"))
         assert not any(os.path.lexists(path) for path in (BINARY, PLIST, MOUNT_SOCKET, JOURNAL)), "fixture cleanup incomplete"
         shutil.rmtree(fixture)
 
