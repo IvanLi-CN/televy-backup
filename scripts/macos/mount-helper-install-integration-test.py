@@ -64,6 +64,13 @@ def root_path_exists(path, directory=False):
     return run("sudo", "-n", "/usr/bin/test", test_flag, str(path), check=False).returncode == 0
 
 
+def root_metadata(path):
+    script = "import os, sys; stat = os.stat(sys.argv[1]); print(stat.st_uid, stat.st_gid, oct(stat.st_mode & 0o7777))"
+    output = run("sudo", "-n", "/usr/bin/python3", "-c", script, str(path)).stdout.strip()
+    uid, gid, mode = output.split()
+    return int(uid), int(gid), int(mode, 8)
+
+
 def seed_legacy_stale_journal(uid):
     """Create one age-gated reservation row before the candidate helper starts."""
     lease_id = str(uuid.uuid4())
@@ -539,6 +546,9 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert not BINARY.exists() and not PLIST.exists()
             assert uninstall_sentinel is not None and root_path_exists(uninstall_sentinel)
             assert root_path_exists(JOURNAL, directory=True)
+            assert root_metadata(JOURNAL) == (0, 0, 0o700)
+            assert root_metadata(JOURNAL / "journal.sqlite") == (0, 0, 0o600)
+            assert root_metadata(uninstall_sentinel) == (0, 0, 0o600)
             assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
             after = wait_for(
                 lambda: request(access_socket, metadata["protocolVersion"]),
