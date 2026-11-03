@@ -2558,6 +2558,11 @@ async fn release_request_with_observation(
     .await?
     .ok_or_else(|| MountHelperError::Protocol("mount lease not found".into()))?;
     let stored_uid: i64 = row.try_get("uid")?;
+    if stored_uid != i64::from(uid) {
+        return Err(MountHelperError::Protocol(
+            "mount lease belongs to another user".into(),
+        ));
+    }
     let volume_uuid: String = row.try_get("volume_uuid")?;
     let device_identifier: String = row.try_get("device_identifier")?;
     let mount_root: String = row.try_get("mount_root")?;
@@ -2583,11 +2588,6 @@ async fn release_request_with_observation(
         .fetch_one(journal)
         .await?
         > 0;
-    if stored_uid != i64::from(uid) && !stale_reserved {
-        return Err(MountHelperError::Protocol(
-            "mount lease belongs to another user".into(),
-        ));
-    }
     if !matches!(
         state.as_str(),
         "reserved" | "prepared" | "active" | "cleanup_pending" | "released"
@@ -6139,6 +6139,40 @@ mod tests {
                 .unwrap();
         assert!(status.recovery_leases.is_empty());
         assert_eq!(status.unknown_blocking_mounts, Some(1));
+    }
+
+    #[tokio::test]
+    async fn release_rejects_foreign_stale_reserved_rows_without_mutation() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?,502,'C8A38394-49AE-42F9-85FB-14DD9EA549FA','disk5s1','','','[]','[]',0,'reserved',datetime('now','-1 day'),datetime('now','-1 day'))")
+            .bind(&lease).execute(&journal).await.unwrap();
+        let before: String = sqlx::query_scalar("SELECT json_object('uid', uid, 'state', state, 'root', mount_root, 'device', mount_device, 'manifest', snapshot_manifest, 'baseline', reservation_manifest, 'valid', reservation_manifest_valid, 'renewed', last_renewed_at) FROM mounts WHERE lease_id = ?")
+            .bind(&lease).fetch_one(&journal).await.unwrap();
+        let fixture = FailedMountFixture::default();
+        let result =
+            release_request_with_observation(501, 501, &lease, false, &journal, &fixture).await;
+        let after: String = sqlx::query_scalar("SELECT json_object('uid', uid, 'state', state, 'root', mount_root, 'device', mount_device, 'manifest', snapshot_manifest, 'baseline', reservation_manifest, 'valid', reservation_manifest_valid, 'renewed', last_renewed_at) FROM mounts WHERE lease_id = ?")
+            .bind(&lease).fetch_one(&journal).await.unwrap();
+        assert_eq!(before, after, "foreign release must not mutate the journal");
+        assert!(
+            matches!(result, Err(MountHelperError::Protocol(ref message)) if message == "mount lease belongs to another user")
+        );
+        assert_eq!(fixture.proofs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            fixture
+                .inventory_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(fixture.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // The owner still reaches the conservative invalid-baseline cleanup path.
+        let owned = release_request_with_observation(502, 502, &lease, false, &journal, &fixture)
+            .await
+            .unwrap();
+        assert_eq!(owned.cleanup_state, "cleanup_pending");
     }
 
     #[tokio::test]

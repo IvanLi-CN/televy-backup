@@ -1,5 +1,10 @@
 # Implementation
 
+- Release checks the authenticated caller against the stored journal owner before age-gated
+  recovery or any journal mutation. The stale empty-reservation regression proves a foreign
+  caller cannot change the row or invoke inventory/deletion, while its owner retains the
+  conservative cleanup path when the baseline is invalid.
+
 - Historical caller-owned `snapshot-access/mounts/<uid>/<lease>` paths use a separate
   journal-only retirement branch for stale released rows whose recorded snapshots are already
   absent. A fixed system observer queries volume identity, APFS inventory, no-follow metadata
