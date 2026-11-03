@@ -996,6 +996,11 @@ async fn classify_status_rows(
         blocked_volume_uuids: Vec::new(),
     };
     let mut inventory_cache: HashMap<String, Option<Vec<MountSnapshotRef>>> = HashMap::new();
+    // A status response is a read-only observation. Audit each distinct binding
+    // once, rather than spawning diskutil once per historical tombstone and
+    // exhausting the bounded status IPC deadline. Never reuse across requests
+    // or in a mutating Release operation.
+    let mut binding_cache = HashMap::new();
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let uid: i64 = row.try_get("uid")?;
@@ -1100,7 +1105,11 @@ async fn classify_status_rows(
             && snapshot_manifest == "[]"
             && reservation_manifest_valid == 1
             && baseline.is_ok()
-            && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok();
+            && *binding_cache
+                .entry((device_identifier.clone(), volume_uuid.clone()))
+                .or_insert_with(|| {
+                    validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok()
+                });
         let owner_matches = volume_scope
             .map(|(_, owner_uid)| uid == i64::from(owner_uid))
             .unwrap_or(true);

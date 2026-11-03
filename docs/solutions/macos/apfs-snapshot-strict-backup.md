@@ -28,6 +28,10 @@ legacy repair excluded them. Repair must include incomplete owner-matching relea
 apply the existing root, volume, inventory, and age checks before cleanup. Successful cleanup
 must clear both mount root and mount device. Regression evidence must cover 65 incomplete
 released rows through daemon control, then repeat status to prove the blockers stay cleared.
+The read-only status audit checks each distinct device/volume binding once per request;
+repeating the same diskutil query for every tombstone exceeds the short status IPC deadline
+after a batch repair. The cache is request-local, includes both identities, and is never
+reused by a mutating Release or a subsequent status request.
 
 A directory backup that walks live files cannot promise that every file came from one point in
 time. APFS local snapshots provide a read-only timepoint, but macOS separates three authorities:
