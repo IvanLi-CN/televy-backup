@@ -92,3 +92,5 @@ During Release, mounted-root metadata belongs to the snapshot filesystem. A grou
 Local runtime evidence is private and must not be copied into repository fixtures. A passing fixture does not prove a successful installed backup; release requires current-candidate backup completion and repeat cleanup verification.
 
 Snapshot Access releases a newly acquired lease when its response cannot be delivered to the caller; cleanup failures remain persisted for retry. The regression uses a disconnected Unix socket and verifies cleanup is scheduled only for the undelivered lease.
+
+Access registration reuse checks component and protocol versions in addition to the canonical bundle path. An older component at the same path must enter the existing migration transaction instead of returning ready without updating the manifest.

@@ -215,6 +215,14 @@ fn registration_manager_matches(
             == Some(ACCESS_BUNDLE_RELATIVE_PATH)
         && manifest_matches_embedded_access_app(manifest, access_app)
         && manifest
+            .and_then(|value| value.get("componentVersion"))
+            .and_then(Value::as_str)
+            == Some(COMPONENT_VERSION)
+        && manifest
+            .and_then(|value| value.get("protocolVersion"))
+            .and_then(Value::as_u64)
+            == Some(u64::from(PROTOCOL_VERSION))
+        && manifest
             .and_then(|value| value.get("migrationState"))
             .and_then(Value::as_str)
             == Some("ready")
@@ -1123,6 +1131,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn access_component_upgrade_cannot_reuse_same_path_registration() {
+        let current = Path::new(
+            "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
+        );
+        let mut manifest = manifest_value(
+            current,
+            Path::new("/synthetic/config"),
+            Path::new("/synthetic/data"),
+            "ready",
+            "migration",
+            "owner",
+            0,
+        );
+        assert!(registration_manager_matches(Some(&manifest), current, None));
+        manifest["componentVersion"] = json!("0.2.0");
+        assert!(!registration_manager_matches(
+            Some(&manifest),
+            current,
+            None
+        ));
+        manifest["componentVersion"] = json!(COMPONENT_VERSION);
+        manifest["protocolVersion"] = json!(PROTOCOL_VERSION + 1);
+        assert!(!registration_manager_matches(
+            Some(&manifest),
+            current,
+            None
+        ));
+    }
+
+    #[test]
     fn direct_launchctl_registration_uses_canonical_program_path() {
         let plist = format!(
             "<key>Label</key><string>{ACCESS_LABEL}</string><key>Program</key><string>{INSTALLED_PRODUCTION_APP_PATH}/{ACCESS_BUNDLE_RELATIVE_PATH}/Contents/MacOS/televybackup-snapshot-access</string>"
@@ -1192,6 +1230,8 @@ mod tests {
             "relativeAppPath": ACCESS_BUNDLE_RELATIVE_PATH,
             "appPath": current,
             "migrationState": "ready",
+            "componentVersion": COMPONENT_VERSION,
+            "protocolVersion": PROTOCOL_VERSION,
         });
 
         assert!(registration_manager_matches(Some(&manifest), current, None));
