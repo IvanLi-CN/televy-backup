@@ -668,8 +668,8 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "arm64 package CI job must have a 15-minute timeout" >&2
   exit 1
 }
-grep -F 'timeout-minutes: 16' <<<"$package_workflow_text" >/dev/null || {
-  echo "x86_64 package CI job must have a bounded 16-minute timeout" >&2
+sed -n '/^  x86_64:/,/^  warm-x86_64:/p' <<<"$package_workflow_text" | grep -F 'timeout-minutes: 30' >/dev/null || {
+  echo "x86_64 package CI job must have a bounded 30-minute timeout" >&2
   exit 1
 }
 [[ "$(grep -Fc 'uses: actions/cache@' <<<"$package_workflow_text")" -ge 2 ]] || {

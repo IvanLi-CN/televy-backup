@@ -141,7 +141,9 @@ jobs:
       (needs.classify.outputs.kind == 'prepared' || needs.warm-x86_64.result == 'success')
     name: x86_64 native package
     runs-on: macos-15-intel
-    timeout-minutes: 16
+    # Cold Rust builds plus Swift compilation exceeded 16 minutes on hosted Intel.
+    # Keep the complete package/verification/upload job bounded with cleanup headroom.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
