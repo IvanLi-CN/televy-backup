@@ -686,15 +686,9 @@ def main():
         cli_final = request(ipc, "status")
         assert cli_final["ok"] and cli_final["result"]["active_mounts"] == 0
         uid_root, uid_root_created = ensure_uid_mount_root(os.getuid())
-        # Hosted macOS does not permit creating a local snapshot for a disposable
-        # APFS image (`tmutil localsnapshot` exits 73), and `diskutil apfs` has no
-        # snapshot-create verb. Use structurally valid but unobservable legacy and
-        # reservation manifests that do not match the empty inventory. This proves
-        # the production repair path remains fail-closed when snapshot identity
-        # cannot be proven; it must retain cleanup_pending rather than release the
-        # row. The successful journal-bound Release path is covered by deterministic
-        # helper tests; this fixture must not claim deletion of a snapshot it could
-        # not safely create or inventory.
+        # Hosted macOS cannot create a local snapshot on this disposable APFS
+        # image. Verify journal normalization against its real empty inventory;
+        # this must not claim deletion of a snapshot the fixture never created.
         legacy_empty_count = 65
         insert_legacy_empty_reservation_rows(
             journal,
@@ -738,7 +732,9 @@ def main():
 
         legacy_daemon_id = str(uuid.uuid4())
         legacy_daemon_snapshot_uuid = str(uuid.uuid4())
-        legacy_daemon_reservation_uuid = str(uuid.uuid4())
+        # A UUID claimed by both manifests is genuinely ambiguous and must stay
+        # blocked, even when the snapshot is absent from the current inventory.
+        legacy_daemon_reservation_uuid = legacy_daemon_snapshot_uuid
         insert_legacy_repair_row(
             journal,
             os.getuid(),
@@ -757,16 +753,16 @@ def main():
         repaired = wait_for_operation(control, repair_start["result"]["operationId"])
         assert repaired["state"] == "failed", repaired
         assert repaired["error"]["code"] == "snapshot_mount_helper.repair_required"
-        assert repaired["error"]["details"]["pending"] == 1
+        assert repaired["error"]["details"]["unknown"] == 1
         daemon_repair_final = request(ipc, "status")
         assert daemon_repair_final["ok"]
         assert daemon_repair_final["result"]["active_mounts"] == 1
-        assert daemon_repair_final["result"]["pending_cleanup"] == 1
-        assert daemon_repair_final["result"]["unknown_blocking_mounts"] == 0
+        assert daemon_repair_final["result"]["pending_cleanup"] == 0
+        assert daemon_repair_final["result"]["unknown_blocking_mounts"] == 1
 
         legacy_cli_id = str(uuid.uuid4())
         legacy_cli_snapshot_uuid = str(uuid.uuid4())
-        legacy_cli_reservation_uuid = str(uuid.uuid4())
+        legacy_cli_reservation_uuid = legacy_cli_snapshot_uuid
         insert_legacy_repair_row(
             journal,
             os.getuid(),
@@ -794,8 +790,8 @@ def main():
         cli_repair_final = request(ipc, "status")
         assert cli_repair_final["ok"]
         assert cli_repair_final["result"]["active_mounts"] == 2
-        assert cli_repair_final["result"]["pending_cleanup"] == 1
-        assert cli_repair_final["result"]["unknown_blocking_mounts"] == 1
+        assert cli_repair_final["result"]["pending_cleanup"] == 0
+        assert cli_repair_final["result"]["unknown_blocking_mounts"] == 2
         print(
             "PASS: helper classification, daemon/CLI inventory reconciliation, legacy repair fencing, and unknown blocker preservation verified",
             flush=True,
