@@ -2519,6 +2519,7 @@ fn validate_legacy_mount_root(path: &Path) -> bool {
     base_ok && uid_root_ok && mount_root_ok && path.starts_with(&base)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn legacy_mount_identity_matches(
     mounted_from: &str,
     snapshot_name: &str,
