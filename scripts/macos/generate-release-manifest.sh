@@ -144,7 +144,7 @@ helper = {
     'bundle_id': 'com.ivan.televybackup.snapshot-access',
     'relative_path': 'Contents/Library/LoginItems/TelevyBackup Snapshot Access.app',
     'binary': 'Contents/MacOS/televybackup-snapshot-access',
-    'component_version': '0.2.0',
+    'component_version': '0.2.1',
     'protocol_version': 2,
     'mount_helper_protocol_version': 4,
     'source': os.environ.get(

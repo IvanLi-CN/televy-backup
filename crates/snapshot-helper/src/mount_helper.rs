@@ -1266,6 +1266,7 @@ async fn audit_released_tombstones(
     if rows.is_empty() {
         return Ok(());
     }
+    validate_device_volume_binding(device_identifier, volume_uuid)?;
     let current_manifest = snapshot_inventory_manifest(device_identifier)?;
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
@@ -1282,7 +1283,7 @@ async fn audit_released_tombstones(
             && stored_volume_uuid.eq_ignore_ascii_case(volume_uuid)
             && validate_uuid(&stored_volume_uuid).is_ok()
             && validate_device(&stored_device).is_ok()
-            && validate_device_volume_binding(&stored_device, &stored_volume_uuid).is_ok()
+            && stored_device == device_identifier
             && mount_root.is_empty()
             && snapshot_manifest == "[]"
             && reservation_manifest_valid == 1;
@@ -2644,23 +2645,24 @@ async fn release_request_with_observation(
         .ok()
         .filter(|device| *device != 0);
     let expected_root = expected_mount_root(i64::from(uid), lease_id)?;
-    let cleanup_state =
-        if Path::new(&mount_root) != expected_root || !validate_legacy_mount_root(&expected_root) {
-            "cleanup_pending"
-        } else {
-            cleanup_mount(
-                &expected_root,
-                &manifest,
-                expected_device,
-                &volume_uuid,
-                journal,
-                lease_id,
-                &device_identifier,
-                &reservation_manifest_json,
-                &manifest_json,
-            )
-            .await
-        };
+    let cleanup_state = if Path::new(&mount_root) != expected_root
+        || !validate_cleanup_mount_root(&expected_root, expected_device)
+    {
+        "cleanup_pending"
+    } else {
+        cleanup_mount(
+            &expected_root,
+            &manifest,
+            expected_device,
+            &volume_uuid,
+            journal,
+            lease_id,
+            &device_identifier,
+            &reservation_manifest_json,
+            &manifest_json,
+        )
+        .await
+    };
     update_state(journal, lease_id, cleanup_state).await?;
     Ok(MountReleaseResult {
         lease_id: lease_id.to_string(),
@@ -3114,7 +3116,7 @@ fn mounted_snapshot_path(path: &Path) -> Result<bool, MountHelperError> {
 /// absence below the root-owned base is itself safe evidence that there is no mount to unmount.
 /// Existing components are still checked for root ownership, non-writability and non-symlink
 /// identity before any cleanup is attempted.
-fn validate_legacy_mount_root(path: &Path) -> bool {
+fn validate_managed_mount_ancestors(path: &Path) -> bool {
     let base = configured_mount_root_base();
     let Some(uid_root) = path.parent() else {
         return false;
@@ -3137,6 +3139,10 @@ fn validate_legacy_mount_root(path: &Path) -> bool {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(_) => false,
     };
+    base_ok && uid_root_ok && path.starts_with(&base)
+}
+
+fn validate_legacy_mount_root(path: &Path) -> bool {
     let mount_root_ok = match fs::symlink_metadata(path) {
         Ok(metadata) => {
             metadata.is_dir()
@@ -3147,7 +3153,38 @@ fn validate_legacy_mount_root(path: &Path) -> bool {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
         Err(_) => false,
     };
-    base_ok && uid_root_ok && mount_root_ok && path.starts_with(&base)
+    validate_managed_mount_ancestors(path) && mount_root_ok
+}
+
+// Mounted root metadata belongs to the source filesystem (Data commonly has mode 0775),
+// not to the protected empty mountpoint. Keep ancestor security and pin the mounted device.
+fn cleanup_root_metadata_valid(
+    metadata: &fs::Metadata,
+    parent_device: u64,
+    expected_device: Option<u64>,
+) -> bool {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    if metadata.dev() != parent_device {
+        return expected_device == Some(metadata.dev());
+    }
+    metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+}
+
+fn validate_cleanup_mount_root(path: &Path, expected_device: Option<u64>) -> bool {
+    if !validate_managed_mount_ancestors(path) {
+        return false;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => path
+            .parent()
+            .and_then(|parent| fs::symlink_metadata(parent).ok())
+            .is_some_and(|parent| {
+                cleanup_root_metadata_valid(&metadata, parent.dev(), expected_device)
+            }),
+        Err(error) => error.kind() == io::ErrorKind::NotFound,
+    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -4490,6 +4527,34 @@ fn peer_uid(fd: RawFd) -> Result<u32, MountHelperError> {
 mod tests {
     use super::*;
     use crate::{MountMethod, MountRequest};
+
+    #[test]
+    fn mounted_data_root_permissions_do_not_prevent_exact_device_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o775)).unwrap();
+        let metadata = fs::symlink_metadata(temp.path()).unwrap();
+        let device = metadata.dev();
+        assert!(cleanup_root_metadata_valid(
+            &metadata,
+            device.wrapping_add(1),
+            Some(device)
+        ));
+        assert!(!cleanup_root_metadata_valid(
+            &metadata,
+            device.wrapping_add(1),
+            Some(device.wrapping_add(2))
+        ));
+        assert!(!cleanup_root_metadata_valid(
+            &metadata,
+            device.wrapping_add(1),
+            None
+        ));
+        assert!(!cleanup_root_metadata_valid(
+            &metadata,
+            device,
+            Some(device)
+        ));
+    }
 
     #[test]
     fn command_errors_keep_stage_exit_channel_and_only_safe_summary() {

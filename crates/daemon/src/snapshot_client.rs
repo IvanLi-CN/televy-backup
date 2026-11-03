@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 const SNAPSHOT_SCAN_PAGE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SNAPSHOT_STREAM_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+const SNAPSHOT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const SNAPSHOT_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALLED_PRODUCTION_APP_PATH: &str = "/Applications/TelevyBackup.app";
 const SNAPSHOT_ACCESS_MANIFEST: &str = "snapshot-access/service.json";
@@ -460,13 +461,13 @@ fn validate_component_status(status: &StatusResult) -> Result<(), SnapshotClient
 fn request_timeout(method: &Method) -> Duration {
     match method {
         Method::ScanPage { .. } => SNAPSHOT_SCAN_PAGE_TIMEOUT,
+        Method::AcquireLease { .. } => SNAPSHOT_ACQUIRE_TIMEOUT,
         Method::OpenReadStream { .. }
         | Method::ReadStream { .. }
         | Method::CloseReadStream { .. } => SNAPSHOT_STREAM_TIMEOUT,
-        Method::Status
-        | Method::ProbeVolume { .. }
-        | Method::AcquireLease { .. }
-        | Method::ReleaseLease { .. } => SNAPSHOT_CONTROL_TIMEOUT,
+        Method::Status | Method::ProbeVolume { .. } | Method::ReleaseLease { .. } => {
+            SNAPSHOT_CONTROL_TIMEOUT
+        }
     }
 }
 
@@ -686,6 +687,20 @@ mod tests {
     }
 
     #[test]
+    fn acquire_does_not_use_the_short_status_deadline() {
+        assert_eq!(
+            request_timeout(&Method::AcquireLease {
+                target_id: "fixture-target".into(),
+                expected_volume_uuid: "fixture-volume".into(),
+                run_id: "fixture-run".into(),
+            }),
+            SNAPSHOT_ACQUIRE_TIMEOUT
+        );
+        assert!(SNAPSHOT_ACQUIRE_TIMEOUT > SNAPSHOT_CONTROL_TIMEOUT);
+        assert_eq!(request_timeout(&Method::Status), SNAPSHOT_CONTROL_TIMEOUT);
+    }
+
+    #[test]
     fn scan_page_allows_a_full_snapshot_inventory_walk() {
         assert_eq!(
             request_timeout(&Method::ScanPage {
@@ -695,6 +710,47 @@ mod tests {
             }),
             SNAPSHOT_SCAN_PAGE_TIMEOUT
         );
+    }
+
+    #[tokio::test]
+    async fn acquire_keeps_waiting_past_the_status_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("access.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut line = String::new();
+            BufReader::new(read).read_line(&mut line).await.unwrap();
+            let request: Request = serde_json::from_str(&line).unwrap();
+            tokio::time::sleep(SNAPSHOT_CONTROL_TIMEOUT + Duration::from_secs(1)).await;
+            let response = Response::ok(
+                request.request_id,
+                ResponseResult::Lease(LeaseResult {
+                    lease_id: "fixture-lease".into(),
+                    uid: 501,
+                    volume_uuid: "fixture-volume".into(),
+                    snapshot_uuid: "fixture-snapshot".into(),
+                    snapshot_name: "fixture-name".into(),
+                    source_path: "/synthetic/source".into(),
+                    snapshot_created_at: "fixture-time".into(),
+                }),
+            );
+            write
+                .write_all(format!("{}\n", serde_json::to_string(&response).unwrap()).as_bytes())
+                .await
+                .unwrap();
+        });
+        let response = SnapshotClient::with_socket_path(socket)
+            .request(Method::AcquireLease {
+                target_id: "fixture-target".into(),
+                expected_volume_uuid: "fixture-volume".into(),
+                run_id: "fixture-run".into(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(response.result, Some(ResponseResult::Lease(_))));
+        server.await.unwrap();
     }
 
     #[tokio::test]

@@ -1242,7 +1242,7 @@ struct SettingsWindowRootView: View {
             snapshotStatus = SnapshotControlStatus(
                 consistencyMode: strict ? "strict" : "live",
                 serviceReachable: !accessMissing,
-                accessAppVersion: accessMissing ? nil : "0.2.0",
+                accessAppVersion: accessMissing ? nil : "0.2.1",
                 accessAppPath: accessMissing ? nil : "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
                 managedBy: accessMissing ? nil : "launchctl-embedded",
                 migrationState: accessMissing ? nil : "ready",

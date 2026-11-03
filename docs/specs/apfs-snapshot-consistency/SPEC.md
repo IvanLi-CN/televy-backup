@@ -238,3 +238,16 @@ Build readiness and its explicit administrator action are rendered from the prod
 
 - [Mount helper update states, light](assets/mount-helper-update-light.png)
 - [Mount helper update states, dark](assets/mount-helper-update-dark.png)
+
+### Backup preparation and mounted-root cleanup
+
+- Snapshot acquisition uses a separate bounded long-operation deadline; status remains short-lived. A valid acquire response arriving after the status deadline must remain receivable.
+- Before acquiring a strict lease, the daemon holds its snapshot maintenance lock and may invoke the existing inventory-only reconciliation for verified released tombstones. Snapshot Access must be idle, all classification fields and counts must agree, and live, pending, stale, unknown or foreign-owned records continue to reject. Refresh remains read-only. Inventory reconciliation never deletes snapshots or opens source bytes.
+- A mounted snapshot root inherits source filesystem ownership and permissions. Cleanup validates protected managed ancestors and the recorded mount device rather than requiring the mounted filesystem root to have empty-mountpoint permissions. An unmounted managed directory remains root-owned, non-writable by other users, and no-follow.
+- Released-row audits validate the requested device/volume binding once per serialized audit and compare each row against that exact binding; they must not spawn a system query per historical row.
+
+### Snapshot Access recovery implementation identity
+
+Snapshot Access component 0.2.1 includes persisted cleanup retries and the current lease/path safety implementation. A reused older component must not be accepted as proof that current source behavior is installed. A component upgrade builds a fresh candidate artifact, verifies its metadata, binary identity and source commit, and requires a fresh FDA grant when macOS invalidates the prior code requirement. Subsequent product releases may reuse that verified artifact byte-for-byte under the existing component policy. Protocol 2 remains unchanged; 0.2.0 requires an explicit component upgrade.
+
+Snapshot Access releases a newly acquired lease when its response cannot be delivered to the caller; cleanup failures remain persisted for retry. The regression uses a disconnected Unix socket and verifies cleanup is scheduled only for the undelivered lease.

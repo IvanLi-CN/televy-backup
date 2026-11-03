@@ -430,11 +430,42 @@ async fn serve_connection(stream: UnixStream, state: HelperState) -> Result<(), 
             Ok(request) => handle_request(request, uid, &state).await,
             Err(error) => Response::error("unknown", "invalid_request", error.to_string()),
         };
-        let encoded = serde_json::to_vec(&response)?;
-        write_half.write_all(&encoded).await?;
-        write_half.write_all(b"\n").await?;
-        write_half.flush().await?;
+        let cleanup_state = &state;
+        deliver_response(&mut write_half, &response, |lease_id| async move {
+            // An acquire can complete after its caller has timed out or exited. Never leave
+            // a newly acquired lease active when its response cannot be delivered.
+            let _ = release_lease(uid, &lease_id, cleanup_state).await;
+        })
+        .await?;
         line.clear();
+    }
+    Ok(())
+}
+
+async fn deliver_response<W, F, Fut>(
+    write: &mut W,
+    response: &Response,
+    on_undelivered_lease: F,
+) -> Result<(), HelperError>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let encoded = serde_json::to_vec(response)?;
+    let result: Result<(), std::io::Error> = async {
+        write.write_all(&encoded).await?;
+        write.write_all(b"\n").await?;
+        write.flush().await
+    }
+    .await;
+    if let Err(error) = result {
+        if response.ok
+            && let Some(ResponseResult::Lease(lease)) = &response.result
+        {
+            on_undelivered_lease(lease.lease_id.clone()).await;
+        }
+        return Err(HelperError::Io(error));
     }
     Ok(())
 }
@@ -1856,6 +1887,47 @@ mod tests {
             scan_inventories: Arc::new(Mutex::new(HashMap::new())),
             volume_acquire_locks: Arc::new(Mutex::new(HashMap::new())),
             fda_ready: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn lease_response_delivery_failure_releases_only_the_unacknowledged_lease() {
+        for disconnect in [false, true] {
+            let (mut sender, receiver) = UnixStream::pair().unwrap();
+            let receiver = if disconnect {
+                drop(receiver);
+                None
+            } else {
+                Some(receiver)
+            };
+            let released = Arc::new(Mutex::new(Vec::new()));
+            let cleanup = released.clone();
+            let response = Response::ok(
+                "request",
+                ResponseResult::Lease(LeaseResult {
+                    lease_id: "fixture-lease".into(),
+                    uid: 501,
+                    volume_uuid: "fixture-volume".into(),
+                    snapshot_uuid: "fixture-snapshot".into(),
+                    snapshot_name: "fixture-name".into(),
+                    source_path: "/synthetic/source".into(),
+                    snapshot_created_at: "fixture-time".into(),
+                }),
+            );
+            let result = deliver_response(&mut sender, &response, move |lease_id| async move {
+                cleanup.lock().unwrap().push(lease_id);
+            })
+            .await;
+            assert_eq!(result.is_err(), disconnect);
+            assert_eq!(
+                *released.lock().unwrap(),
+                if disconnect {
+                    vec!["fixture-lease".to_string()]
+                } else {
+                    vec![]
+                }
+            );
+            drop(receiver);
         }
     }
 

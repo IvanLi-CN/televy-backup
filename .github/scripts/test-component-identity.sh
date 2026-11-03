@@ -15,7 +15,7 @@ cat > "$reference/Contents/MacOS/televybackup-snapshot-access" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "${1:-}" == "--component-metadata" ]] || exit 2
-printf '%s\n' '{"bundleId":"com.ivan.televybackup.snapshot-access","relativePath":"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app","componentVersion":"0.2.0","protocolVersion":2,"mountHelperProtocolVersion":4}'
+printf '%s\n' '{"bundleId":"com.ivan.televybackup.snapshot-access","relativePath":"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app","componentVersion":"0.2.1","protocolVersion":2,"mountHelperProtocolVersion":4}'
 SH
 chmod 700 "$reference/Contents/MacOS/televybackup-snapshot-access"
 printf '%s\n' fixture > "$reference/Contents/Info.plist"
@@ -93,7 +93,7 @@ payload = {
             "designated_requirement": '# designated => identifier "com.ivan.televybackup.snapshot-access" and (cdhash H"1111111111111111111111111111111111111111" or cdhash H"2222222222222222222222222222222222222222")',
             "bundle_id": "com.ivan.televybackup.snapshot-access",
             "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
-            "component_version": "0.2.0",
+            "component_version": "0.2.1",
             "protocol_version": 2,
             "mount_helper_protocol_version": 4,
         }

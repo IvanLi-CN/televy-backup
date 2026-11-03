@@ -3337,10 +3337,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .contains(&probe.volume_uuid.to_ascii_lowercase()) =>
                     {
                         let _snapshot_maintenance_guard = snapshot_maintenance.lock().await;
-                        match snapshot_client
-                            .acquire_lease(&target.id, &probe.volume_uuid, &task_id)
-                            .await
-                        {
+                        let acquire_result = async {
+                            control_ipc::reconcile_snapshot_inventory(&snapshot_client, true)
+                                .await
+                                .map_err(|error| SnapshotClientError::Rejected {
+                                    code: error.code,
+                                    message: error.message,
+                                })?;
+                            snapshot_client
+                                .acquire_lease(&target.id, &probe.volume_uuid, &task_id)
+                                .await
+                        }
+                        .await;
+                        match acquire_result {
                             Ok(lease) => {
                                 snapshot_source = Some(BrokeredSnapshotSource::new(
                                     snapshot_client.clone(),

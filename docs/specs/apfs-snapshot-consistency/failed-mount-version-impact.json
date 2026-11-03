@@ -2,8 +2,8 @@
   "schema_version": 1,
   "kind": "version-impact-record",
   "change": {
-    "description": "Recover journal-owned snapshots after mounting fails before device capture.",
-    "release_unit_description": "Root mount helper 0.5.7 and its existing product compatibility metadata.",
+    "description": "Recover failed and completed snapshot mounts, preserve long-running acquire replies, and ship the cleanup-capable Access implementation.",
+    "release_unit_description": "Root mount helper 0.5.7, Snapshot Access 0.2.1 and daemon acquisition lifecycle.",
     "affected_contracts": [
       "public-api",
       "persistent-state"
@@ -28,27 +28,20 @@
     "current": {
       "impact": "patch",
       "scope_drift": {
-        "detected": false,
-        "description": "No protocol, schema, permission or GUI flow change."
+        "detected": true,
+        "description": "Owner-authorized Snapshot Access component update after packaged-artifact inspection showed the retained 0.2.0 binary lacked cleanup retry implementation."
       },
-      "reasoning": "Protocol v4 and journal schema are unchanged; cleanup writes existing released/pending states readable by supported 0.5.x helpers. Existing UID, root, volume, UUID and inventory safety boundaries remain enforced.",
-      "reassessed_at": "2026-11-03T16:58:25.097647+00:00",
+      "reasoning": "Patch fixes preserve root protocol v4, Access protocol v2 and journal schemas. Explicit backup preparation shares inventory-only reconciliation; no status mutation or source fallback is introduced. Access 0.2.1 requires refreshed component identity and may require a new OS FDA grant.",
+      "reassessed_at": "2026-11-03T18:33:14.700656+00:00",
       "evidence": [
         "mount_helper::tests::denied_mount_cleanup_restores_65_tombstones_and_unblocks_source_volume",
         "mount_helper::tests::denied_mount_release_retry_restores_65_tombstones_and_unblocks_source_volume",
-        "mount_helper::tests::recorded_owner_cannot_mask_unowned_or_ambiguous_inventory_drift"
+        "mount_helper::tests::recorded_owner_cannot_mask_unowned_or_ambiguous_inventory_drift",
+        "snapshot_client::tests::acquire_keeps_waiting_past_the_status_deadline",
+        "mount_helper::tests::mounted_data_root_permissions_do_not_prevent_exact_device_cleanup"
       ]
     },
-    "verified": {
-      "impact": "patch",
-      "reasoning": "Protocol v4 and journal schema are unchanged; cleanup writes existing released/pending states readable by supported 0.5.x helpers. Existing UID, root, volume, UUID and inventory safety boundaries remain enforced.",
-      "verified_at": "2026-11-03T16:58:25.097647+00:00",
-      "evidence": [
-        "mount_helper::tests::denied_mount_cleanup_restores_65_tombstones_and_unblocks_source_volume",
-        "mount_helper::tests::denied_mount_release_retry_restores_65_tombstones_and_unblocks_source_volume",
-        "mount_helper::tests::recorded_owner_cannot_mask_unowned_or_ambiguous_inventory_drift"
-      ]
-    }
+    "verified": null
   },
   "compatibility_evidence": {
     "public_api": {
@@ -69,9 +62,11 @@
   },
   "release_unit": {
     "member_change_records": [
-      "root-mount-helper-failed-mount-cleanup"
+      "root-mount-helper-failed-mount-cleanup",
+      "snapshot-access-cleanup-implementation-provenance",
+      "daemon-acquire-deadline-and-inventory-preparation"
     ],
-    "maximum_verified_impact": "patch",
+    "maximum_verified_impact": null,
     "calculation_evidence": [
       "Compatibility classification only; installed repair, full backup and release verification are not implied."
     ]

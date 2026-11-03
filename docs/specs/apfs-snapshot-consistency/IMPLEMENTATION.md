@@ -82,3 +82,13 @@ unrecorded snapshots still report drift. This preserves the CLI/daemon pending-o
 without weakening their safety gates. The ignored read-only failed-mount audit validates this
 classification and the production kernel/volume absence predicates against an explicitly authorized
 installed journal; it performs no cleanup and does not prove effective FDA or backup completion.
+
+### Preparation deadlines and cleanup metadata
+
+Acquire performs filesystem queries, snapshot creation and mounting, so it must not share the 30-second status deadline. The daemon uses a bounded acquisition deadline and keeps the maintenance lock through inventory-only reconciliation and acquire. The existing explicit reconciliation implementation is shared with backup preparation; it accepts only released tombstones with no active or unresolved leases. No cleanup is triggered by status refresh.
+
+During Release, mounted-root metadata belongs to the snapshot filesystem. A group-writable source volume root is not evidence that the protected mountpoint was writable before mounting. Protected ancestors, no-follow checks and the journaled mounted device remain mandatory. Once unmounted, ordinary managed-directory ownership and mode checks apply again. Regression coverage includes source mode 0775, substituted devices, unmounted writable directories, and an acquire reply beyond the status deadline.
+
+Local runtime evidence is private and must not be copied into repository fixtures. A passing fixture does not prove a successful installed backup; release requires current-candidate backup completion and repeat cleanup verification.
+
+Snapshot Access releases a newly acquired lease when its response cannot be delivered to the caller; cleanup failures remain persisted for retry. The regression uses a disconnected Unix socket and verifies cleanup is scheduled only for the undelivered lease.

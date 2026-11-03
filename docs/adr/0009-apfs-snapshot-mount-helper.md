@@ -62,3 +62,5 @@ Normal and scheduled backups do not authenticate. The helper stores a root-owned
 recover mounts after a crash. It never reads user files, Keychain data, backup indexes, or network
 data. Its existing system install path and version remain stable during an ordinary product app
 update; this release performs compatibility checks only and never updates it automatically.
+
+Backup acquisition is an explicit operation that may reuse the inventory-only Release reconciliation while holding the daemon maintenance lock. It requires an idle Access service and a complete released-only drift partition. This does not authorize deletion, recovery of unknown records, or mutation on status refresh. Mounted filesystem-root permissions are source metadata; cleanup pins the recorded device and protected managed ancestors instead of requiring the mounted root to retain empty-directory permissions.

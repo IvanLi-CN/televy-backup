@@ -354,6 +354,161 @@ fn snapshot_access_busy_error(status: &StatusResult, action: &str) -> Option<Con
     None
 }
 
+fn snapshot_inventory_preflight(
+    status: &MountStatusResult,
+    allow_clean: bool,
+) -> Result<u32, ControlError> {
+    let (
+        live_mounts,
+        pending_cleanup,
+        recoverable_stale_mounts,
+        unknown_blocking_mounts,
+        inventory_drift_mounts,
+    ) = snapshot_mount_reconcile_counts(status)?;
+    if live_mounts > 0
+        || pending_cleanup > 0
+        || recoverable_stale_mounts > 0
+        || unknown_blocking_mounts > 0
+    {
+        return Err(ControlError {
+                    code: "snapshot_mount_helper.reconcile_required".to_string(),
+                    message: "Snapshot inventory can only be reconciled while no other snapshot mount records are active or unresolved.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({
+                        "live": live_mounts,
+                        "pending": pending_cleanup,
+                        "recoverable": recoverable_stale_mounts,
+                        "unknown": unknown_blocking_mounts,
+                    }),
+                });
+    }
+    if inventory_drift_mounts == 0 && allow_clean {
+        return Ok(0);
+    }
+    if inventory_drift_mounts == 0
+        || status
+            .inventory_drift_leases
+            .iter()
+            .any(|lease| lease.state != "released_inventory_drift")
+    {
+        return Err(ControlError {
+                    code: "snapshot_mount_helper.status_inconsistent".to_string(),
+                    message: "Snapshot inventory drift status is inconsistent; reconciliation remains blocked until the helper is repaired.".to_string(),
+                    retryable: true,
+                    details: serde_json::json!({}),
+                });
+    }
+    Ok(inventory_drift_mounts)
+}
+
+// Caller must hold snapshot_maintenance across reconciliation and the subsequent acquire.
+// Only verified released tombstones are re-baselined. Active/pending/unknown rows reject;
+// this operation never deletes snapshots and is never invoked by a status refresh.
+pub(super) async fn reconcile_snapshot_inventory(
+    client: &SnapshotClient,
+    allow_clean: bool,
+) -> Result<serde_json::Value, ControlError> {
+    wait_for_snapshot_access_idle(client, "reconciling snapshot inventory").await?;
+    let uid = unsafe { libc::geteuid() };
+    if uid == 0 {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.invalid_owner".to_string(),
+            message: "Snapshot inventory reconciliation cannot run as root.".to_string(),
+            retryable: false,
+            details: serde_json::json!({}),
+        });
+    }
+    let status = tokio::task::spawn_blocking(mount_helper::status)
+        .await
+        .map_err(|_| {
+            ControlError::unavailable("Snapshot mount status task failed.", serde_json::json!({}))
+        })?
+        .map_err(|_| ControlError {
+            code: "snapshot_mount_helper.status_failed".to_string(),
+            message: "Snapshot mount records could not be verified.".to_string(),
+            retryable: true,
+            details: serde_json::json!({"reason": "helper_status_failed"}),
+        })?;
+    snapshot_mount_reconcile_identity(&status, "reconciling snapshot inventory")?;
+    let drift = snapshot_inventory_preflight(&status, allow_clean)?;
+    if drift == 0 {
+        return Ok(serde_json::json!({"reconciled": 0, "remaining": 0, "inventoryDrift": 0}));
+    }
+    let mut reconciled = 0_u32;
+    for lease in status.inventory_drift_leases {
+        let lease_id = lease.lease_id;
+        let result =
+            tokio::task::spawn_blocking(move || mount_helper::reconcile_inventory(uid, &lease_id))
+                .await
+                .map_err(|_| {
+                    ControlError::unavailable(
+                        "Snapshot inventory reconciliation task failed.",
+                        serde_json::json!({}),
+                    )
+                })?
+                .map_err(|_| ControlError {
+                    code: "snapshot_mount_helper.reconcile_failed".to_string(),
+                    message: "A snapshot inventory record could not be safely reconciled."
+                        .to_string(),
+                    retryable: true,
+                    details: serde_json::json!({"reason": "release_rejected"}),
+                })?;
+        if result.cleanup_state == "released" {
+            reconciled += 1;
+        }
+    }
+    let final_status =
+        tokio::task::spawn_blocking(|| mount_helper::status().map_err(|error| error.to_string()))
+            .await
+            .map_err(|_| {
+                ControlError::unavailable(
+                    "Snapshot mount status task failed.",
+                    serde_json::json!({}),
+                )
+            })?
+            .map_err(|_| ControlError {
+                code: "snapshot_mount_helper.status_failed".to_string(),
+                message:
+                    "Snapshot mount records could not be verified after inventory reconciliation."
+                        .to_string(),
+                retryable: true,
+                details: serde_json::json!({"reason": "helper_status_failed"}),
+            })?;
+    snapshot_mount_reconcile_identity(&final_status, "reconciling snapshot inventory")?;
+    let (
+        final_live_mounts,
+        final_pending_cleanup,
+        final_recoverable_stale_mounts,
+        final_unknown_blocking_mounts,
+        final_inventory_drift_mounts,
+    ) = snapshot_mount_reconcile_counts(&final_status)?;
+    if final_live_mounts > 0
+        || final_pending_cleanup > 0
+        || final_recoverable_stale_mounts > 0
+        || final_unknown_blocking_mounts > 0
+        || final_inventory_drift_mounts > 0
+    {
+        return Err(ControlError {
+            code: "snapshot_mount_helper.reconcile_required".to_string(),
+            message: "Snapshot inventory reconciliation did not clear every verified drift record."
+                .to_string(),
+            retryable: true,
+            details: serde_json::json!({
+                "live": final_live_mounts,
+                "pending": final_pending_cleanup,
+                "recoverable": final_recoverable_stale_mounts,
+                "unknown": final_unknown_blocking_mounts,
+                "inventoryDrift": final_inventory_drift_mounts,
+            }),
+        });
+    }
+    Ok(serde_json::json!({
+        "reconciled": reconciled,
+        "remaining": final_status.active_mounts,
+        "inventoryDrift": final_inventory_drift_mounts,
+    }))
+}
+
 async fn wait_for_snapshot_access_idle(
     client: &SnapshotClient,
     action: &str,
@@ -1208,142 +1363,7 @@ async fn handle_control_ipc_client(
         spawn_operation(operation_id.clone(), async move {
             let _maintenance_guard = maintenance.lock().await;
             let client = SnapshotClient::for_environment(&config_root, &data_root);
-            wait_for_snapshot_access_idle(&client, "reconciling snapshot inventory").await?;
-            let uid = unsafe { libc::geteuid() };
-            if uid == 0 {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.invalid_owner".to_string(),
-                    message: "Snapshot inventory reconciliation cannot run as root.".to_string(),
-                    retryable: false,
-                    details: serde_json::json!({}),
-                });
-            }
-            let status = tokio::task::spawn_blocking(mount_helper::status)
-                .await
-                .map_err(|_| {
-                    ControlError::unavailable(
-                        "Snapshot mount status task failed.",
-                        serde_json::json!({}),
-                    )
-                })?
-                .map_err(|_| ControlError {
-                    code: "snapshot_mount_helper.status_failed".to_string(),
-                    message: "Snapshot mount records could not be verified.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({"reason": "helper_status_failed"}),
-                })?;
-            snapshot_mount_reconcile_identity(&status, "reconciling snapshot inventory")?;
-            let (
-                live_mounts,
-                pending_cleanup,
-                recoverable_stale_mounts,
-                unknown_blocking_mounts,
-                inventory_drift_mounts,
-            ) = snapshot_mount_reconcile_counts(&status)?;
-            if live_mounts > 0
-                || pending_cleanup > 0
-                || recoverable_stale_mounts > 0
-                || unknown_blocking_mounts > 0
-            {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.reconcile_required".to_string(),
-                    message: "Snapshot inventory can only be reconciled while no other snapshot mount records are active or unresolved.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({
-                        "live": live_mounts,
-                        "pending": pending_cleanup,
-                        "recoverable": recoverable_stale_mounts,
-                        "unknown": unknown_blocking_mounts,
-                    }),
-                });
-            }
-            if inventory_drift_mounts == 0
-                || status
-                    .inventory_drift_leases
-                    .iter()
-                    .any(|lease| lease.state != "released_inventory_drift")
-            {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.status_inconsistent".to_string(),
-                    message: "Snapshot inventory drift status is inconsistent; reconciliation remains blocked until the helper is repaired.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({}),
-                });
-            }
-            let mut reconciled = 0_u32;
-            for lease in status.inventory_drift_leases {
-                let lease_id = lease.lease_id;
-                let result = tokio::task::spawn_blocking(move || {
-                    mount_helper::reconcile_inventory(uid, &lease_id)
-                })
-                .await
-                .map_err(|_| {
-                    ControlError::unavailable(
-                        "Snapshot inventory reconciliation task failed.",
-                        serde_json::json!({}),
-                    )
-                })?
-                .map_err(|_| ControlError {
-                    code: "snapshot_mount_helper.reconcile_failed".to_string(),
-                    message: "A snapshot inventory record could not be safely reconciled."
-                        .to_string(),
-                    retryable: true,
-                    details: serde_json::json!({"reason": "release_rejected"}),
-                })?;
-                if result.cleanup_state == "released" {
-                    reconciled += 1;
-                }
-            }
-            let final_status = tokio::task::spawn_blocking(|| {
-                mount_helper::status().map_err(|error| error.to_string())
-            })
-            .await
-            .map_err(|_| {
-                ControlError::unavailable(
-                    "Snapshot mount status task failed.",
-                    serde_json::json!({}),
-                )
-            })?
-            .map_err(|_| ControlError {
-                code: "snapshot_mount_helper.status_failed".to_string(),
-                message:
-                    "Snapshot mount records could not be verified after inventory reconciliation."
-                        .to_string(),
-                retryable: true,
-                details: serde_json::json!({"reason": "helper_status_failed"}),
-            })?;
-            snapshot_mount_reconcile_identity(&final_status, "reconciling snapshot inventory")?;
-            let (
-                final_live_mounts,
-                final_pending_cleanup,
-                final_recoverable_stale_mounts,
-                final_unknown_blocking_mounts,
-                final_inventory_drift_mounts,
-            ) = snapshot_mount_reconcile_counts(&final_status)?;
-            if final_live_mounts > 0
-                || final_pending_cleanup > 0
-                || final_recoverable_stale_mounts > 0
-                || final_unknown_blocking_mounts > 0
-                || final_inventory_drift_mounts > 0
-            {
-                return Err(ControlError {
-                    code: "snapshot_mount_helper.reconcile_required".to_string(),
-                    message: "Snapshot inventory reconciliation did not clear every verified drift record.".to_string(),
-                    retryable: true,
-                    details: serde_json::json!({
-                        "live": final_live_mounts,
-                        "pending": final_pending_cleanup,
-                        "recoverable": final_recoverable_stale_mounts,
-                        "unknown": final_unknown_blocking_mounts,
-                        "inventoryDrift": final_inventory_drift_mounts,
-                    }),
-                });
-            }
-            Ok(serde_json::json!({
-                "reconciled": reconciled,
-                "remaining": final_status.active_mounts,
-                "inventoryDrift": final_inventory_drift_mounts,
-            }))
+            reconcile_snapshot_inventory(&client, false).await
         });
         write_json_line(
             &mut w,
@@ -3960,6 +3980,42 @@ mod tests {
     use tokio::io::AsyncBufReadExt;
 
     use super::*;
+
+    #[test]
+    fn backup_inventory_preflight_accepts_only_complete_released_only_status() {
+        let mut status = MountStatusResult {
+            active_mounts: 0,
+            live_mounts: Some(0),
+            pending_cleanup: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(snapshot_inventory_preflight(&status, true).unwrap(), 0);
+        status.active_mounts = 1;
+        status.inventory_drift_mounts = Some(1);
+        status
+            .inventory_drift_leases
+            .push(televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "fixture-drift".into(),
+                state: "released_inventory_drift".into(),
+            });
+        assert_eq!(snapshot_inventory_preflight(&status, true).unwrap(), 1);
+        status.inventory_drift_leases[0].state = "active".into();
+        assert!(snapshot_inventory_preflight(&status, true).is_err());
+        status.inventory_drift_leases.clear();
+        status.inventory_drift_mounts = Some(0);
+        for kind in ["live", "pending", "unknown", "stale"] {
+            status.live_mounts = Some(u32::from(kind == "live"));
+            status.pending_cleanup = Some(u32::from(kind == "pending"));
+            status.unknown_blocking_mounts = Some(u32::from(kind == "unknown"));
+            status.recoverable_stale_mounts = Some(u32::from(kind == "stale"));
+            assert!(snapshot_inventory_preflight(&status, true).is_err());
+        }
+        status.live_mounts = None;
+        assert!(snapshot_inventory_preflight(&status, true).is_err());
+    }
 
     #[test]
     fn snapshot_mount_readiness_requires_current_build_not_just_a_compatible_service() {
