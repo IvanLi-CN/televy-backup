@@ -24,8 +24,9 @@
       "label": "com.ivan.televybackup.snapshot-mount-helper",
       "install_path": "/Library/PrivilegedHelperTools/com.ivan.televybackup.snapshot-mount-helper",
       "binary": "Contents/MacOS/televybackup-snapshot-mount-helper",
-      "component_version": "0.5.5",
+      "component_version": "0.5.6",
       "compatible_component_versions": [
+        "0.5.6",
         "0.5.5",
         "0.5.4",
         "0.5.3",

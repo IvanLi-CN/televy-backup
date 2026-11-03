@@ -360,13 +360,16 @@ connection.close()
     )
 
 
-def insert_legacy_empty_reservation_rows(journal, uid, volume_uuid, device, count):
+def insert_legacy_empty_reservation_rows(journal, uid, volume_uuid, device, count, state="reserved"):
     """Seed stale reservations that predate the persisted baseline fields."""
     script = '''
 import sqlite3, sys, uuid
-journal, uid, volume_uuid, device, count = sys.argv[1:]
+journal, uid, volume_uuid, device, count, state = sys.argv[1:]
 connection = sqlite3.connect(journal)
 for _ in range(int(count)):
+    lease_id = str(uuid.uuid4())
+    root = f"/private/var/tmp/televybackup-snapshot-mounts/{uid}/{lease_id}" if state == "released" else ""
+    manifest = json.dumps([{"device_identifier": device, "uuid": str(uuid.uuid4())}]) if state == "released" else "[]"
     connection.execute(
         """
             INSERT INTO mounts (
@@ -374,10 +377,10 @@ for _ in range(int(count)):
                 snapshot_name, mount_root, mount_device, snapshot_manifest,
                 reservation_manifest, reservation_manifest_valid, state,
                 created_at, last_renewed_at
-            ) VALUES (?, ?, ?, ?, '', '', '', 0, '[]', '[]', 0, 'reserved',
+            ) VALUES (?, ?, ?, ?, '', '', ?, 0, ?, '[]', 0, ?,
                       datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
         """,
-        (str(uuid.uuid4()), int(uid), volume_uuid, device),
+        (lease_id, int(uid), volume_uuid, device, root, manifest, state),
     )
 connection.commit()
 connection.close()
@@ -393,6 +396,7 @@ connection.close()
         volume_uuid,
         device,
         str(count),
+        state,
     )
 
 
@@ -714,6 +718,23 @@ def main():
         assert empty_repaired["result"]["blocked"] == 0
         empty_after = request(ipc, "status")
         assert empty_after["ok"] and empty_after["result"]["active_mounts"] == 0
+
+        # Old helpers persisted terminal rows without clearing managed roots or
+        # manifests. Status audits those tombstones, so legacy repair must audit
+        # and normalize them too, through the production daemon control path.
+        insert_legacy_empty_reservation_rows(
+            journal, os.getuid(), volume_uuid, device, 65, state="released"
+        )
+        released_before = request(ipc, "status")
+        assert released_before["result"]["unknown_blocking_mounts"] == 65
+        released_start = control_request(control, "snapshot.mount_helper.repair_legacy")
+        assert released_start["ok"]
+        released_result = wait_for_operation(control, released_start["result"]["operationId"])
+        assert released_result["state"] == "succeeded", released_result
+        for key in ("audited", "repaired", "released", "migrated"):
+            assert released_result["result"][key] == 65, released_result
+        assert released_result["result"]["blocked"] == 0
+        assert request(ipc, "status")["result"]["active_mounts"] == 0
 
         legacy_daemon_id = str(uuid.uuid4())
         legacy_daemon_snapshot_uuid = str(uuid.uuid4())

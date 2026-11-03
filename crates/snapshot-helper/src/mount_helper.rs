@@ -34,7 +34,7 @@ use crate::{
 
 /// Stable v4 wire identity retained by the byte-identical Snapshot Access artifact.
 pub const MOUNT_HELPER_WIRE_VERSION: &str = "0.5.0";
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.5";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.6";
 pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.4";
 pub const PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.3";
 pub const HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
@@ -240,6 +240,7 @@ pub fn renew(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelper
 fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
     if result.helper_version != MOUNT_HELPER_WIRE_VERSION
         && result.helper_version != ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != "0.5.5"
         && result.helper_version != PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
@@ -1276,7 +1277,7 @@ async fn repair_legacy_request(
         ));
     }
     let rows = sqlx::query(
-        "SELECT lease_id, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND state IS NOT 'released' AND last_renewed_at <= datetime('now', ?)",
+        "SELECT lease_id, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND (state IS NOT 'released' OR mount_root != '' OR snapshot_manifest != '[]' OR reservation_manifest_valid != 1) AND last_renewed_at <= datetime('now', ?)",
     )
     .bind(i64::from(uid))
     .bind(RECOVERY_AGE_SECONDS)
@@ -1303,7 +1304,7 @@ async fn repair_legacy_request(
         let state: String = row.try_get("state")?;
         let eligible = matches!(
             state.as_str(),
-            "reserved" | "prepared" | "active" | "cleanup_pending"
+            "reserved" | "prepared" | "active" | "cleanup_pending" | "released"
         ) && validate_lease_id(&lease_id).is_ok()
             && validate_uuid(&volume_uuid).is_ok();
         if !eligible {
@@ -1411,13 +1412,22 @@ async fn repair_legacy_request(
             }
         };
 
+        // Old helpers marked rows released without clearing their mount/manifest fields.
+        // Only after the same identity and inventory checks as other legacy rows may
+        // they re-enter cleanup. Release otherwise treats released rows as terminal.
+        let repair_state = if state == "released" {
+            "cleanup_pending"
+        } else {
+            state.as_str()
+        };
         let updated = sqlx::query(
-            "UPDATE mounts SET device_identifier = ?, mount_device = ?, snapshot_manifest = ?, reservation_manifest = ?, reservation_manifest_valid = 1 WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = ? AND mount_root = ? AND snapshot_manifest = ?",
+            "UPDATE mounts SET device_identifier = ?, mount_device = ?, snapshot_manifest = ?, reservation_manifest = ?, reservation_manifest_valid = 1, state = ? WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = ? AND mount_root = ? AND snapshot_manifest = ?",
         )
         .bind(&resolved_device)
         .bind(expected_device.map(|device| i64::try_from(device).unwrap_or(i64::MAX)).unwrap_or(0))
         .bind(&release_manifest_json)
         .bind(&reservation_manifest_json_new)
+        .bind(repair_state)
         .bind(&lease_id)
         .bind(i64::from(uid))
         .bind(&state)
@@ -1510,7 +1520,7 @@ async fn repair_legacy_request(
                 .bind(&lease_id)
                 .bind(i64::from(uid))
                 .bind(expected_device.map(|device| i64::try_from(device).unwrap_or(i64::MAX)).unwrap_or(0))
-                .bind(&state)
+                .bind(repair_state)
                 .bind(&release_manifest_json)
                 .execute(journal)
                 .await;
@@ -2725,7 +2735,7 @@ async fn record_released_tombstone(
     manifest_json: &str,
 ) -> &'static str {
     let updated = sqlx::query(
-        "UPDATE mounts SET snapshot_manifest = '[]', reservation_manifest = ?, reservation_manifest_valid = 1, state = 'released' WHERE lease_id = ? AND snapshot_manifest = ? AND reservation_manifest_valid = 1",
+        "UPDATE mounts SET mount_root = '', mount_device = 0, snapshot_manifest = '[]', reservation_manifest = ?, reservation_manifest_valid = 1, state = 'released' WHERE lease_id = ? AND snapshot_manifest = ? AND reservation_manifest_valid = 1",
     )
     .bind(reservation_manifest_json)
     .bind(lease_id)
@@ -4051,6 +4061,50 @@ mod tests {
             request_timeout(&MountMethod::RepairLegacy { uid: 501 }),
             MUTATING_REQUEST_TIMEOUT
         );
+    }
+
+    #[tokio::test]
+    async fn released_tombstone_clears_verified_cleanup_mount_identity() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest_valid, state, created_at) VALUES (?, 501, '', 'disk5s1', '', '/previously-verified-root', 42, '[]', 1, 'cleanup_pending', datetime('now'))")
+            .bind(&lease_id).execute(&journal).await.unwrap();
+        assert_eq!(
+            record_released_tombstone(&journal, &lease_id, "[]", "[]").await,
+            "released"
+        );
+        let row = sqlx::query("SELECT mount_root, mount_device FROM mounts WHERE lease_id = ?")
+            .bind(&lease_id)
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("mount_root"), "");
+        assert_eq!(row.get::<i64, _>("mount_device"), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_repair_audits_incomplete_released_rows_but_preserves_foreign_owners() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        for uid in [501_i64, 502] {
+            sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at, last_renewed_at) VALUES (?, ?, 'invalid-volume', 'disk5s1', '', '/untrusted', '[]', 'released', datetime('now', '-1 day'), datetime('now', '-1 day'))")
+                .bind(Uuid::new_v4().to_string()).bind(uid).execute(&journal).await.unwrap();
+        }
+        let result = repair_legacy_request(501, 501, &journal).await.unwrap();
+        assert_eq!(
+            result.audited, 1,
+            "incomplete released rows must reach the repair safety checks"
+        );
+        assert_eq!(result.blocked, 1);
+        assert_eq!(result.repaired, 0);
+        let unchanged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mounts WHERE state = 'released' AND mount_root = '/untrusted'",
+        )
+        .fetch_one(&journal)
+        .await
+        .unwrap();
+        assert_eq!(unchanged, 2);
     }
 
     #[tokio::test]

@@ -22,6 +22,13 @@ related_specs:
 
 ## Context
 
+Released journal rows are not automatically complete tombstones. Historical helpers retained
+mount roots and manifests after release, while status audited them as unknown blockers and
+legacy repair excluded them. Repair must include incomplete owner-matching released rows and
+apply the existing root, volume, inventory, and age checks before cleanup. Successful cleanup
+must clear both mount root and mount device. Regression evidence must cover 65 incomplete
+released rows through daemon control, then repeat status to prove the blockers stay cleared.
+
 A directory backup that walks live files cannot promise that every file came from one point in
 time. APFS local snapshots provide a read-only timepoint, but macOS separates three authorities:
 
