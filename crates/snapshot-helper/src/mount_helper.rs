@@ -39,6 +39,15 @@ pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.4";
 pub const PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.3";
 pub const HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
 pub const HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
+/// Historical components that can perform journal-bound pending cleanup. Keep
+/// CLI and daemon upgrade/cleanup predicates on the same compatibility set.
+pub const CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS: &[&str] = &[
+    "0.5.5",
+    PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+    PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+    HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+    HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+];
 /// Compatibility alias for callers that still name the original component release.
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = MOUNT_HELPER_WIRE_VERSION;
 pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
@@ -1378,10 +1387,15 @@ async fn repair_legacy_request(
             }
         };
 
-        let stored_baseline = if reservation_manifest_valid == 1 {
-            parse_reservation_manifest(&reservation_manifest_json).ok()
-        } else {
-            None
+        let stored_baseline = match legacy_reservation_baseline(
+            &reservation_manifest_json,
+            reservation_manifest_valid,
+        ) {
+            Ok(baseline) => baseline,
+            Err(_) => {
+                result.blocked += 1;
+                continue;
+            }
         };
         let current_manifest = if let Some(cached) = inventory_cache.get(&resolved_device) {
             cached.clone()
@@ -2947,6 +2961,19 @@ fn parse_journal_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHel
     Ok(manifest)
 }
 
+fn legacy_reservation_baseline(
+    value: &str,
+    valid: i64,
+) -> Result<Option<Vec<MountSnapshotRef>>, MountHelperError> {
+    match valid {
+        0 => Ok(None),
+        1 => parse_reservation_manifest(value).map(Some),
+        _ => Err(MountHelperError::Protocol(
+            "snapshot mount journal contains an invalid reservation marker".into(),
+        )),
+    }
+}
+
 fn parse_reservation_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
     let manifest = serde_json::from_str::<Vec<MountSnapshotRef>>(value).map_err(|_| {
         MountHelperError::Protocol("snapshot mount journal contains an invalid reservation".into())
@@ -4326,6 +4353,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.cleanup_state, "reconcile_required");
+    }
+
+    #[test]
+    fn legacy_repair_distinguishes_absent_and_corrupt_baselines() {
+        assert!(legacy_reservation_baseline("[]", 0).unwrap().is_none());
+        assert!(
+            legacy_reservation_baseline("[]", 1)
+                .unwrap()
+                .is_some_and(|rows| rows.is_empty())
+        );
+        assert!(legacy_reservation_baseline("not-json", 1).is_err());
+        assert!(legacy_reservation_baseline("[]", 2).is_err());
     }
 
     #[tokio::test]

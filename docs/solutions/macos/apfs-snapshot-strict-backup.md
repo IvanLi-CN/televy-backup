@@ -32,6 +32,10 @@ The read-only status audit checks each distinct device/volume binding once per r
 repeating the same diskutil query for every tombstone exceeds the short status IPC deadline
 after a batch repair. The cache is request-local, includes both identities, and is never
 reused by a mutating Release or a subsequent status request.
+Missing legacy baselines and corrupt declared-valid baselines are distinct: only the missing
+case may be reconstructed from inventory. A malformed declared-valid baseline remains untouched
+and blocking. Historical cleanup compatibility is shared by the Rust CLI and daemon, including
+component `0.5.5`, so upgrading to `0.5.6` does not strand its pending or unknown-only records.
 
 A directory backup that walks live files cannot promise that every file came from one point in
 time. APFS local snapshots provide a read-only timepoint, but macOS separates three authorities:

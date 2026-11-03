@@ -312,7 +312,7 @@ while True:
     elif args.stale_partial_classification:
         old_server.write_text(old_server.read_text().replace('"version":1', '"version":4')
             .replace('"helper_version":"0.9.8"',
-                     '"helper_version":"0.5.0","component_version":"0.5.4",'
+                     '"helper_version":"0.5.0","component_version":"0.5.5",'
                      '"build_commit":"' + '0' * 40 + '","pending_cleanup":0,'
                      '"live_mounts":0,"recoverable_stale_mounts":0,"unknown_blocking_mounts":1'))
     elif legacy_fixture:
@@ -417,7 +417,7 @@ while True:
             legacy = request(MOUNT_SOCKET, expected_protocol)["result"]
             assert legacy["active_mounts"] == 1
             if args.stale_partial_classification:
-                assert legacy["component_version"] == "0.5.4"
+                assert legacy["component_version"] == "0.5.5"
                 assert legacy["build_commit"] == "0" * 40
                 assert legacy["pending_cleanup"] == 0
                 assert legacy["live_mounts"] == 0

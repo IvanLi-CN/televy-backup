@@ -132,30 +132,15 @@ fn snapshot_mount_reconcile_identity(
 
 fn snapshot_mount_cleanup_identity(status: &MountStatusResult) -> Result<(), ControlError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
+        || mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS
+            .contains(&status.helper_version.as_str());
     let component_compatible = match status.component_version.as_deref() {
         Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref() == Some(crate::BUILD_COMMIT)
         }
-        Some(version) if version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
-            status.build_commit.as_deref().is_some_and(|commit| {
-                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        }
-        Some(version) if version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
-            status.build_commit.as_deref().is_some_and(|commit| {
-                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        }
-        Some(version) if version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION => {
-            status.build_commit.as_deref().is_some_and(|commit| {
-                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        }
-        Some(version) if version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+        Some(version)
+            if mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS.contains(&version) =>
+        {
             status.build_commit.as_deref().is_some_and(|commit| {
                 commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -4210,6 +4195,19 @@ mod tests {
             ..Default::default()
         };
         assert!(snapshot_mount_cleanup_identity(&status).is_ok());
+    }
+
+    #[test]
+    fn snapshot_mount_cleanup_retry_accepts_released_055_but_requires_build_identity() {
+        let mut status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some("0.5.5".into()),
+            build_commit: Some("b".repeat(40)),
+            ..Default::default()
+        };
+        assert!(snapshot_mount_cleanup_identity(&status).is_ok());
+        status.build_commit = None;
+        assert!(snapshot_mount_cleanup_identity(&status).is_err());
     }
 
     #[test]
