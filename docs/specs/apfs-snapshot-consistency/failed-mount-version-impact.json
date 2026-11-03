@@ -41,7 +41,19 @@
         "mount_helper::tests::mounted_data_root_permissions_do_not_prevent_exact_device_cleanup"
       ]
     },
-    "verified": null
+    "verified": {
+      "impact": "patch",
+      "reasoning": "Root protocol v4, Access protocol v2 and journal schemas remain compatible. Existing tombstone states remain readable; recovery retains UID, device, volume and exact inventory checks. Regression tests cover creation-time system snapshot pruning, mounted source root permissions, delayed acquire delivery and same-path Access component migration. Installed implementation 628e0ae completed two consecutive strict backups and returned root and Access cleanup counters to zero after each run; this is local candidate validation, not release publication proof.",
+      "verified_at": "2026-11-03T19:40:20.117445+00:00",
+      "evidence": [
+        "mount_helper::tests::creation_pruning_rebases_only_clean_terminal_rows_and_keeps_owned_uuid",
+        "mount_helper::tests::snapshot_creation_receipt_binds_the_owned_snapshot_name",
+        "mount_helper::tests::mounted_data_root_permissions_do_not_prevent_exact_device_cleanup",
+        "snapshot_client::tests::acquire_keeps_waiting_past_the_status_deadline",
+        "snapshot_service component migration regression tests",
+        "Private installed-candidate evidence: implementation 628e0aeb2752612d53a144552bb468833b58058d; two consecutive successful strict backups; root and Access cleanup zero after both. No user paths, identifiers or content are included in this record."
+      ]
+    }
   },
   "compatibility_evidence": {
     "public_api": {
@@ -66,9 +78,10 @@
       "snapshot-access-cleanup-implementation-provenance",
       "daemon-acquire-deadline-and-inventory-preparation"
     ],
-    "maximum_verified_impact": null,
+    "maximum_verified_impact": "patch",
     "calculation_evidence": [
-      "Compatibility classification only; installed repair, full backup and release verification are not implied."
+      "Root helper cleanup, Access component identity and daemon acquisition lifecycle are individually compatible patch fixes; the release unit maximum is patch.",
+      "Native regression, package and release fixtures passed for implementation 628e0ae; installed sequential backup validation passed. Final release artifacts require their own source identity and publication checks."
     ]
   }
 }
