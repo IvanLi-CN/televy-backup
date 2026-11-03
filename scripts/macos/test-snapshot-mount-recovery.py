@@ -363,7 +363,7 @@ connection.close()
 def insert_legacy_empty_reservation_rows(journal, uid, volume_uuid, device, count, state="reserved"):
     """Seed stale reservations that predate the persisted baseline fields."""
     script = '''
-import sqlite3, sys, uuid
+import json, sqlite3, sys, uuid
 journal, uid, volume_uuid, device, count, state = sys.argv[1:]
 connection = sqlite3.connect(journal)
 for _ in range(int(count)):
