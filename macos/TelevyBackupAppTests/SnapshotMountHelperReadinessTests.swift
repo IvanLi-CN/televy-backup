@@ -217,6 +217,7 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(legacyRepair.canRepairLegacyRecords, "only an unknown-only verified partition may expose legacy repair")
         expectReadiness(legacyRepair.title == "Snapshot mount helper legacy repair required", "legacy blockers must name the repair action")
+        expectReadiness(legacyRepair.visibleUpdateBlockReason == nil, "current helper legacy repair must not repeat the aggregate blocker")
         let mixedLegacyRepair = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.4",

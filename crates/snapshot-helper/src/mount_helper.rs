@@ -34,10 +34,11 @@ use crate::{
 
 /// Stable v4 wire identity retained by the byte-identical Snapshot Access artifact.
 pub const MOUNT_HELPER_WIRE_VERSION: &str = "0.5.0";
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.4";
-pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.3";
-pub const PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
-pub const HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.5";
+pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.4";
+pub const PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.3";
+pub const HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
+pub const HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
 /// Compatibility alias for callers that still name the original component release.
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = MOUNT_HELPER_WIRE_VERSION;
 pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
@@ -242,6 +243,7 @@ fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperE
         && result.helper_version != PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     {
         return Err(MountHelperError::Protocol(format!(
@@ -1255,13 +1257,14 @@ async fn reserve_request(
     })
 }
 
-/// Repair the legacy journal layout that did not persist the mounted device identity. A row is
-/// eligible only when it is old enough to be stale, belongs to the requesting peer, has a complete
-/// reservation/snapshot manifest, and points at the root-owned helper mount path. The operation
-/// derives a device identity from the managed parent after confirming the mount root is absent,
-/// persists it under the mutation lock, then reuses the ordinary journal-bound Release path. A
-/// currently mounted root cannot be proven to be the recorded snapshot without the old device
-/// identity, so it remains untouched and blocking rather than being unmounted speculatively.
+/// Repair the legacy journal layout that did not persist the mounted device identity or reservation
+/// baseline. Every row remains age-, owner-, path-, volume-identity-, and inventory-gated. A
+/// historical device node is rebound through the journaled volume UUID before any Release call.
+/// A mounted legacy root is usable only after `statfs(2)` proves the exact recorded APFS snapshot
+/// source; a different or unobservable mount remains blocked. When the old reservation baseline is
+/// absent, the current inventory is split into the journaled snapshots and the untouched baseline
+/// before the ordinary journal-bound Release path is reused. This preserves unrecorded snapshots
+/// and makes the action converge instead of repeatedly returning the same aggregate blocker.
 async fn repair_legacy_request(
     peer_uid: u32,
     uid: u32,
@@ -1273,7 +1276,7 @@ async fn repair_legacy_request(
         ));
     }
     let rows = sqlx::query(
-        "SELECT lease_id, volume_uuid, device_identifier, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND state IS NOT 'released' AND last_renewed_at <= datetime('now', ?)",
+        "SELECT lease_id, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND state IS NOT 'released' AND last_renewed_at <= datetime('now', ?)",
     )
     .bind(i64::from(uid))
     .bind(RECOVERY_AGE_SECONDS)
@@ -1283,65 +1286,213 @@ async fn repair_legacy_request(
         audited: rows.len() as u32,
         ..Default::default()
     };
+    // APFS device nodes are not stable across reboot or volume reattachment. Resolve each
+    // journaled volume once from its UUID instead of trusting a historical disk node.
+    let mut device_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut inventory_cache: HashMap<String, Option<Vec<MountSnapshotRef>>> = HashMap::new();
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let volume_uuid: String = row.try_get("volume_uuid")?;
         let device_identifier: String = row.try_get("device_identifier")?;
+        let snapshot_name: String = row.try_get("snapshot_name")?;
         let mount_root: String = row.try_get("mount_root")?;
         let mount_device: i64 = row.try_get("mount_device").unwrap_or_default();
         let snapshot_manifest_json: String = row.try_get("snapshot_manifest")?;
         let reservation_manifest_json: String = row.try_get("reservation_manifest")?;
         let reservation_manifest_valid: i64 = row.try_get("reservation_manifest_valid")?;
         let state: String = row.try_get("state")?;
-        let eligible = !mount_root.is_empty()
-            && mount_device == 0
-            && matches!(state.as_str(), "prepared" | "active" | "cleanup_pending")
-            && validate_lease_id(&lease_id).is_ok()
-            && validate_uuid(&volume_uuid).is_ok()
-            && validate_device(&device_identifier).is_ok()
-            && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok()
-            && reservation_manifest_valid == 1
-            && parse_reservation_manifest(&reservation_manifest_json).is_ok()
-            && parse_journal_manifest(&snapshot_manifest_json)
-                .is_ok_and(|manifest| !manifest.is_empty())
-            && expected_mount_root(i64::from(uid), &lease_id)
-                .ok()
-                .is_some_and(|expected| {
-                    Path::new(&mount_root) == expected && validate_managed_mount_root(&expected)
-                });
+        let eligible = matches!(
+            state.as_str(),
+            "reserved" | "prepared" | "active" | "cleanup_pending"
+        ) && validate_lease_id(&lease_id).is_ok()
+            && validate_uuid(&volume_uuid).is_ok();
         if !eligible {
+            result.blocked += 1;
             continue;
         }
-        let expected_root = expected_mount_root(i64::from(uid), &lease_id)?;
-        match mounted_snapshot_path(&expected_root) {
-            Ok(false) => {}
-            // Without the recorded mount device, a live path could have been replaced by a
-            // different privileged mount. Never infer identity from that replacement or call
-            // Release in a way that could unmount it.
-            Ok(true) | Err(_) => continue,
-        }
-        let expected_device = match expected_root
-            .parent()
-            .and_then(|parent| fs::metadata(parent).ok())
-        {
-            Some(metadata) if metadata.dev() != 0 => metadata.dev(),
-            _ => continue,
+
+        let resolved_device = if let Some(cached) = device_cache.get(&volume_uuid) {
+            cached.clone()
+        } else {
+            let resolved = resolve_legacy_volume_device(&volume_uuid, &device_identifier).ok();
+            device_cache.insert(volume_uuid.clone(), resolved.clone());
+            resolved
         };
+        let Some(resolved_device) = resolved_device else {
+            result.blocked += 1;
+            continue;
+        };
+
+        let manifest = if snapshot_manifest_json == "[]" {
+            Vec::new()
+        } else {
+            match parse_journal_manifest(&snapshot_manifest_json) {
+                Ok(manifest) => manifest,
+                Err(_) => {
+                    result.blocked += 1;
+                    continue;
+                }
+            }
+        };
+        let expected_root = if mount_root.is_empty() {
+            None
+        } else {
+            let expected = match expected_mount_root(i64::from(uid), &lease_id) {
+                Ok(expected) => expected,
+                Err(_) => {
+                    result.blocked += 1;
+                    continue;
+                }
+            };
+            if Path::new(&mount_root) != expected || !validate_legacy_mount_root(&expected) {
+                result.blocked += 1;
+                continue;
+            }
+            Some(expected)
+        };
+
+        // A missing or ordinary directory at the recorded root is a provably unmounted legacy
+        // root; it does not need a device number to be cleaned. A different filesystem at the
+        // root is only usable after statfs proves the exact APFS snapshot source. Any inability
+        // to make that distinction remains fail-closed.
+        let expected_device = match expected_root.as_deref() {
+            None => None,
+            Some(root) => {
+                match legacy_mounted_snapshot_device(root, &snapshot_name, &resolved_device) {
+                    Ok(device) => device,
+                    Err(_) => {
+                        result.blocked += 1;
+                        continue;
+                    }
+                }
+            }
+        };
+
+        let stored_baseline = if reservation_manifest_valid == 1 {
+            parse_reservation_manifest(&reservation_manifest_json).ok()
+        } else {
+            None
+        };
+        let current_manifest = if let Some(cached) = inventory_cache.get(&resolved_device) {
+            cached.clone()
+        } else {
+            let current = snapshot_inventory_manifest(&resolved_device).ok();
+            inventory_cache.insert(resolved_device.clone(), current.clone());
+            current
+        };
+        let Some(current_manifest) = current_manifest else {
+            result.blocked += 1;
+            continue;
+        };
+        // Match by snapshot UUID rather than the historical device node. The current inventory
+        // has already been queried from the UUID-bound APFS volume, so this safely handles disk
+        // identifiers that changed after reboot while retaining unrecorded snapshots as baseline.
+        let Some((reservation_manifest, release_manifest)) =
+            partition_legacy_manifests(&current_manifest, stored_baseline.as_deref(), &manifest)
+        else {
+            result.blocked += 1;
+            continue;
+        };
+        if stored_baseline.is_none() {
+            result.migrated += 1;
+        }
+        let reservation_manifest_json_new = match serde_json::to_string(&reservation_manifest) {
+            Ok(json) => json,
+            Err(_) => {
+                result.blocked += 1;
+                continue;
+            }
+        };
+        let release_manifest_json = match serde_json::to_string(&release_manifest) {
+            Ok(json) => json,
+            Err(_) => {
+                result.blocked += 1;
+                continue;
+            }
+        };
+
         let updated = sqlx::query(
-            "UPDATE mounts SET mount_device = ? WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = 0 AND mount_root = ? AND snapshot_manifest = ? AND reservation_manifest = ? AND reservation_manifest_valid = 1",
+            "UPDATE mounts SET device_identifier = ?, mount_device = ?, snapshot_manifest = ?, reservation_manifest = ?, reservation_manifest_valid = 1 WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = ? AND mount_root = ? AND snapshot_manifest = ?",
         )
-        .bind(i64::try_from(expected_device).unwrap_or(i64::MAX))
+        .bind(&resolved_device)
+        .bind(expected_device.map(|device| i64::try_from(device).unwrap_or(i64::MAX)).unwrap_or(0))
+        .bind(&release_manifest_json)
+        .bind(&reservation_manifest_json_new)
         .bind(&lease_id)
         .bind(i64::from(uid))
         .bind(&state)
+        .bind(mount_device)
         .bind(&mount_root)
         .bind(&snapshot_manifest_json)
-        .bind(&reservation_manifest_json)
         .execute(journal)
         .await?;
         if updated.rows_affected() != 1 {
+            result.blocked += 1;
             continue;
         }
+
+        if release_manifest.is_empty() {
+            let cleanup_state = if let Some(root) = expected_root.as_deref() {
+                if expected_device.is_some() {
+                    cleanup_mount(
+                        root,
+                        &[],
+                        expected_device,
+                        &volume_uuid,
+                        journal,
+                        &lease_id,
+                        &resolved_device,
+                        &reservation_manifest_json_new,
+                        "[]",
+                    )
+                    .await
+                } else {
+                    cleanup_legacy_unmounted_root(
+                        root,
+                        &[],
+                        &volume_uuid,
+                        journal,
+                        &lease_id,
+                        &resolved_device,
+                        &reservation_manifest_json_new,
+                        "[]",
+                    )
+                    .await
+                }
+            } else {
+                record_released_tombstone(journal, &lease_id, &reservation_manifest_json_new, "[]")
+                    .await
+            };
+            update_state(journal, &lease_id, cleanup_state).await?;
+            result.repaired += 1;
+            if cleanup_state == "released" {
+                result.released += 1;
+            }
+            continue;
+        }
+
+        if let Some(root) = expected_root.as_deref()
+            && expected_device.is_none()
+        {
+            let cleanup_state = cleanup_legacy_unmounted_root(
+                root,
+                &release_manifest,
+                &volume_uuid,
+                journal,
+                &lease_id,
+                &resolved_device,
+                &reservation_manifest_json_new,
+                &release_manifest_json,
+            )
+            .await;
+            update_state(journal, &lease_id, cleanup_state).await?;
+            result.repaired += 1;
+            if cleanup_state == "released" {
+                result.released += 1;
+            }
+            continue;
+        }
+
         match release_request(peer_uid, uid, &lease_id, false, journal).await {
             Ok(release) => {
                 result.repaired += 1;
@@ -1350,16 +1501,17 @@ async fn repair_legacy_request(
                 }
             }
             Err(_) => {
-                // Do not leave a speculative backfill behind when Release rejected the row. The
-                // next explicit repair can retry after the underlying inventory/mount state is
-                // stable; the journal remains fail-closed in the meantime.
+                // Keep a migrated reservation baseline so a failed deletion can be retried as a
+                // normal pending-cleanup row. A mount-device backfill alone is never retained.
                 let _ = sqlx::query(
-                    "UPDATE mounts SET mount_device = 0 WHERE lease_id = ? AND uid = ? AND mount_device = ? AND state = ?",
+                    "UPDATE mounts SET device_identifier = ?, mount_device = 0 WHERE lease_id = ? AND uid = ? AND mount_device = ? AND state = ? AND snapshot_manifest = ?",
                 )
+                .bind(&resolved_device)
                 .bind(&lease_id)
                 .bind(i64::from(uid))
-                .bind(i64::try_from(expected_device).unwrap_or(i64::MAX))
+                .bind(expected_device.map(|device| i64::try_from(device).unwrap_or(i64::MAX)).unwrap_or(0))
                 .bind(&state)
+                .bind(&release_manifest_json)
                 .execute(journal)
                 .await;
             }
@@ -2326,6 +2478,175 @@ fn mounted_snapshot_path(path: &Path) -> Result<bool, MountHelperError> {
     Ok(metadata.dev() != parent_metadata.dev())
 }
 
+/// Validate a legacy mount root without requiring its historical parent directories to still
+/// exist. Older helpers could leave journal rows after the per-UID directory had been removed;
+/// absence below the root-owned base is itself safe evidence that there is no mount to unmount.
+/// Existing components are still checked for root ownership, non-writability and non-symlink
+/// identity before any cleanup is attempted.
+fn validate_legacy_mount_root(path: &Path) -> bool {
+    let base = configured_mount_root_base();
+    let Some(uid_root) = path.parent() else {
+        return false;
+    };
+    let base_ok = fs::symlink_metadata(&base)
+        .map(|metadata| {
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0
+                && !metadata.file_type().is_symlink()
+        })
+        .unwrap_or(false);
+    let uid_root_ok = match fs::symlink_metadata(uid_root) {
+        Ok(metadata) => {
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0
+                && !metadata.file_type().is_symlink()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    };
+    let mount_root_ok = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            metadata.is_dir()
+                && metadata.uid() == 0
+                && metadata.mode() & 0o022 == 0
+                && !metadata.file_type().is_symlink()
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    };
+    base_ok && uid_root_ok && mount_root_ok && path.starts_with(&base)
+}
+
+fn legacy_mount_identity_matches(
+    mounted_from: &str,
+    snapshot_name: &str,
+    device_identifier: &str,
+) -> bool {
+    let expected = format!("{snapshot_name}@/dev/{device_identifier}");
+    mounted_from == expected
+}
+
+/// Return the mounted filesystem's device number only when the managed path is provably the
+/// journaled APFS snapshot. The old journal did not persist `mount_device`, so checking only
+/// `stat(2)` would allow a different privileged mount at the same path to be unmounted. macOS
+/// exposes the APFS snapshot source through `statfs(2)` as `<snapshot-name>@/dev/<volume>`; the
+/// exact source and mount point are compared before any Release call is allowed.
+fn legacy_mounted_snapshot_device(
+    path: &Path,
+    snapshot_name: &str,
+    device_identifier: &str,
+) -> Result<Option<u64>, MountHelperError> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MountHelperError::Io(error)),
+    };
+    let parent = path
+        .parent()
+        .ok_or_else(|| MountHelperError::Protocol("mount root has no parent".into()))?;
+    let parent_metadata = match fs::metadata(parent) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(MountHelperError::Io(error)),
+    };
+    if metadata.dev() == parent_metadata.dev() {
+        return Ok(None);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+        let path_bytes = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| MountHelperError::Protocol("invalid managed mount root".into()))?;
+        if unsafe { libc::statfs(path_bytes.as_ptr(), filesystem.as_mut_ptr()) } != 0 {
+            return Err(MountHelperError::Io(std::io::Error::last_os_error()));
+        }
+        let filesystem = unsafe { filesystem.assume_init() };
+        let from = filesystem
+            .f_mntfromname
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        let mount_point = filesystem
+            .f_mntonname
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        let filesystem_type = filesystem
+            .f_fstypename
+            .iter()
+            .take_while(|byte| **byte != 0)
+            .map(|byte| *byte as u8)
+            .collect::<Vec<_>>();
+        let from = std::str::from_utf8(&from)
+            .map_err(|_| MountHelperError::Protocol("invalid mounted snapshot source".into()))?;
+        let mount_point = std::str::from_utf8(&mount_point)
+            .map_err(|_| MountHelperError::Protocol("invalid mounted snapshot path".into()))?;
+        let filesystem_type = std::str::from_utf8(&filesystem_type)
+            .map_err(|_| MountHelperError::Protocol("invalid mounted filesystem type".into()))?;
+        let canonical_path = fs::canonicalize(path)?;
+        let canonical_mount_point = fs::canonicalize(mount_point)?;
+        if filesystem_type.eq_ignore_ascii_case("apfs")
+            && legacy_mount_identity_matches(from, snapshot_name, device_identifier)
+            && canonical_mount_point == canonical_path
+        {
+            return Ok(Some(metadata.dev()));
+        }
+        Err(MountHelperError::Protocol(
+            "managed mount root is not the recorded APFS snapshot".into(),
+        ))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (snapshot_name, device_identifier);
+        Err(MountHelperError::Protocol(
+            "legacy mounted snapshot identity requires macOS".into(),
+        ))
+    }
+}
+
+/// Clean a legacy row after proving that its recorded root is not mounted. This is separate from
+/// `cleanup_mount`: that routine intentionally requires a persisted mount device for every normal
+/// cleanup, while a legacy row can safely proceed without one only after the explicit stat check
+/// above has returned `Ok(false)` (including a missing root).
+#[allow(clippy::too_many_arguments)]
+async fn cleanup_legacy_unmounted_root(
+    mount_root: &Path,
+    manifest: &[MountSnapshotRef],
+    volume_uuid: &str,
+    journal: &SqlitePool,
+    lease_id: &str,
+    device_identifier: &str,
+    reservation_manifest_json: &str,
+    manifest_json: &str,
+) -> &'static str {
+    match mounted_snapshot_path(mount_root) {
+        Ok(false) => {}
+        Ok(true) | Err(_) => return "cleanup_pending",
+    }
+    match fs::remove_dir(mount_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return "cleanup_pending",
+    }
+    if mount_root.exists() {
+        return "cleanup_pending";
+    }
+    delete_manifest_and_record_tombstone(
+        journal,
+        lease_id,
+        volume_uuid,
+        device_identifier,
+        reservation_manifest_json,
+        manifest_json,
+        manifest,
+    )
+    .await
+}
+
 async fn delete_manifest_and_record_tombstone(
     journal: &SqlitePool,
     lease_id: &str,
@@ -2473,6 +2794,72 @@ fn manifest_entries_remaining_after_partial_delete(
         })
         .cloned()
         .collect()
+}
+
+/// Split the current inventory into the old journal's recorded snapshots and the snapshots that
+/// pre-dated that journal entry. Legacy rows did not persist the reservation baseline, so this is
+/// the only safe migration input: every current snapshot is either an exact recorded entry or is
+/// retained as the new baseline. Missing recorded entries are treated as already deleted and are
+/// never recreated or guessed at.
+#[cfg(test)]
+fn infer_legacy_reservation_baseline(
+    current_manifest: &[MountSnapshotRef],
+    recorded_manifest: &[MountSnapshotRef],
+) -> (Vec<MountSnapshotRef>, Vec<MountSnapshotRef>) {
+    let mut baseline = current_manifest.to_vec();
+    let mut present_recorded = Vec::new();
+    for recorded in recorded_manifest {
+        if let Some(index) = baseline.iter().position(|current| {
+            current
+                .device_identifier
+                .eq_ignore_ascii_case(&recorded.device_identifier)
+                && current.uuid.eq_ignore_ascii_case(&recorded.uuid)
+        }) {
+            present_recorded.push(baseline.remove(index));
+        }
+    }
+    (baseline, present_recorded)
+}
+
+/// Reconcile a legacy row against the current volume inventory using snapshot UUIDs. The old
+/// journal stored device nodes in each entry, so comparing the whole pair would make every row
+/// look foreign after a device-node renumbering. A duplicate UUID is ambiguous and is rejected;
+/// snapshots not present in the current inventory are already gone and are not sent to delete.
+fn partition_legacy_manifests(
+    current_manifest: &[MountSnapshotRef],
+    stored_baseline: Option<&[MountSnapshotRef]>,
+    recorded_manifest: &[MountSnapshotRef],
+) -> Option<(Vec<MountSnapshotRef>, Vec<MountSnapshotRef>)> {
+    let mut current = current_manifest.to_vec();
+    let mut baseline = Vec::new();
+    let mut release = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for snapshot in stored_baseline.into_iter().flatten() {
+        let key = snapshot.uuid.to_ascii_lowercase();
+        if !seen.insert(key.clone()) {
+            return None;
+        }
+        if let Some(index) = current
+            .iter()
+            .position(|candidate| candidate.uuid.eq_ignore_ascii_case(&snapshot.uuid))
+        {
+            baseline.push(current.remove(index));
+        }
+    }
+    for snapshot in recorded_manifest {
+        let key = snapshot.uuid.to_ascii_lowercase();
+        if !seen.insert(key) {
+            return None;
+        }
+        if let Some(index) = current
+            .iter()
+            .position(|candidate| candidate.uuid.eq_ignore_ascii_case(&snapshot.uuid))
+        {
+            release.push(current.remove(index));
+        }
+    }
+    baseline.extend(current);
+    Some((baseline, release))
 }
 
 fn delete_manifest(
@@ -2862,6 +3249,75 @@ fn validate_device_volume_binding(
     validate_device_volume_binding_at("volume_identity", device_identifier, expected_volume_uuid)
 }
 
+/// Resolve a legacy journal row to the currently mounted APFS device. Device identifiers such as
+/// `disk3s1` are allocation names, not durable identities; the volume UUID is the durable binding
+/// recorded by Snapshot Access. The historical device is accepted only when it still validates;
+/// otherwise `diskutil info` is queried by UUID and the returned APFS identity is checked before
+/// it is used for inventory or Release.
+fn resolve_legacy_volume_device(
+    volume_uuid: &str,
+    historical_device: &str,
+) -> Result<String, MountHelperError> {
+    validate_uuid(volume_uuid)?;
+    if validate_device(historical_device).is_ok()
+        && validate_device_volume_binding(historical_device, volume_uuid).is_ok()
+    {
+        return Ok(historical_device.to_string());
+    }
+    let output = run_command_output(
+        "volume_identity",
+        "diskutil.info",
+        "/usr/sbin/diskutil",
+        ["info", "-plist", volume_uuid],
+    )?;
+    let (device_identifier, actual_volume_uuid) = parse_volume_identity(&output)?;
+    if !actual_volume_uuid.eq_ignore_ascii_case(volume_uuid) {
+        return Err(MountHelperError::Protocol(
+            "resolved APFS volume UUID does not match the journal".into(),
+        ));
+    }
+    validate_device(&device_identifier)?;
+    Ok(device_identifier)
+}
+
+fn parse_volume_identity(output: &[u8]) -> Result<(String, String), MountHelperError> {
+    let value = Value::from_reader_xml(output).map_err(|_| {
+        MountHelperError::Protocol(
+            "stage=volume_identity command=diskutil.info exit=0 channel=stdout summary=invalid volume plist".into(),
+        )
+    })?;
+    let dict = value.as_dictionary().ok_or_else(|| {
+        MountHelperError::Protocol(
+            "stage=volume_identity command=diskutil.info exit=0 channel=stdout summary=volume plist is not a dictionary".into(),
+        )
+    })?;
+    let filesystem = dict
+        .get("FilesystemName")
+        .and_then(Value::as_string)
+        .unwrap_or_default();
+    let device_identifier = dict
+        .get("DeviceIdentifier")
+        .and_then(Value::as_string)
+        .unwrap_or_default();
+    let actual_volume_uuid = dict
+        .get("APFSVolumeUUID")
+        .and_then(Value::as_string)
+        .or_else(|| dict.get("VolumeUUID").and_then(Value::as_string))
+        .unwrap_or_default();
+    if !filesystem.eq_ignore_ascii_case("APFS")
+        || validate_device(device_identifier).is_err()
+        || validate_uuid(actual_volume_uuid).is_err()
+    {
+        return Err(MountHelperError::Protocol(
+            "resolved volume is not a valid APFS volume identity".into(),
+        ));
+    }
+    Ok((
+        device_identifier.to_string(),
+        actual_volume_uuid.to_string(),
+    ))
+}
+
 fn validate_device_volume_binding_at(
     stage: &'static str,
     device_identifier: &str,
@@ -2874,29 +3330,12 @@ fn validate_device_volume_binding_at(
         "/usr/sbin/diskutil",
         ["info", "-plist", device_path.as_str()],
     )?;
-    let value = Value::from_reader_xml(output.as_slice()).map_err(|_| {
+    let (actual_device, actual_volume_uuid) = parse_volume_identity(&output).map_err(|_| {
         MountHelperError::Protocol(format!(
             "stage={stage} command=diskutil.info exit=0 channel=stdout summary=invalid volume plist"
         ))
     })?;
-    let dict = value
-        .as_dictionary()
-        .ok_or_else(|| MountHelperError::Protocol(format!("stage={stage} command=diskutil.info exit=0 channel=stdout summary=volume plist is not a dictionary")))?;
-    let filesystem = dict
-        .get("FilesystemName")
-        .and_then(Value::as_string)
-        .unwrap_or_default();
-    let actual_device = dict
-        .get("DeviceIdentifier")
-        .and_then(Value::as_string)
-        .unwrap_or_default();
-    let actual_volume_uuid = dict
-        .get("APFSVolumeUUID")
-        .and_then(Value::as_string)
-        .or_else(|| dict.get("VolumeUUID").and_then(Value::as_string))
-        .unwrap_or_default();
-    if !filesystem.eq_ignore_ascii_case("APFS")
-        || !actual_device.eq_ignore_ascii_case(device_identifier)
+    if !actual_device.eq_ignore_ascii_case(device_identifier)
         || !actual_volume_uuid.eq_ignore_ascii_case(expected_volume_uuid)
     {
         return Err(MountHelperError::Protocol(
@@ -4068,6 +4507,124 @@ mod tests {
             &current,
         );
         assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn legacy_repair_migrates_missing_baseline_without_claiming_unrecorded_snapshots() {
+        let recorded = vec![MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        }];
+        let current = vec![
+            recorded[0].clone(),
+            MountSnapshotRef {
+                device_identifier: "disk5s1".into(),
+                uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+            },
+        ];
+
+        let (baseline, present_recorded) = infer_legacy_reservation_baseline(&current, &recorded);
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].uuid, "B8A38394-49AE-42F9-85FB-14DD9EA549FA");
+        assert_eq!(present_recorded.len(), 1);
+        assert_eq!(
+            present_recorded[0].device_identifier,
+            recorded[0].device_identifier
+        );
+        assert_eq!(present_recorded[0].uuid, recorded[0].uuid);
+
+        let (baseline, present_recorded) = infer_legacy_reservation_baseline(&[], &recorded);
+        assert!(baseline.is_empty());
+        assert!(present_recorded.is_empty());
+    }
+
+    #[test]
+    fn legacy_repair_with_empty_recorded_manifest_keeps_the_current_inventory_as_baseline() {
+        let current = vec![MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        }];
+        let (baseline, release) = partition_legacy_manifests(&current, None, &[]).unwrap();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].uuid, current[0].uuid);
+        assert!(release.is_empty());
+    }
+
+    #[test]
+    fn legacy_repair_accepts_only_the_recorded_snapshot_mount_source() {
+        assert!(legacy_mount_identity_matches(
+            "snapshot-name@/dev/disk5s1",
+            "snapshot-name",
+            "disk5s1",
+        ));
+        assert!(!legacy_mount_identity_matches(
+            "other-snapshot@/dev/disk5s1",
+            "snapshot-name",
+            "disk5s1",
+        ));
+        assert!(!legacy_mount_identity_matches(
+            "/dev/disk9s1",
+            "snapshot-name",
+            "disk5s1",
+        ));
+    }
+
+    #[test]
+    fn legacy_repair_rebinds_snapshot_manifest_after_device_renumbering() {
+        let current = vec![
+            MountSnapshotRef {
+                device_identifier: "disk3s1".into(),
+                uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+            },
+            MountSnapshotRef {
+                device_identifier: "disk3s1".into(),
+                uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+            },
+        ];
+        let historical_baseline = vec![MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "B8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        }];
+        let historical_recorded = vec![MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        }];
+
+        let (baseline, release) =
+            partition_legacy_manifests(&current, Some(&historical_baseline), &historical_recorded)
+                .expect("unique snapshot UUIDs must be repairable");
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].device_identifier, "disk3s1");
+        assert_eq!(baseline[0].uuid, historical_baseline[0].uuid);
+        assert_eq!(release.len(), 1);
+        assert_eq!(release[0].device_identifier, "disk3s1");
+        assert_eq!(release[0].uuid, historical_recorded[0].uuid);
+    }
+
+    #[test]
+    fn legacy_repair_rejects_duplicate_snapshot_uuid_across_manifests() {
+        let snapshot = MountSnapshotRef {
+            device_identifier: "disk3s1".into(),
+            uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        };
+        let current = [snapshot.clone()];
+        let baseline = [snapshot.clone()];
+        let recorded = [snapshot];
+        assert!(partition_legacy_manifests(&current, Some(&baseline), &recorded).is_none());
+    }
+
+    #[test]
+    fn volume_identity_parser_requires_apfs_and_returns_device_uuid() {
+        let plist = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>FilesystemName</key><string>APFS</string>
+<key>DeviceIdentifier</key><string>disk3s1</string>
+<key>APFSVolumeUUID</key><string>A8A38394-49AE-42F9-85FB-14DD9EA549FA</string>
+</dict></plist>"#;
+        let parsed = parse_volume_identity(plist).unwrap();
+        assert_eq!(parsed.0, "disk3s1");
+        assert_eq!(parsed.1, "A8A38394-49AE-42F9-85FB-14DD9EA549FA");
     }
 
     #[test]

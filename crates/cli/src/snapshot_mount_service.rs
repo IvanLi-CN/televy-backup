@@ -937,7 +937,8 @@ fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         || status.helper_version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION;
+        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
+        || status.helper_version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
     let component_compatible = match status.component_version.as_deref() {
         Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
@@ -953,6 +954,11 @@ fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
             })
         }
         Some(version) if version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        Some(version) if version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref().is_some_and(|commit| {
                 commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -990,6 +996,7 @@ fn classify_busy_status(
         mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
+            | mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::LEGACY_ROOT_MOUNT_HELPER_VERSION
             | mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION
     );
@@ -1020,6 +1027,7 @@ fn classify_busy_status(
             | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
             | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
             | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
     );
     let stale_current_partial_classification = status.helper_version
         == mount_helper::MOUNT_HELPER_WIRE_VERSION
@@ -1052,6 +1060,7 @@ fn classify_busy_status(
                 | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
                 | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
                 | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+                | Some(mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
         )
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit != env!("TELEVYBACKUP_BUILD_COMMIT")
@@ -1090,6 +1099,7 @@ fn classify_busy_status(
         Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
             | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
             | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
+            | Some(mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
     );
     let legacy_pending_only = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         && legacy_pending_component
@@ -2126,8 +2136,16 @@ pub fn repair_legacy(
                         .get("remaining")
                         .and_then(serde_json::Value::as_u64)
                         .unwrap_or_default();
+                    let migrated = payload
+                        .get("migrated")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
+                    let blocked = payload
+                        .get("blocked")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or_default();
                     println!(
-                        "legacy snapshot repair completed ({repaired} repaired, {released} released, {remaining} remaining)"
+                        "legacy snapshot repair completed ({repaired} repaired, {released} released, {migrated} migrated, {blocked} blocked, {remaining} remaining)"
                     );
                 }
                 return Ok(());
@@ -2217,8 +2235,8 @@ pub fn repair_legacy(
         );
     } else {
         println!(
-            "legacy snapshot repair completed ({} repaired, {} released, {} remaining)",
-            result.repaired, result.released, result.remaining
+            "legacy snapshot repair completed ({} repaired, {} released, {} migrated, {} blocked, {} remaining)",
+            result.repaired, result.released, result.migrated, result.blocked, result.remaining
         );
     }
     Ok(())
@@ -2437,6 +2455,7 @@ mod tests {
             mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
         ] {
             let status = MountStatusResult {
                 helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
@@ -2465,6 +2484,7 @@ mod tests {
             mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+            mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
         ] {
             let status = MountStatusResult {
                 helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),

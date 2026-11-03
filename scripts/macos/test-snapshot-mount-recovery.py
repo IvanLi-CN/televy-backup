@@ -360,6 +360,42 @@ connection.close()
     )
 
 
+def insert_legacy_empty_reservation_rows(journal, uid, volume_uuid, device, count):
+    """Seed stale reservations that predate the persisted baseline fields."""
+    script = '''
+import sqlite3, sys, uuid
+journal, uid, volume_uuid, device, count = sys.argv[1:]
+connection = sqlite3.connect(journal)
+for _ in range(int(count)):
+    connection.execute(
+        """
+            INSERT INTO mounts (
+                lease_id, uid, volume_uuid, device_identifier, source_path,
+                snapshot_name, mount_root, mount_device, snapshot_manifest,
+                reservation_manifest, reservation_manifest_valid, state,
+                created_at, last_renewed_at
+            ) VALUES (?, ?, ?, ?, '', '', '', 0, '[]', '[]', 0, 'reserved',
+                      datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
+        """,
+        (str(uuid.uuid4()), int(uid), volume_uuid, device),
+    )
+connection.commit()
+connection.close()
+'''
+    run(
+        "sudo",
+        "-n",
+        "/usr/bin/python3",
+        "-c",
+        script,
+        str(journal),
+        str(uid),
+        volume_uuid,
+        device,
+        str(count),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--helper", required=True, type=Path)
@@ -655,6 +691,30 @@ def main():
         # row. The successful journal-bound Release path is covered by deterministic
         # helper tests; this fixture must not claim deletion of a snapshot it could
         # not safely create or inventory.
+        legacy_empty_count = 65
+        insert_legacy_empty_reservation_rows(
+            journal,
+            os.getuid(),
+            volume_uuid,
+            device,
+            legacy_empty_count,
+        )
+        empty_before = request(ipc, "status")
+        assert empty_before["ok"]
+        assert empty_before["result"]["active_mounts"] == legacy_empty_count
+        assert empty_before["result"]["unknown_blocking_mounts"] == legacy_empty_count
+        empty_repair_start = control_request(control, "snapshot.mount_helper.repair_legacy")
+        assert empty_repair_start["ok"]
+        empty_repaired = wait_for_operation(control, empty_repair_start["result"]["operationId"])
+        assert empty_repaired["state"] == "succeeded", empty_repaired
+        assert empty_repaired["result"]["audited"] == legacy_empty_count
+        assert empty_repaired["result"]["repaired"] == legacy_empty_count
+        assert empty_repaired["result"]["released"] == legacy_empty_count
+        assert empty_repaired["result"]["migrated"] == legacy_empty_count
+        assert empty_repaired["result"]["blocked"] == 0
+        empty_after = request(ipc, "status")
+        assert empty_after["ok"] and empty_after["result"]["active_mounts"] == 0
+
         legacy_daemon_id = str(uuid.uuid4())
         legacy_daemon_snapshot_uuid = str(uuid.uuid4())
         legacy_daemon_reservation_uuid = str(uuid.uuid4())
