@@ -240,10 +240,12 @@ fn snapshot_mount_legacy_repair_preflight(
 ) -> Result<(u32, u32, u32, u32, u32), ControlError> {
     let counts = snapshot_mount_reconcile_counts(status)?;
     let (live, pending, recoverable, unknown, inventory_drift) = counts;
-    if live > 0 || pending > 0 || recoverable > 0 || inventory_drift > 0 {
+    if live > 0 || recoverable > 0 {
         return Err(ControlError {
             code: "snapshot_mount_helper.repair_required".to_string(),
-            message: "Legacy snapshot repair is blocked while other snapshot records are active or already classified for cleanup.".to_string(),
+            message:
+                "Snapshot record repair is blocked while live or recoverable mounted leases remain."
+                    .to_string(),
             retryable: true,
             details: serde_json::json!({
                 "live": live,
@@ -1418,12 +1420,12 @@ async fn handle_control_ipc_client(
             snapshot_mount_reconcile_identity(&status, "repairing legacy records")?;
             let (
                 _live_mounts,
-                _pending_cleanup,
+                pending_cleanup,
                 _recoverable_stale_mounts,
                 unknown_blocking_mounts,
                 _inventory_drift_mounts,
             ) = snapshot_mount_legacy_repair_preflight(&status)?;
-            if unknown_blocking_mounts == 0 {
+            if unknown_blocking_mounts == 0 && pending_cleanup == 0 {
                 return Ok(serde_json::json!({
                     "audited": 0,
                     "repaired": 0,
@@ -1446,7 +1448,7 @@ async fn handle_control_ipc_client(
                     retryable: true,
                     details: serde_json::json!({"reason": "repair_rejected"}),
                 })?;
-            let final_status = tokio::task::spawn_blocking(|| {
+            let mut final_status = tokio::task::spawn_blocking(|| {
                 mount_helper::status().map_err(|error| error.to_string())
             })
             .await
@@ -1464,6 +1466,26 @@ async fn handle_control_ipc_client(
                 details: serde_json::json!({"reason": "helper_status_failed"}),
             })?;
             snapshot_mount_reconcile_identity(&final_status, "repairing legacy records")?;
+            // Root repair can remove the owned snapshot after auditing older terminal rows.
+            // Reconcile only the resulting released-only drift before declaring convergence.
+            if snapshot_inventory_preflight(&final_status, true).is_ok_and(|drift| drift > 0) {
+                reconcile_snapshot_inventory(&client, true).await?;
+                final_status = tokio::task::spawn_blocking(mount_helper::status)
+                    .await
+                    .map_err(|_| {
+                        ControlError::unavailable(
+                            "Snapshot status task failed.",
+                            serde_json::json!({}),
+                        )
+                    })?
+                    .map_err(|_| {
+                        ControlError::unavailable(
+                            "Snapshot status failed after reconciliation.",
+                            serde_json::json!({}),
+                        )
+                    })?;
+                snapshot_mount_reconcile_identity(&final_status, "repairing legacy records")?;
+            }
             let final_counts = snapshot_mount_legacy_repair_final_state(&final_status);
             if let Err(mut error) = final_counts {
                 error.message = format!(
@@ -4143,7 +4165,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_mount_legacy_repair_requires_an_unknown_only_partition() {
+    fn snapshot_mount_legacy_repair_accepts_only_inactive_repairable_partitions() {
         let unknown_only = MountStatusResult {
             active_mounts: 2,
             pending_cleanup: Some(0),
@@ -4169,6 +4191,21 @@ mod tests {
         assert_eq!(error.code, "snapshot_mount_helper.repair_required");
         assert_eq!(error.details["live"], 1);
         assert_eq!(error.details["unknown"], 1);
+
+        let pending_and_drift = MountStatusResult {
+            active_mounts: 2,
+            live_mounts: Some(0),
+            pending_cleanup: Some(1),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(1),
+            inventory_drift_leases: vec![televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: "fixture-released".into(),
+                state: "released_inventory_drift".into(),
+            }],
+            ..Default::default()
+        };
+        assert!(snapshot_mount_legacy_repair_preflight(&pending_and_drift).is_ok());
     }
 
     #[test]

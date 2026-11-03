@@ -2009,6 +2009,33 @@ async fn renew_request(
     })
 }
 
+fn created_snapshot_name(output: &[u8]) -> Result<String, MountHelperError> {
+    let text = std::str::from_utf8(output)
+        .map_err(|_| MountHelperError::Protocol("invalid snapshot creation receipt".into()))?;
+    let mut dates = text.lines().filter_map(|line| {
+        line.trim()
+            .strip_prefix("Created local snapshot with date:")
+            .map(str::trim)
+    });
+    let date = dates
+        .next()
+        .ok_or_else(|| MountHelperError::Protocol("missing snapshot creation receipt".into()))?;
+    let valid = date.len() == 17
+        && date.bytes().enumerate().all(|(index, value)| {
+            if [4, 7, 10].contains(&index) {
+                value == b'-'
+            } else {
+                value.is_ascii_digit()
+            }
+        });
+    if !valid || dates.next().is_some() {
+        return Err(MountHelperError::Protocol(
+            "ambiguous snapshot creation receipt".into(),
+        ));
+    }
+    Ok(format!("com.apple.TimeMachine.{date}.local"))
+}
+
 async fn record_cleanup_request(
     peer_uid: u32,
     uid: u32,
@@ -2076,12 +2103,13 @@ async fn record_cleanup_request(
             "cleanup reservation baseline changed before recording".into(),
         ));
     }
-    run_command(
+    let creation_output = run_command_output(
         "snapshot_create",
         "tmutil.localsnapshot",
         "/usr/bin/tmutil",
         ["localsnapshot"],
     )?;
+    let created_name = created_snapshot_name(&creation_output)?;
     let current_manifest = snapshot_inventory_manifest(&device_identifier)?;
     let manifest: Vec<_> = current_manifest
         .iter()
@@ -2106,6 +2134,7 @@ async fn record_cleanup_request(
             "cleanup reservation has an ambiguous snapshot creation result".into(),
         ));
     }
+    validate_snapshot_binding(&device_identifier, &manifest[0].uuid, &created_name)?;
     let confirmed_manifest = snapshot_inventory_manifest(&device_identifier)?;
     if !manifests_equal(&confirmed_manifest, &current_manifest) {
         let _ = update_state(journal, lease_id, "cleanup_pending").await;
@@ -2113,22 +2142,34 @@ async fn record_cleanup_request(
             "snapshot inventory changed while recording cleanup".into(),
         ));
     }
-    let manifest_json = serde_json::to_string(&manifest)?;
-    let updated = sqlx::query(
-        "UPDATE mounts SET snapshot_manifest = ?, state = 'prepared' WHERE lease_id = ? AND state = 'reserved' AND snapshot_manifest = '[]' AND reservation_manifest = ? AND reservation_manifest_valid = 1",
-    )
-    .bind(&manifest_json)
-    .bind(lease_id)
-    .bind(&reservation_manifest_json)
-    .execute(journal)
-    .await?;
-    if updated.rows_affected() != 1 {
+    // tmutil may prune older Time Machine snapshots while creating the requested snapshot.
+    // Retain every currently existing non-owned snapshot; absent historical snapshots are not
+    // cleanup targets. Only the single new UUID remains owned by this reservation.
+    let (retained_baseline, present_owned) =
+        partition_legacy_manifests(&current_manifest, Some(&reservation_manifest), &manifest)
+            .ok_or_else(|| {
+                MountHelperError::Protocol("ambiguous snapshot creation inventory".into())
+            })?;
+    if !manifests_equal(&present_owned, &manifest) {
         return Err(MountHelperError::Protocol(
-            "cleanup reservation was claimed by another request".into(),
+            "created snapshot disappeared before recording".into(),
         ));
     }
+    let retained_json = serde_json::to_string(&retained_baseline)?;
+    let manifest_json = serde_json::to_string(&manifest)?;
+    persist_prepared_creation(
+        journal,
+        uid,
+        lease_id,
+        &volume_uuid,
+        &device_identifier,
+        &reservation_manifest_json,
+        &retained_json,
+        &manifest_json,
+    )
+    .await?;
     let final_manifest = snapshot_inventory_manifest(&device_identifier)?;
-    let mut expected_manifest = reservation_manifest;
+    let mut expected_manifest = retained_baseline;
     expected_manifest.extend(manifest.iter().cloned());
     if !manifests_equal(&final_manifest, &expected_manifest) {
         let _ = update_state(journal, lease_id, "cleanup_pending").await;
@@ -2140,6 +2181,47 @@ async fn record_cleanup_request(
         lease_id: lease_id.to_string(),
         cleanup_state: "prepared".to_string(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_prepared_creation(
+    journal: &SqlitePool,
+    uid: u32,
+    lease_id: &str,
+    volume: &str,
+    device: &str,
+    previous_baseline: &str,
+    retained_baseline: &str,
+    owned_manifest: &str,
+) -> Result<(), MountHelperError> {
+    let previous = parse_reservation_manifest(previous_baseline)?;
+    let mut transaction = journal.begin().await?;
+    let updated = sqlx::query("UPDATE mounts SET snapshot_manifest = ?, reservation_manifest = ?, state = 'prepared' WHERE lease_id = ? AND uid = ? AND state = 'reserved' AND snapshot_manifest = '[]' AND reservation_manifest = ? AND reservation_manifest_valid = 1")
+        .bind(owned_manifest).bind(retained_baseline).bind(lease_id).bind(i64::from(uid)).bind(previous_baseline)
+        .execute(&mut *transaction).await?;
+    if updated.rows_affected() != 1 {
+        return Err(MountHelperError::Protocol(
+            "cleanup reservation was claimed by another request".into(),
+        ));
+    }
+    // Keep terminal audit baselines aligned with this serialized system creation transaction.
+    // Only rows already verified by Reserve and still in the exact clean terminal shape qualify.
+    let released = sqlx::query("SELECT lease_id, reservation_manifest FROM mounts WHERE uid = ? AND lower(volume_uuid) = lower(?) AND device_identifier = ? AND state = 'released' AND mount_root = '' AND mount_device = 0 AND snapshot_manifest = '[]' AND reservation_manifest_valid = 1")
+        .bind(i64::from(uid)).bind(volume).bind(device).fetch_all(&mut *transaction).await?;
+    for row in released {
+        let old: String = row.get("reservation_manifest");
+        if !parse_reservation_manifest(&old)
+            .is_ok_and(|baseline| manifests_equal(&baseline, &previous))
+        {
+            return Err(MountHelperError::Protocol(
+                "terminal snapshot baseline changed during creation".into(),
+            ));
+        }
+        sqlx::query("UPDATE mounts SET reservation_manifest = ? WHERE lease_id = ? AND state = 'released' AND reservation_manifest = ?")
+            .bind(retained_baseline).bind(row.get::<String,_>("lease_id")).bind(old).execute(&mut *transaction).await?;
+    }
+    transaction.commit().await?;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4527,6 +4609,83 @@ fn peer_uid(fd: RawFd) -> Result<u32, MountHelperError> {
 mod tests {
     use super::*;
     use crate::{MountMethod, MountRequest};
+
+    #[test]
+    fn snapshot_creation_receipt_binds_the_owned_snapshot_name() {
+        assert_eq!(
+            created_snapshot_name(b"Created local snapshot with date: 2026-01-02-030405\n")
+                .unwrap(),
+            "com.apple.TimeMachine.2026-01-02-030405.local"
+        );
+        for invalid in [b"".as_slice(), b"Created local snapshot with date: ../../other", b"Created local snapshot with date: 2026-01-02-030405\nCreated local snapshot with date: 2026-01-02-030406\n"] {
+            assert!(created_snapshot_name(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn creation_pruning_rebases_only_clean_terminal_rows_and_keeps_owned_uuid() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let volume = Uuid::new_v4().to_string();
+        let retained = MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: Uuid::new_v4().to_string(),
+        };
+        let pruned = MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: Uuid::new_v4().to_string(),
+        };
+        let owned = MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: Uuid::new_v4().to_string(),
+        };
+        let before = serde_json::to_string(&vec![retained.clone(), pruned]).unwrap();
+        let after = serde_json::to_string(&vec![retained.clone()]).unwrap();
+        let manifest = serde_json::to_string(&vec![owned.clone()]).unwrap();
+        let lease = Uuid::new_v4().to_string();
+        for (id, state, uid) in [
+            (lease.clone(), "reserved", 501),
+            (Uuid::new_v4().to_string(), "released", 501),
+            (Uuid::new_v4().to_string(), "released", 502),
+        ] {
+            sqlx::query("INSERT INTO mounts (lease_id,uid,volume_uuid,device_identifier,snapshot_name,mount_root,snapshot_manifest,reservation_manifest,reservation_manifest_valid,state,created_at,last_renewed_at) VALUES (?,?,?,'disk5s1','','','[]',?,1,?,datetime('now'),datetime('now'))")
+                .bind(id).bind(uid).bind(&volume).bind(&before).bind(state).execute(&journal).await.unwrap();
+        }
+        persist_prepared_creation(
+            &journal, 501, &lease, &volume, "disk5s1", &before, &after, &manifest,
+        )
+        .await
+        .unwrap();
+        let rows =
+            sqlx::query("SELECT uid,state,reservation_manifest,snapshot_manifest FROM mounts")
+                .fetch_all(&journal)
+                .await
+                .unwrap();
+        for row in rows {
+            let baseline: String = row.get("reservation_manifest");
+            if row.get::<i64, _>("uid") == 502 {
+                assert_eq!(baseline, before);
+            } else {
+                assert_eq!(baseline, after);
+            }
+            if row.get::<String, _>("state") == "prepared" {
+                assert_eq!(row.get::<String, _>("snapshot_manifest"), manifest);
+            }
+        }
+        assert!(
+            persist_prepared_creation(
+                &journal, 501, &lease, &volume, "disk5s1", &before, &after, &manifest
+            )
+            .await
+            .is_err()
+        );
+        let current = vec![retained, owned.clone()];
+        let previous = parse_reservation_manifest(&before).unwrap();
+        let (baseline, release) =
+            partition_legacy_manifests(&current, Some(&previous), &[owned]).unwrap();
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(release.len(), 1);
+    }
 
     #[test]
     fn mounted_data_root_permissions_do_not_prevent_exact_device_cleanup() {
