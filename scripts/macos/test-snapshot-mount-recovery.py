@@ -736,29 +736,35 @@ def main():
         assert released_result["result"]["blocked"] == 0
         assert request(ipc, "status")["result"]["active_mounts"] == 0
 
-        corrupt_id = str(uuid.uuid4())
-        insert_legacy_repair_row(
-            journal, os.getuid(), volume_uuid, device, corrupt_id,
-            str(uuid.uuid4()), str(uuid.uuid4()),
-            state="released", reservation_override="not-json",
-        )
-        corrupt_start = control_request(control, "snapshot.mount_helper.repair_legacy")
-        assert corrupt_start["ok"]
-        corrupt_result = wait_for_operation(control, corrupt_start["result"]["operationId"])
-        assert corrupt_result["state"] == "failed", corrupt_result
-        assert corrupt_result["error"]["details"]["blocked"] == 1, corrupt_result
-        assert request(ipc, "status")["result"]["unknown_blocking_mounts"] == 1
-        preserved = run(
-            "sudo", "-n", "/usr/bin/python3", "-c",
-            "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); "
-            "r=c.execute(\"SELECT count(*) FROM mounts WHERE lease_id=? AND state='released' "
-            "AND reservation_manifest='not-json' AND reservation_manifest_valid=1 "
-            "AND mount_root != '' AND snapshot_manifest != '[]'\", (sys.argv[2],)).fetchone(); "
-            "assert r[0]==1, 'corrupt baseline was modified'",
-            str(journal), corrupt_id,
-        )
-        assert preserved.returncode == 0
-        delete_fixture_rows(journal, [corrupt_id])
+        duplicate_uuid = str(uuid.uuid4())
+        duplicate_baseline = json.dumps([
+            {"device_identifier": device, "uuid": duplicate_uuid},
+            {"device_identifier": device, "uuid": duplicate_uuid.upper()},
+        ])
+        for corrupt_baseline in ["not-json", duplicate_baseline]:
+            corrupt_id = str(uuid.uuid4())
+            insert_legacy_repair_row(
+                journal, os.getuid(), volume_uuid, device, corrupt_id,
+                str(uuid.uuid4()), str(uuid.uuid4()),
+                state="released", reservation_override=corrupt_baseline,
+            )
+            corrupt_start = control_request(control, "snapshot.mount_helper.repair_legacy")
+            assert corrupt_start["ok"]
+            corrupt_result = wait_for_operation(control, corrupt_start["result"]["operationId"])
+            assert corrupt_result["state"] == "failed", corrupt_result
+            assert corrupt_result["error"]["details"]["blocked"] == 1, corrupt_result
+            assert request(ipc, "status")["result"]["unknown_blocking_mounts"] == 1
+            preserved = run(
+                "sudo", "-n", "/usr/bin/python3", "-c",
+                "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); "
+                "r=c.execute(\"SELECT count(*) FROM mounts WHERE lease_id=? AND state='released' "
+                "AND reservation_manifest=? AND reservation_manifest_valid=1 "
+                "AND mount_root != '' AND snapshot_manifest != '[]'\", (sys.argv[2], sys.argv[3])).fetchone(); "
+                "assert r[0]==1, 'corrupt baseline was modified'",
+                str(journal), corrupt_id, corrupt_baseline,
+            )
+            assert preserved.returncode == 0
+            delete_fixture_rows(journal, [corrupt_id])
 
         legacy_daemon_id = str(uuid.uuid4())
         legacy_daemon_snapshot_uuid = str(uuid.uuid4())

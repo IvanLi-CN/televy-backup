@@ -301,6 +301,12 @@ operation because backup history and remote metadata are sensitive.
 
 The installer has one narrowly guarded exception for a stale current-component build that reports the live, pending, recoverable, and unknown partitions but omits only inventory-drift: after Snapshot Access proves idle, it may replace the helper while preserving the journal, and the candidate must reclassify the inherited rows before readiness. The same guarded replacement applies to an older known helper only when its complete additive partition proves every inherited row is unknown and all other categories and candidate lists are zero; it only breaks the upgrade deadlock and never authorizes a lease or cleanup. A matching-build partial status, an active lease, or an incomplete partition remains blocked.
 
+Snapshot inventory and reservation parsing reject duplicate UUIDs case-insensitively before
+legacy repair can build a deletion manifest. The partition boundary independently rejects a
+duplicate current inventory, including the ambiguous `[A, A]` inventory with recorded `[A]`.
+Malformed or duplicate reservation baselines leave the journal row unchanged and blocking;
+the hosted daemon-control fixture verifies this preservation through the production repair path.
+
 ## References
 
 - [APFS snapshot consistency specification](../../specs/apfs-snapshot-consistency/SPEC.md)

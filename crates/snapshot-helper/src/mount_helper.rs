@@ -2864,6 +2864,13 @@ fn partition_legacy_manifests(
     stored_baseline: Option<&[MountSnapshotRef]>,
     recorded_manifest: &[MountSnapshotRef],
 ) -> Option<(Vec<MountSnapshotRef>, Vec<MountSnapshotRef>)> {
+    let mut inventory_uuids = std::collections::HashSet::new();
+    if current_manifest
+        .iter()
+        .any(|snapshot| !inventory_uuids.insert(snapshot.uuid.to_ascii_lowercase()))
+    {
+        return None;
+    }
     let mut current = current_manifest.to_vec();
     let mut baseline = Vec::new();
     let mut release = Vec::new();
@@ -2978,9 +2985,15 @@ fn parse_reservation_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, Moun
     let manifest = serde_json::from_str::<Vec<MountSnapshotRef>>(value).map_err(|_| {
         MountHelperError::Protocol("snapshot mount journal contains an invalid reservation".into())
     })?;
+    let mut seen = std::collections::HashSet::new();
     for snapshot in &manifest {
         validate_device(&snapshot.device_identifier)?;
         validate_uuid(&snapshot.uuid)?;
+        if !seen.insert(snapshot.uuid.to_ascii_lowercase()) {
+            return Err(MountHelperError::Protocol(
+                "snapshot mount journal contains duplicate reservation UUIDs".into(),
+            ));
+        }
     }
     Ok(manifest)
 }
@@ -3442,6 +3455,7 @@ fn parse_snapshot_inventory(
         ));
     };
     let mut manifest = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for snapshot in snapshots {
         let snapshot = snapshot.as_dictionary().ok_or_else(|| {
             MountHelperError::Protocol("stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=snapshot inventory contains a malformed entry".into())
@@ -3455,6 +3469,11 @@ fn parse_snapshot_inventory(
                 )
             })?;
         validate_uuid(uuid)?;
+        if !seen.insert(uuid.to_ascii_lowercase()) {
+            return Err(MountHelperError::Protocol(
+                "stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=duplicate snapshot UUID".into(),
+            ));
+        }
         manifest.push(MountSnapshotRef {
             device_identifier: device_identifier.to_string(),
             uuid: uuid.to_string(),
@@ -4702,6 +4721,34 @@ mod tests {
         assert_eq!(release.len(), 1);
         assert_eq!(release[0].device_identifier, "disk3s1");
         assert_eq!(release[0].uuid, historical_recorded[0].uuid);
+    }
+
+    #[test]
+    fn duplicate_inventory_cannot_be_partitioned_for_deletion() {
+        let snapshot = MountSnapshotRef {
+            device_identifier: "disk3s1".into(),
+            uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        };
+        let mut duplicate = snapshot.clone();
+        duplicate.uuid = duplicate.uuid.to_ascii_lowercase();
+        let current = [snapshot.clone(), duplicate];
+        assert!(partition_legacy_manifests(&current, None, &[snapshot]).is_none());
+        assert!(partition_legacy_manifests(&current, None, &[]).is_none());
+    }
+
+    #[test]
+    fn duplicate_inventory_and_reservation_are_rejected() {
+        let uuid = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        let plist = format!(
+            "<plist version=\"1.0\"><dict><key>Snapshots</key><array><dict><key>SnapshotUUID</key><string>{uuid}</string></dict><dict><key>SnapshotUUID</key><string>{}</string></dict></array></dict></plist>",
+            uuid.to_ascii_lowercase()
+        );
+        assert!(parse_snapshot_inventory(plist.as_bytes(), "disk3s1").is_err());
+        let manifest = serde_json::json!([
+            {"device_identifier": "disk3s1", "uuid": uuid},
+            {"device_identifier": "disk3s1", "uuid": uuid.to_ascii_lowercase()}
+        ]);
+        assert!(parse_reservation_manifest(&manifest.to_string()).is_err());
     }
 
     #[test]
