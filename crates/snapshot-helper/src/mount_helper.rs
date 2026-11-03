@@ -34,11 +34,20 @@ use crate::{
 
 /// Stable v4 wire identity retained by the byte-identical Snapshot Access artifact.
 pub const MOUNT_HELPER_WIRE_VERSION: &str = "0.5.0";
-pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.5";
+pub const ROOT_MOUNT_HELPER_VERSION: &str = "0.5.6";
 pub const PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.4";
 pub const PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.3";
 pub const HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.2";
 pub const HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION: &str = "0.5.1";
+/// Historical components that can perform journal-bound pending cleanup. Keep
+/// CLI and daemon upgrade/cleanup predicates on the same compatibility set.
+pub const CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS: &[&str] = &[
+    "0.5.5",
+    PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+    PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+    HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION,
+    HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
+];
 /// Compatibility alias for callers that still name the original component release.
 pub const LEGACY_ROOT_MOUNT_HELPER_VERSION: &str = MOUNT_HELPER_WIRE_VERSION;
 pub const HISTORICAL_ROOT_MOUNT_HELPER_VERSION: &str = "0.9.8";
@@ -240,6 +249,7 @@ pub fn renew(uid: u32, lease_id: &str) -> Result<MountReleaseResult, MountHelper
 fn validate_status_result(result: &MountStatusResult) -> Result<(), MountHelperError> {
     if result.helper_version != MOUNT_HELPER_WIRE_VERSION
         && result.helper_version != ROOT_MOUNT_HELPER_VERSION
+        && result.helper_version != "0.5.5"
         && result.helper_version != PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         && result.helper_version != HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
@@ -995,6 +1005,11 @@ async fn classify_status_rows(
         blocked_volume_uuids: Vec::new(),
     };
     let mut inventory_cache: HashMap<String, Option<Vec<MountSnapshotRef>>> = HashMap::new();
+    // A status response is a read-only observation. Audit each distinct binding
+    // once, rather than spawning diskutil once per historical tombstone and
+    // exhausting the bounded status IPC deadline. Never reuse across requests
+    // or in a mutating Release operation.
+    let mut binding_cache = HashMap::new();
     for row in rows {
         let lease_id: String = row.try_get("lease_id")?;
         let uid: i64 = row.try_get("uid")?;
@@ -1099,7 +1114,11 @@ async fn classify_status_rows(
             && snapshot_manifest == "[]"
             && reservation_manifest_valid == 1
             && baseline.is_ok()
-            && validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok();
+            && *binding_cache
+                .entry((device_identifier.clone(), volume_uuid.clone()))
+                .or_insert_with(|| {
+                    validate_device_volume_binding(&device_identifier, &volume_uuid).is_ok()
+                });
         let owner_matches = volume_scope
             .map(|(_, owner_uid)| uid == i64::from(owner_uid))
             .unwrap_or(true);
@@ -1276,7 +1295,7 @@ async fn repair_legacy_request(
         ));
     }
     let rows = sqlx::query(
-        "SELECT lease_id, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND state IS NOT 'released' AND last_renewed_at <= datetime('now', ?)",
+        "SELECT lease_id, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, last_renewed_at FROM mounts WHERE uid = ? AND (state IS NOT 'released' OR mount_root != '' OR snapshot_manifest != '[]' OR reservation_manifest_valid != 1) AND last_renewed_at <= datetime('now', ?)",
     )
     .bind(i64::from(uid))
     .bind(RECOVERY_AGE_SECONDS)
@@ -1303,7 +1322,7 @@ async fn repair_legacy_request(
         let state: String = row.try_get("state")?;
         let eligible = matches!(
             state.as_str(),
-            "reserved" | "prepared" | "active" | "cleanup_pending"
+            "reserved" | "prepared" | "active" | "cleanup_pending" | "released"
         ) && validate_lease_id(&lease_id).is_ok()
             && validate_uuid(&volume_uuid).is_ok();
         if !eligible {
@@ -1368,10 +1387,15 @@ async fn repair_legacy_request(
             }
         };
 
-        let stored_baseline = if reservation_manifest_valid == 1 {
-            parse_reservation_manifest(&reservation_manifest_json).ok()
-        } else {
-            None
+        let stored_baseline = match legacy_reservation_baseline(
+            &reservation_manifest_json,
+            reservation_manifest_valid,
+        ) {
+            Ok(baseline) => baseline,
+            Err(_) => {
+                result.blocked += 1;
+                continue;
+            }
         };
         let current_manifest = if let Some(cached) = inventory_cache.get(&resolved_device) {
             cached.clone()
@@ -1411,13 +1435,22 @@ async fn repair_legacy_request(
             }
         };
 
+        // Old helpers marked rows released without clearing their mount/manifest fields.
+        // Only after the same identity and inventory checks as other legacy rows may
+        // they re-enter cleanup. Release otherwise treats released rows as terminal.
+        let repair_state = if state == "released" {
+            "cleanup_pending"
+        } else {
+            state.as_str()
+        };
         let updated = sqlx::query(
-            "UPDATE mounts SET device_identifier = ?, mount_device = ?, snapshot_manifest = ?, reservation_manifest = ?, reservation_manifest_valid = 1 WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = ? AND mount_root = ? AND snapshot_manifest = ?",
+            "UPDATE mounts SET device_identifier = ?, mount_device = ?, snapshot_manifest = ?, reservation_manifest = ?, reservation_manifest_valid = 1, state = ? WHERE lease_id = ? AND uid = ? AND state = ? AND mount_device = ? AND mount_root = ? AND snapshot_manifest = ?",
         )
         .bind(&resolved_device)
         .bind(expected_device.map(|device| i64::try_from(device).unwrap_or(i64::MAX)).unwrap_or(0))
         .bind(&release_manifest_json)
         .bind(&reservation_manifest_json_new)
+        .bind(repair_state)
         .bind(&lease_id)
         .bind(i64::from(uid))
         .bind(&state)
@@ -1510,7 +1543,7 @@ async fn repair_legacy_request(
                 .bind(&lease_id)
                 .bind(i64::from(uid))
                 .bind(expected_device.map(|device| i64::try_from(device).unwrap_or(i64::MAX)).unwrap_or(0))
-                .bind(&state)
+                .bind(repair_state)
                 .bind(&release_manifest_json)
                 .execute(journal)
                 .await;
@@ -2725,7 +2758,7 @@ async fn record_released_tombstone(
     manifest_json: &str,
 ) -> &'static str {
     let updated = sqlx::query(
-        "UPDATE mounts SET snapshot_manifest = '[]', reservation_manifest = ?, reservation_manifest_valid = 1, state = 'released' WHERE lease_id = ? AND snapshot_manifest = ? AND reservation_manifest_valid = 1",
+        "UPDATE mounts SET mount_root = '', mount_device = 0, snapshot_manifest = '[]', reservation_manifest = ?, reservation_manifest_valid = 1, state = 'released' WHERE lease_id = ? AND snapshot_manifest = ? AND reservation_manifest_valid = 1",
     )
     .bind(reservation_manifest_json)
     .bind(lease_id)
@@ -2831,6 +2864,13 @@ fn partition_legacy_manifests(
     stored_baseline: Option<&[MountSnapshotRef]>,
     recorded_manifest: &[MountSnapshotRef],
 ) -> Option<(Vec<MountSnapshotRef>, Vec<MountSnapshotRef>)> {
+    let mut inventory_uuids = std::collections::HashSet::new();
+    if current_manifest
+        .iter()
+        .any(|snapshot| !inventory_uuids.insert(snapshot.uuid.to_ascii_lowercase()))
+    {
+        return None;
+    }
     let mut current = current_manifest.to_vec();
     let mut baseline = Vec::new();
     let mut release = Vec::new();
@@ -2928,13 +2968,32 @@ fn parse_journal_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHel
     Ok(manifest)
 }
 
+fn legacy_reservation_baseline(
+    value: &str,
+    valid: i64,
+) -> Result<Option<Vec<MountSnapshotRef>>, MountHelperError> {
+    match valid {
+        0 => Ok(None),
+        1 => parse_reservation_manifest(value).map(Some),
+        _ => Err(MountHelperError::Protocol(
+            "snapshot mount journal contains an invalid reservation marker".into(),
+        )),
+    }
+}
+
 fn parse_reservation_manifest(value: &str) -> Result<Vec<MountSnapshotRef>, MountHelperError> {
     let manifest = serde_json::from_str::<Vec<MountSnapshotRef>>(value).map_err(|_| {
         MountHelperError::Protocol("snapshot mount journal contains an invalid reservation".into())
     })?;
+    let mut seen = std::collections::HashSet::new();
     for snapshot in &manifest {
         validate_device(&snapshot.device_identifier)?;
         validate_uuid(&snapshot.uuid)?;
+        if !seen.insert(snapshot.uuid.to_ascii_lowercase()) {
+            return Err(MountHelperError::Protocol(
+                "snapshot mount journal contains duplicate reservation UUIDs".into(),
+            ));
+        }
     }
     Ok(manifest)
 }
@@ -3396,6 +3455,7 @@ fn parse_snapshot_inventory(
         ));
     };
     let mut manifest = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for snapshot in snapshots {
         let snapshot = snapshot.as_dictionary().ok_or_else(|| {
             MountHelperError::Protocol("stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=snapshot inventory contains a malformed entry".into())
@@ -3409,6 +3469,11 @@ fn parse_snapshot_inventory(
                 )
             })?;
         validate_uuid(uuid)?;
+        if !seen.insert(uuid.to_ascii_lowercase()) {
+            return Err(MountHelperError::Protocol(
+                "stage=snapshot_inventory command=diskutil.apfs.listSnapshots exit=0 channel=stdout summary=duplicate snapshot UUID".into(),
+            ));
+        }
         manifest.push(MountSnapshotRef {
             device_identifier: device_identifier.to_string(),
             uuid: uuid.to_string(),
@@ -4054,6 +4119,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn released_tombstone_clears_verified_cleanup_mount_identity() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease_id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, mount_device, snapshot_manifest, reservation_manifest_valid, state, created_at) VALUES (?, 501, '', 'disk5s1', '', '/previously-verified-root', 42, '[]', 1, 'cleanup_pending', datetime('now'))")
+            .bind(&lease_id).execute(&journal).await.unwrap();
+        assert_eq!(
+            record_released_tombstone(&journal, &lease_id, "[]", "[]").await,
+            "released"
+        );
+        let row = sqlx::query("SELECT mount_root, mount_device FROM mounts WHERE lease_id = ?")
+            .bind(&lease_id)
+            .fetch_one(&journal)
+            .await
+            .unwrap();
+        assert_eq!(row.get::<String, _>("mount_root"), "");
+        assert_eq!(row.get::<i64, _>("mount_device"), 0);
+    }
+
+    #[tokio::test]
+    async fn legacy_repair_audits_incomplete_released_rows_but_preserves_foreign_owners() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        for uid in [501_i64, 502] {
+            sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, state, created_at, last_renewed_at) VALUES (?, ?, 'invalid-volume', 'disk5s1', '', '/untrusted', '[]', 'released', datetime('now', '-1 day'), datetime('now', '-1 day'))")
+                .bind(Uuid::new_v4().to_string()).bind(uid).execute(&journal).await.unwrap();
+        }
+        let result = repair_legacy_request(501, 501, &journal).await.unwrap();
+        assert_eq!(
+            result.audited, 1,
+            "incomplete released rows must reach the repair safety checks"
+        );
+        assert_eq!(result.blocked, 1);
+        assert_eq!(result.repaired, 0);
+        let unchanged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mounts WHERE state = 'released' AND mount_root = '/untrusted'",
+        )
+        .fetch_one(&journal)
+        .await
+        .unwrap();
+        assert_eq!(unchanged, 2);
+    }
+
+    #[tokio::test]
     async fn legacy_repair_rejects_a_peer_uid_mismatch_before_touching_the_journal() {
         let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
         init_journal(&journal).await.unwrap();
@@ -4263,6 +4372,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.cleanup_state, "reconcile_required");
+    }
+
+    #[test]
+    fn legacy_repair_distinguishes_absent_and_corrupt_baselines() {
+        assert!(legacy_reservation_baseline("[]", 0).unwrap().is_none());
+        assert!(
+            legacy_reservation_baseline("[]", 1)
+                .unwrap()
+                .is_some_and(|rows| rows.is_empty())
+        );
+        assert!(legacy_reservation_baseline("not-json", 1).is_err());
+        assert!(legacy_reservation_baseline("[]", 2).is_err());
     }
 
     #[tokio::test]
@@ -4600,6 +4721,34 @@ mod tests {
         assert_eq!(release.len(), 1);
         assert_eq!(release[0].device_identifier, "disk3s1");
         assert_eq!(release[0].uuid, historical_recorded[0].uuid);
+    }
+
+    #[test]
+    fn duplicate_inventory_cannot_be_partitioned_for_deletion() {
+        let snapshot = MountSnapshotRef {
+            device_identifier: "disk3s1".into(),
+            uuid: "A8A38394-49AE-42F9-85FB-14DD9EA549FA".into(),
+        };
+        let mut duplicate = snapshot.clone();
+        duplicate.uuid = duplicate.uuid.to_ascii_lowercase();
+        let current = [snapshot.clone(), duplicate];
+        assert!(partition_legacy_manifests(&current, None, &[snapshot]).is_none());
+        assert!(partition_legacy_manifests(&current, None, &[]).is_none());
+    }
+
+    #[test]
+    fn duplicate_inventory_and_reservation_are_rejected() {
+        let uuid = "A8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        let plist = format!(
+            "<plist version=\"1.0\"><dict><key>Snapshots</key><array><dict><key>SnapshotUUID</key><string>{uuid}</string></dict><dict><key>SnapshotUUID</key><string>{}</string></dict></array></dict></plist>",
+            uuid.to_ascii_lowercase()
+        );
+        assert!(parse_snapshot_inventory(plist.as_bytes(), "disk3s1").is_err());
+        let manifest = serde_json::json!([
+            {"device_identifier": "disk3s1", "uuid": uuid},
+            {"device_identifier": "disk3s1", "uuid": uuid.to_ascii_lowercase()}
+        ]);
+        assert!(parse_reservation_manifest(&manifest.to_string()).is_err());
     }
 
     #[test]

@@ -4,6 +4,13 @@
 
 ## Context and Scope
 
+Successful journal-bound cleanup MUST clear the recorded mount root and mount device when it
+persists a released tombstone. Explicit legacy repair MUST include age-gated, owner-matching
+released rows whose root, snapshot manifest, or baseline marker is incomplete. It MUST apply the
+same managed-root, volume identity, and inventory checks before moving such a row back through
+cleanup. Complete released tombstones MUST remain excluded from legacy migration; inventory
+drift still requires the separate explicit reconciliation operation.
+
 TelevyBackup must read every file in a strict backup from one filesystem timepoint while live
 files continue changing. This topic owns the user-session Snapshot Access app, its IPC contract,
 the brokered core source, per-volume preferences, lifecycle cleanup, and macOS packaging. It does

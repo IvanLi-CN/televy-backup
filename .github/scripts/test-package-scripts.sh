@@ -668,8 +668,8 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "arm64 package CI job must have a 15-minute timeout" >&2
   exit 1
 }
-grep -F 'timeout-minutes: 16' <<<"$package_workflow_text" >/dev/null || {
-  echo "x86_64 package CI job must have a bounded 16-minute timeout" >&2
+sed -n '/^  x86_64:/,/^  warm-x86_64:/p' <<<"$package_workflow_text" | grep -F 'timeout-minutes: 30' >/dev/null || {
+  echo "x86_64 package CI job must have a bounded 30-minute timeout" >&2
   exit 1
 }
 [[ "$(grep -Fc 'uses: actions/cache@' <<<"$package_workflow_text")" -ge 2 ]] || {
@@ -766,7 +766,7 @@ assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
 assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap-universal-build"
-assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.5.5", "0.5.4", "0.5.3", "0.5.2", "0.5.1", "0.5.0", "0.9.8"]
+assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.5.6", "0.5.5", "0.5.4", "0.5.3", "0.5.2", "0.5.1", "0.5.0", "0.9.8"]
 layout = payload["dmg_layout"]
 assert layout["builder"] == {"name": "dmgbuild", "version": "1.6.7"}
 assert layout["format"] == "UDZO"
@@ -878,7 +878,7 @@ assert mount_identity["artifact_sha256"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount = lock["components"]["snapshot_mount_helper"]
-assert mount["component_version"] == "0.5.5"
+assert mount["component_version"] == "0.5.6"
 assert mount["protocol_version"] == 4
 assert mount["identity_source"] == "bundled-release-artifact"
 assert mount["installed_observation"] == "manual-rc-acceptance-required"

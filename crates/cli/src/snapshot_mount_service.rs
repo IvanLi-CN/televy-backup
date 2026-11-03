@@ -935,30 +935,15 @@ fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, Cli
 #[cfg(any(not(unix), test))]
 fn cleanup_retry_identity(status: &MountStatusResult) -> Result<(), CliError> {
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
+        || mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS
+            .contains(&status.helper_version.as_str());
     let component_compatible = match status.component_version.as_deref() {
         Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref() == Some(env!("TELEVYBACKUP_BUILD_COMMIT"))
         }
-        Some(version) if version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
-            status.build_commit.as_deref().is_some_and(|commit| {
-                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        }
-        Some(version) if version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
-            status.build_commit.as_deref().is_some_and(|commit| {
-                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        }
-        Some(version) if version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION => {
-            status.build_commit.as_deref().is_some_and(|commit| {
-                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        }
-        Some(version) if version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
+        Some(version)
+            if mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS.contains(&version) =>
+        {
             status.build_commit.as_deref().is_some_and(|commit| {
                 commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -1021,14 +1006,10 @@ fn classify_busy_status(
         }
         _ => false,
     };
-    let stale_partial_component = matches!(
-        status.component_version.as_deref(),
-        Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-    );
+    let stale_partial_component = status.component_version.as_deref().is_some_and(|version| {
+        version == mount_helper::ROOT_MOUNT_HELPER_VERSION
+            || mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS.contains(&version)
+    });
     let stale_current_partial_classification = status.helper_version
         == mount_helper::MOUNT_HELPER_WIRE_VERSION
         && stale_partial_component
@@ -1054,14 +1035,7 @@ fn classify_busy_status(
     }
     let stale_unknown_only_classification = status.helper_version
         == mount_helper::MOUNT_HELPER_WIRE_VERSION
-        && matches!(
-            status.component_version.as_deref(),
-            Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
-                | Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-                | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-                | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
-                | Some(mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-        )
+        && stale_partial_component
         && status.build_commit.as_deref().is_some_and(|commit| {
             commit != env!("TELEVYBACKUP_BUILD_COMMIT")
                 && commit.len() == 40
@@ -1094,13 +1068,9 @@ fn classify_busy_status(
             ),
         ));
     }
-    let legacy_pending_component = matches!(
-        status.component_version.as_deref(),
-        Some(mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION)
-            | Some(mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION)
-    );
+    let legacy_pending_component = status.component_version.as_deref().is_some_and(|version| {
+        mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS.contains(&version)
+    });
     let legacy_pending_only = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         && legacy_pending_component
         && status.build_commit.as_deref().is_some_and(|commit| {
@@ -2410,6 +2380,19 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_retry_accepts_released_055_but_not_an_unverified_build() {
+        let mut status = MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some("0.5.5".into()),
+            build_commit: Some("b".repeat(40)),
+            ..Default::default()
+        };
+        assert!(cleanup_retry_identity(&status).is_ok());
+        status.build_commit = None;
+        assert!(cleanup_retry_identity(&status).is_err());
+    }
+
+    #[test]
     fn legacy_pending_only_status_requires_a_guarded_upgrade() {
         let status = MountStatusResult {
             helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
@@ -2480,6 +2463,7 @@ mod tests {
     #[test]
     fn older_helpers_with_complete_unknown_only_partition_keep_a_guarded_upgrade_path() {
         for component_version in [
+            "0.5.5",
             mount_helper::ROOT_MOUNT_HELPER_VERSION,
             mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION,
             mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION,

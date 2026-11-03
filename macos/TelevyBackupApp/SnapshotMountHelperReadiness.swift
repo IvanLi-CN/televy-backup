@@ -135,7 +135,7 @@ struct SnapshotMountHelperReadiness {
     /// replacement is the only safe way to upgrade them before cleanup can be retried explicitly.
     var isLegacyPendingCleanupStatus: Bool {
         guard reachable,
-              helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
+              helperVersion == "0.5.5" || helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
               let buildCommit
         else { return false }
         let validBuild = buildCommit.utf8.count == 40
@@ -165,7 +165,7 @@ struct SnapshotMountHelperReadiness {
     var isStaleCurrentPartialClassification: Bool {
         guard reachable,
               !isReady,
-              helperVersion == "0.5.5" || helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
+              helperVersion == "0.5.6" || helperVersion == "0.5.5" || helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
               let buildCommit,
               buildCommit != expectedBuildCommit,
               buildCommit.utf8.count == 40,
@@ -195,7 +195,7 @@ struct SnapshotMountHelperReadiness {
     var isLegacyUnknownOnlyUpgradeSafe: Bool {
         guard reachable,
               !isReady,
-              helperVersion == "0.5.5" || helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
+              helperVersion == "0.5.6" || helperVersion == "0.5.5" || helperVersion == "0.5.4" || helperVersion == "0.5.3" || helperVersion == "0.5.2" || helperVersion == "0.5.1",
               let buildCommit,
               buildCommit != expectedBuildCommit,
               buildCommit.utf8.count == 40,
@@ -262,7 +262,7 @@ struct SnapshotMountHelperReadiness {
     var isPendingCleanupUpgradeSafe: Bool {
         guard reachable,
               !isReady,
-              helperVersion == "0.5.5" || helperVersion == "0.5.4",
+              helperVersion == "0.5.6" || helperVersion == "0.5.5" || helperVersion == "0.5.4",
               classificationKnown,
               let activeMounts,
               let liveMounts,
@@ -393,8 +393,9 @@ struct SnapshotMountHelperReadiness {
             && buildCommit.utf8.allSatisfy {
                 (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
             }
-        return (helperVersion == "0.5.5" && isReady)
-            || (helperVersion == "0.5.4" && isReady)
+        return (helperVersion == "0.5.6" && isReady)
+            || (helperVersion == "0.5.5" && validBuild)
+            || (helperVersion == "0.5.4" && validBuild)
             || (helperVersion == "0.5.3" && validBuild)
             || (helperVersion == "0.5.2" && validBuild)
             || (helperVersion == "0.5.1" && validBuild)

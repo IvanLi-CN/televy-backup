@@ -22,6 +22,21 @@ related_specs:
 
 ## Context
 
+Released journal rows are not automatically complete tombstones. Historical helpers retained
+mount roots and manifests after release, while status audited them as unknown blockers and
+legacy repair excluded them. Repair must include incomplete owner-matching released rows and
+apply the existing root, volume, inventory, and age checks before cleanup. Successful cleanup
+must clear both mount root and mount device. Regression evidence must cover 65 incomplete
+released rows through daemon control, then repeat status to prove the blockers stay cleared.
+The read-only status audit checks each distinct device/volume binding once per request;
+repeating the same diskutil query for every tombstone exceeds the short status IPC deadline
+after a batch repair. The cache is request-local, includes both identities, and is never
+reused by a mutating Release or a subsequent status request.
+Missing legacy baselines and corrupt declared-valid baselines are distinct: only the missing
+case may be reconstructed from inventory. A malformed declared-valid baseline remains untouched
+and blocking. Historical cleanup compatibility is shared by the Rust CLI and daemon, including
+component `0.5.5`, so upgrading to `0.5.6` does not strand its pending or unknown-only records.
+
 A directory backup that walks live files cannot promise that every file came from one point in
 time. APFS local snapshots provide a read-only timepoint, but macOS separates three authorities:
 
@@ -285,6 +300,12 @@ operation because backup history and remote metadata are sensitive.
   this verifies TCC binding without asking the user to re-authorize an unchanged helper.
 
 The installer has one narrowly guarded exception for a stale current-component build that reports the live, pending, recoverable, and unknown partitions but omits only inventory-drift: after Snapshot Access proves idle, it may replace the helper while preserving the journal, and the candidate must reclassify the inherited rows before readiness. The same guarded replacement applies to an older known helper only when its complete additive partition proves every inherited row is unknown and all other categories and candidate lists are zero; it only breaks the upgrade deadlock and never authorizes a lease or cleanup. A matching-build partial status, an active lease, or an incomplete partition remains blocked.
+
+Snapshot inventory and reservation parsing reject duplicate UUIDs case-insensitively before
+legacy repair can build a deletion manifest. The partition boundary independently rejects a
+duplicate current inventory, including the ambiguous `[A, A]` inventory with recorded `[A]`.
+Malformed or duplicate reservation baselines leave the journal row unchanged and blocking;
+the hosted daemon-control fixture verifies this preservation through the production repair path.
 
 ## References
 

@@ -313,6 +313,9 @@ def insert_legacy_repair_row(
     lease_id,
     snapshot_uuid,
     reservation_snapshot_uuid,
+    *,
+    state="cleanup_pending",
+    reservation_override=None,
 ):
     """Seed one stale pre-device-identity row whose managed root is already gone."""
     mount_root = Path("/private/var/tmp/televybackup-snapshot-mounts") / str(uid) / lease_id
@@ -324,9 +327,11 @@ def insert_legacy_repair_row(
         [{"device_identifier": device, "uuid": reservation_snapshot_uuid}],
         separators=(",", ":"),
     )
+    if reservation_override is not None:
+        reservation_manifest = reservation_override
     script = '''
 import sqlite3, sys
-journal, uid, volume_uuid, device, lease_id, mount_root, snapshot_manifest, reservation_manifest = sys.argv[1:]
+journal, uid, volume_uuid, device, lease_id, mount_root, snapshot_manifest, reservation_manifest, state = sys.argv[1:]
 connection = sqlite3.connect(journal)
 connection.execute(
     """
@@ -335,10 +340,10 @@ connection.execute(
             snapshot_name, mount_root, mount_device, snapshot_manifest,
             reservation_manifest, reservation_manifest_valid, state,
             created_at, last_renewed_at
-        ) VALUES (?, ?, ?, ?, '', '', ?, 0, ?, ?, 1, 'cleanup_pending',
+        ) VALUES (?, ?, ?, ?, '', '', ?, 0, ?, ?, 1, ?,
                   datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
     """,
-    (lease_id, int(uid), volume_uuid, device, mount_root, snapshot_manifest, reservation_manifest),
+    (lease_id, int(uid), volume_uuid, device, mount_root, snapshot_manifest, reservation_manifest, state),
 )
 connection.commit()
 connection.close()
@@ -357,16 +362,20 @@ connection.close()
         str(mount_root),
         snapshot_manifest,
         reservation_manifest,
+        state,
     )
 
 
-def insert_legacy_empty_reservation_rows(journal, uid, volume_uuid, device, count):
+def insert_legacy_empty_reservation_rows(journal, uid, volume_uuid, device, count, state="reserved"):
     """Seed stale reservations that predate the persisted baseline fields."""
     script = '''
-import sqlite3, sys, uuid
-journal, uid, volume_uuid, device, count = sys.argv[1:]
+import json, sqlite3, sys, uuid
+journal, uid, volume_uuid, device, count, state = sys.argv[1:]
 connection = sqlite3.connect(journal)
 for _ in range(int(count)):
+    lease_id = str(uuid.uuid4())
+    root = f"/private/var/tmp/televybackup-snapshot-mounts/{uid}/{lease_id}" if state == "released" else ""
+    manifest = json.dumps([{"device_identifier": device, "uuid": str(uuid.uuid4())}]) if state == "released" else "[]"
     connection.execute(
         """
             INSERT INTO mounts (
@@ -374,10 +383,10 @@ for _ in range(int(count)):
                 snapshot_name, mount_root, mount_device, snapshot_manifest,
                 reservation_manifest, reservation_manifest_valid, state,
                 created_at, last_renewed_at
-            ) VALUES (?, ?, ?, ?, '', '', '', 0, '[]', '[]', 0, 'reserved',
+            ) VALUES (?, ?, ?, ?, '', '', ?, 0, ?, '[]', 0, ?,
                       datetime('now', '-301 seconds'), datetime('now', '-301 seconds'))
         """,
-        (str(uuid.uuid4()), int(uid), volume_uuid, device),
+        (lease_id, int(uid), volume_uuid, device, root, manifest, state),
     )
 connection.commit()
 connection.close()
@@ -393,6 +402,7 @@ connection.close()
         volume_uuid,
         device,
         str(count),
+        state,
     )
 
 
@@ -682,15 +692,9 @@ def main():
         cli_final = request(ipc, "status")
         assert cli_final["ok"] and cli_final["result"]["active_mounts"] == 0
         uid_root, uid_root_created = ensure_uid_mount_root(os.getuid())
-        # Hosted macOS does not permit creating a local snapshot for a disposable
-        # APFS image (`tmutil localsnapshot` exits 73), and `diskutil apfs` has no
-        # snapshot-create verb. Use structurally valid but unobservable legacy and
-        # reservation manifests that do not match the empty inventory. This proves
-        # the production repair path remains fail-closed when snapshot identity
-        # cannot be proven; it must retain cleanup_pending rather than release the
-        # row. The successful journal-bound Release path is covered by deterministic
-        # helper tests; this fixture must not claim deletion of a snapshot it could
-        # not safely create or inventory.
+        # Hosted macOS cannot create a local snapshot on this disposable APFS
+        # image. Verify journal normalization against its real empty inventory;
+        # this must not claim deletion of a snapshot the fixture never created.
         legacy_empty_count = 65
         insert_legacy_empty_reservation_rows(
             journal,
@@ -715,9 +719,58 @@ def main():
         empty_after = request(ipc, "status")
         assert empty_after["ok"] and empty_after["result"]["active_mounts"] == 0
 
+        # Old helpers persisted terminal rows without clearing managed roots or
+        # manifests. Status audits those tombstones, so legacy repair must audit
+        # and normalize them too, through the production daemon control path.
+        insert_legacy_empty_reservation_rows(
+            journal, os.getuid(), volume_uuid, device, 65, state="released"
+        )
+        released_before = request(ipc, "status")
+        assert released_before["result"]["unknown_blocking_mounts"] == 65
+        released_start = control_request(control, "snapshot.mount_helper.repair_legacy")
+        assert released_start["ok"]
+        released_result = wait_for_operation(control, released_start["result"]["operationId"])
+        assert released_result["state"] == "succeeded", released_result
+        for key in ("audited", "repaired", "released", "migrated"):
+            assert released_result["result"][key] == 65, released_result
+        assert released_result["result"]["blocked"] == 0
+        assert request(ipc, "status")["result"]["active_mounts"] == 0
+
+        duplicate_uuid = str(uuid.uuid4())
+        duplicate_baseline = json.dumps([
+            {"device_identifier": device, "uuid": duplicate_uuid},
+            {"device_identifier": device, "uuid": duplicate_uuid.upper()},
+        ])
+        for corrupt_baseline in ["not-json", duplicate_baseline]:
+            corrupt_id = str(uuid.uuid4())
+            insert_legacy_repair_row(
+                journal, os.getuid(), volume_uuid, device, corrupt_id,
+                str(uuid.uuid4()), str(uuid.uuid4()),
+                state="released", reservation_override=corrupt_baseline,
+            )
+            corrupt_start = control_request(control, "snapshot.mount_helper.repair_legacy")
+            assert corrupt_start["ok"]
+            corrupt_result = wait_for_operation(control, corrupt_start["result"]["operationId"])
+            assert corrupt_result["state"] == "failed", corrupt_result
+            assert corrupt_result["error"]["details"]["blocked"] == 1, corrupt_result
+            assert request(ipc, "status")["result"]["unknown_blocking_mounts"] == 1
+            preserved = run(
+                "sudo", "-n", "/usr/bin/python3", "-c",
+                "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); "
+                "r=c.execute(\"SELECT count(*) FROM mounts WHERE lease_id=? AND state='released' "
+                "AND reservation_manifest=? AND reservation_manifest_valid=1 "
+                "AND mount_root != '' AND snapshot_manifest != '[]'\", (sys.argv[2], sys.argv[3])).fetchone(); "
+                "assert r[0]==1, 'corrupt baseline was modified'",
+                str(journal), corrupt_id, corrupt_baseline,
+            )
+            assert preserved.returncode == 0
+            delete_fixture_rows(journal, [corrupt_id])
+
         legacy_daemon_id = str(uuid.uuid4())
         legacy_daemon_snapshot_uuid = str(uuid.uuid4())
-        legacy_daemon_reservation_uuid = str(uuid.uuid4())
+        # A UUID claimed by both manifests is genuinely ambiguous and must stay
+        # blocked, even when the snapshot is absent from the current inventory.
+        legacy_daemon_reservation_uuid = legacy_daemon_snapshot_uuid
         insert_legacy_repair_row(
             journal,
             os.getuid(),
@@ -736,16 +789,16 @@ def main():
         repaired = wait_for_operation(control, repair_start["result"]["operationId"])
         assert repaired["state"] == "failed", repaired
         assert repaired["error"]["code"] == "snapshot_mount_helper.repair_required"
-        assert repaired["error"]["details"]["pending"] == 1
+        assert repaired["error"]["details"]["unknown"] == 1
         daemon_repair_final = request(ipc, "status")
         assert daemon_repair_final["ok"]
         assert daemon_repair_final["result"]["active_mounts"] == 1
-        assert daemon_repair_final["result"]["pending_cleanup"] == 1
-        assert daemon_repair_final["result"]["unknown_blocking_mounts"] == 0
+        assert daemon_repair_final["result"]["pending_cleanup"] == 0
+        assert daemon_repair_final["result"]["unknown_blocking_mounts"] == 1
 
         legacy_cli_id = str(uuid.uuid4())
         legacy_cli_snapshot_uuid = str(uuid.uuid4())
-        legacy_cli_reservation_uuid = str(uuid.uuid4())
+        legacy_cli_reservation_uuid = legacy_cli_snapshot_uuid
         insert_legacy_repair_row(
             journal,
             os.getuid(),
@@ -773,8 +826,8 @@ def main():
         cli_repair_final = request(ipc, "status")
         assert cli_repair_final["ok"]
         assert cli_repair_final["result"]["active_mounts"] == 2
-        assert cli_repair_final["result"]["pending_cleanup"] == 1
-        assert cli_repair_final["result"]["unknown_blocking_mounts"] == 1
+        assert cli_repair_final["result"]["pending_cleanup"] == 0
+        assert cli_repair_final["result"]["unknown_blocking_mounts"] == 2
         print(
             "PASS: helper classification, daemon/CLI inventory reconciliation, legacy repair fencing, and unknown blocker preservation verified",
             flush=True,
