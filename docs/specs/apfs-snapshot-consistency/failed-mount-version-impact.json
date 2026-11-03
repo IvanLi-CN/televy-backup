@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "kind": "version-impact-record",
+  "change": {
+    "description": "Recover journal-owned snapshots after mounting fails before device capture.",
+    "release_unit_description": "Root mount helper 0.5.7 and its existing product compatibility metadata.",
+    "affected_contracts": [
+      "public-api",
+      "persistent-state"
+    ]
+  },
+  "classification": {
+    "allowed_impacts": [
+      "patch",
+      "minor",
+      "major"
+    ],
+    "planned": {
+      "impact": "patch",
+      "reasoning": "Protocol v4 and journal schema are unchanged; cleanup writes existing released/pending states readable by supported 0.5.x helpers. Existing UID, root, volume, UUID and inventory safety boundaries remain enforced.",
+      "assessed_at": "2026-11-03T16:58:25.097647+00:00",
+      "evidence": [
+        "mount_helper::tests::denied_mount_cleanup_restores_65_tombstones_and_unblocks_source_volume",
+        "mount_helper::tests::denied_mount_release_retry_restores_65_tombstones_and_unblocks_source_volume",
+        "mount_helper::tests::recorded_owner_cannot_mask_unowned_or_ambiguous_inventory_drift"
+      ]
+    },
+    "current": {
+      "impact": "patch",
+      "scope_drift": {
+        "detected": false,
+        "description": "No protocol, schema, permission or GUI flow change."
+      },
+      "reasoning": "Protocol v4 and journal schema are unchanged; cleanup writes existing released/pending states readable by supported 0.5.x helpers. Existing UID, root, volume, UUID and inventory safety boundaries remain enforced.",
+      "reassessed_at": "2026-11-03T16:58:25.097647+00:00",
+      "evidence": [
+        "mount_helper::tests::denied_mount_cleanup_restores_65_tombstones_and_unblocks_source_volume",
+        "mount_helper::tests::denied_mount_release_retry_restores_65_tombstones_and_unblocks_source_volume",
+        "mount_helper::tests::recorded_owner_cannot_mask_unowned_or_ambiguous_inventory_drift"
+      ]
+    },
+    "verified": {
+      "impact": "patch",
+      "reasoning": "Protocol v4 and journal schema are unchanged; cleanup writes existing released/pending states readable by supported 0.5.x helpers. Existing UID, root, volume, UUID and inventory safety boundaries remain enforced.",
+      "verified_at": "2026-11-03T16:58:25.097647+00:00",
+      "evidence": [
+        "mount_helper::tests::denied_mount_cleanup_restores_65_tombstones_and_unblocks_source_volume",
+        "mount_helper::tests::denied_mount_release_retry_restores_65_tombstones_and_unblocks_source_volume",
+        "mount_helper::tests::recorded_owner_cannot_mask_unowned_or_ambiguous_inventory_drift"
+      ]
+    }
+  },
+  "compatibility_evidence": {
+    "public_api": {
+      "change": "compatible",
+      "supported_consumer_range": "Existing v4 consumers, with current-build readiness still required.",
+      "evidence": [
+        "No IPC method or response schema changes."
+      ]
+    },
+    "persistent_state": {
+      "applicable": true,
+      "state_description": "Existing root-owned SQLite mounts journal; schema and retained-baseline representation unchanged.",
+      "source_program_compatibility_range": "Supported 0.5.x v4 helpers reading the existing schema.",
+      "evidence": [
+        "Existing migration and unknown-state preservation tests; failed-mount cleanup records the same released tombstone shape."
+      ]
+    }
+  },
+  "release_unit": {
+    "member_change_records": [
+      "root-mount-helper-failed-mount-cleanup"
+    ],
+    "maximum_verified_impact": "patch",
+    "calculation_evidence": [
+      "Compatibility classification only; installed repair, full backup and release verification are not implied."
+    ]
+  }
+}

@@ -34,10 +34,26 @@ recorded mount-device identity remains unknown, and cleanup refuses to unmount i
 
 ## Rationale
 
+Historical terminal rows can retain a caller-owned data-directory mount layout that cannot
+enter root-owned directory cleanup. Explicit repair can retire only the journal identity of
+stale owner-matching `released` rows with zero mount device, after all recorded snapshot UUIDs
+are absent and a complete kernel mount table shows no matching source or mount at/below the
+no-follow-validated historical root. Repeated identity and inventory checks precede a guarded
+update that rejects another non-released owner on the volume. Unrecorded inventory remains the
+baseline. No operation touches the historical directory or deletes snapshots; unresolved rows
+continue to block strict mode.
+
 Testing on macOS showed that `tmutil localsnapshot` and FDA-controlled reads work as a regular user,
 but `mount_apfs` fails with `Operation not permitted`. FDA is a TCC file-access decision and does
 not grant mount(2) privilege. A root snapshot-and-mount boundary preserves the no-copy requirement without
 making the backup daemon or file reader privileged.
+
+A mount denied before device capture is distinct from a mounted filesystem with unknown identity.
+The former can reuse journal-bound UUID deletion after a complete kernel absence proof, repeated
+volume/root checks, and exact pre/post inventory checks. It must be retryable through `Release`
+after authorization is corrected. Treating device zero as unconditional failure otherwise traps a
+new snapshot and makes every prior tombstone appear drifted. A still-mounted or uncertain root
+remains blocked; there is no permission or deletion boundary expansion.
 
 ## Consequences
 

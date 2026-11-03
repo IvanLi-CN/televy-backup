@@ -91,7 +91,7 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!pendingWithCandidate.canRecoverStaleMounts, "pending cleanup must disable stale recovery")
         let pendingOnly = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
             pendingCleanupCandidates: 1
@@ -102,7 +102,7 @@ enum SnapshotMountHelperReadinessTests {
 
         let staleCurrentPending = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
             pendingCleanupCandidates: 1
@@ -114,7 +114,7 @@ enum SnapshotMountHelperReadinessTests {
 
         let staleCurrentPartialClear = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 0, liveMounts: 0, pendingCleanup: 0,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0
         )
@@ -123,7 +123,7 @@ enum SnapshotMountHelperReadinessTests {
 
         let staleCurrentMixed = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 2, liveMounts: 1, pendingCleanup: 1,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, pendingCleanupCandidates: 1
         )
@@ -132,7 +132,7 @@ enum SnapshotMountHelperReadinessTests {
 
         let accessPending = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 1,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0, inventoryDriftMounts: 0,
             pendingCleanupCandidates: 1,
@@ -200,7 +200,7 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!inconsistentAggregate.canRecoverStaleMounts, "an inconsistent aggregate must disable recovery")
         let inventoryDrift = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 1, liveMounts: 0, pendingCleanup: 0,
             recoverableStaleMounts: 0, unknownBlockingMounts: 0,
             inventoryDriftMounts: 1
@@ -210,7 +210,7 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(!inventoryDrift.isOperational, "inventory drift must keep strict mode unavailable")
         let legacyRepair = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 2, liveMounts: 0, pendingCleanup: 0,
             recoverableStaleMounts: 0, unknownBlockingMounts: 2,
             inventoryDriftMounts: 0
@@ -220,7 +220,7 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(legacyRepair.visibleUpdateBlockReason == nil, "current helper legacy repair must not repeat the aggregate blocker")
         let mixedLegacyRepair = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
-            expectedBuildCommit: candidateCommit, helperVersion: "0.5.6",
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
             activeMounts: 2, liveMounts: 1, pendingCleanup: 0,
             recoverableStaleMounts: 0, unknownBlockingMounts: 1,
             inventoryDriftMounts: 0
