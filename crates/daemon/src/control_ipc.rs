@@ -64,7 +64,9 @@ fn snapshot_mount_helper_state(
             let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
                 || status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION
                 || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-                || status.helper_version == mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION;
+                || status.helper_version == mount_helper::HISTORICAL_ROOT_MOUNT_HELPER_VERSION
+                || status.helper_version
+                    == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
             let ready = wire_compatible
                 && status.component_version.as_deref()
                     == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
@@ -132,7 +134,8 @@ fn snapshot_mount_cleanup_identity(status: &MountStatusResult) -> Result<(), Con
     let wire_compatible = status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
         || status.helper_version == mount_helper::PREVIOUS_ROOT_MOUNT_HELPER_VERSION
         || status.helper_version == mount_helper::PREVIOUS_PREVIOUS_ROOT_MOUNT_HELPER_VERSION
-        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION;
+        || status.helper_version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION
+        || status.helper_version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION;
     let component_compatible = match status.component_version.as_deref() {
         Some(version) if version == mount_helper::ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref() == Some(crate::BUILD_COMMIT)
@@ -148,6 +151,11 @@ fn snapshot_mount_cleanup_identity(status: &MountStatusResult) -> Result<(), Con
             })
         }
         Some(version) if version == mount_helper::HISTORICAL_CLEANUP_ROOT_MOUNT_HELPER_VERSION => {
+            status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        }
+        Some(version) if version == mount_helper::HISTORICAL_PREVIOUS_ROOT_MOUNT_HELPER_VERSION => {
             status.build_commit.as_deref().is_some_and(|commit| {
                 commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -1451,17 +1459,38 @@ async fn handle_control_ipc_client(
                 details: serde_json::json!({"reason": "helper_status_failed"}),
             })?;
             snapshot_mount_reconcile_identity(&final_status, "repairing legacy records")?;
+            let final_counts = snapshot_mount_legacy_repair_final_state(&final_status);
+            if let Err(mut error) = final_counts {
+                error.message = format!(
+                    "Legacy snapshot repair left {} record(s) blocked ({} audited, {} repaired, {} migrated, {} rejected); their mount or inventory identity could not be proven. No source bytes were served.",
+                    repaired.remaining,
+                    repaired.audited,
+                    repaired.repaired,
+                    repaired.migrated,
+                    repaired.blocked,
+                );
+                if let Some(details) = error.details.as_object_mut() {
+                    details.insert("audited".to_string(), serde_json::json!(repaired.audited));
+                    details.insert("repaired".to_string(), serde_json::json!(repaired.repaired));
+                    details.insert("released".to_string(), serde_json::json!(repaired.released));
+                    details.insert("migrated".to_string(), serde_json::json!(repaired.migrated));
+                    details.insert("blocked".to_string(), serde_json::json!(repaired.blocked));
+                }
+                return Err(error);
+            }
             let (
                 final_live_mounts,
                 final_pending_cleanup,
                 final_recoverable_stale_mounts,
                 final_unknown_blocking_mounts,
                 final_inventory_drift_mounts,
-            ) = snapshot_mount_legacy_repair_final_state(&final_status)?;
+            ) = final_counts.expect("legacy repair final state already checked");
             Ok(serde_json::json!({
                 "audited": repaired.audited,
                 "repaired": repaired.repaired,
                 "released": repaired.released,
+                "migrated": repaired.migrated,
+                "blocked": repaired.blocked,
                 "remaining": final_status.active_mounts,
                 "live": final_live_mounts,
                 "pending": final_pending_cleanup,

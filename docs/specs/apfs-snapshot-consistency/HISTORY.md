@@ -1,5 +1,13 @@
 # History
 
+- The first legacy-repair release could leave every old row blocked when the journal omitted its
+  reservation baseline, the APFS device node had been renumbered, or the recorded mount directory
+  had already disappeared. The `0.5.5` helper resolves the volume by UUID, matches inventory by
+  snapshot UUID, migrates empty reservations without deleting unrecorded snapshots, and cleans a
+  root-owned legacy path only after proving it is not mounted. The hosted fixture seeds 65 such
+  rows and requires all 65 to be audited, migrated, released, and absent from the final status;
+  ambiguous mounted or malformed rows remain fail-closed.
+
 - The hosted recovery fixture no longer assumes that a disposable APFS image can create a local
   snapshot. GitHub-hosted macOS rejects `tmutil localsnapshot` for that image and `diskutil apfs`
   has no snapshot-create operation. The fixture now proves the safer boundary: an unobservable

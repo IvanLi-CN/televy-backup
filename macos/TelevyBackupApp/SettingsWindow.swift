@@ -1252,7 +1252,7 @@ struct SettingsWindowRootView: View {
                 mountHelperReachable: !accessMissing && !mountHelperMissing,
                 mountHelperReady: !accessMissing && !mountHelperMissing && !mountHelperOutdated,
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
-                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.4" : nil,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.5" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 mountHelperActiveMounts: SettingsUIDemo.scene == "snapshots-inventory-drift" ? 1 : 0,
                 mountHelperPendingCleanup: 0,

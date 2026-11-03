@@ -274,6 +274,12 @@ pub struct MountLegacyRepairResult {
     pub released: u32,
     pub remaining: u32,
     pub unknown: u32,
+    /// Rows that could not be proven safe by the explicit legacy repair operation.
+    #[serde(default)]
+    pub blocked: u32,
+    /// Rows whose old reservation baseline was reconstructed from the current inventory.
+    #[serde(default)]
+    pub migrated: u32,
 }
 
 impl MountResponse {

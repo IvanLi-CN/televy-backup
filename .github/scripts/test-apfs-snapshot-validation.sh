@@ -148,6 +148,8 @@ assert_contains "recovery fixture operation polling" "$recovery_fixture_text" '"
 assert_contains "recovery fixture unknown blocker gate" "$recovery_fixture_text" '"snapshot_mount_helper.reconcile_required"'
 assert_contains "daemon legacy repair operation" "$control_text" "snapshot.mount_helper.repair_legacy"
 assert_contains "recovery fixture daemon legacy repair request" "$recovery_fixture_text" '"snapshot.mount_helper.repair_legacy"'
+assert_contains "recovery fixture empty legacy reservation" "$recovery_fixture_text" "insert_legacy_empty_reservation_rows"
+assert_contains "recovery fixture migrated legacy reservation" "$recovery_fixture_text" 'empty_repaired["result"]["migrated"] == legacy_empty_count'
 assert_contains "recovery fixture daemon legacy identity fence" "$recovery_fixture_text" 'repaired["error"]["code"] == "snapshot_mount_helper.repair_required"'
 assert_contains "recovery fixture CLI legacy repair command" "$recovery_fixture_text" '"repair-legacy"'
 assert_contains "recovery fixture CLI legacy identity fence" "$recovery_fixture_text" '"snapshot_mount_helper.repair_required" in cli_repair_error'
@@ -196,5 +198,10 @@ assert_contains "source-path authorization uses exec boundary" "$mount_helper_te
 assert_contains "source-path authorization has pre-runtime entrypoint" "$mount_helper_text" 'maybe_authorize_source_path'
 assert_not_contains "source-path authorization does not fork Tokio helper" "$mount_helper_text" 'libc::fork()'
 assert_not_contains "access-side snapshot creation" "$access_text" 'run_command("/usr/bin/tmutil", ["localsnapshot"])'
+assert_contains "legacy repair resolves volume UUID" "$mount_helper_text" "resolve_legacy_volume_device"
+assert_contains "legacy repair partitions snapshot UUIDs" "$mount_helper_text" "partition_legacy_manifests"
+assert_contains "legacy repair accepts empty reservation manifest" "$mount_helper_text" 'snapshot_manifest_json == "[]"'
+assert_contains "legacy repair validates missing root safely" "$mount_helper_text" "validate_legacy_mount_root"
+assert_contains "legacy repair distinguishes unmounted root" "$mount_helper_text" "cleanup_legacy_unmounted_root"
 
 echo "APFS snapshot validation workflow contract passed"
