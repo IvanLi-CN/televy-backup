@@ -303,7 +303,7 @@ compile_app_test() {
     generated_sources+=("$generated")
   done
   "$swiftc" -sdk "$sdk_path" -O -D TELEVYBACKUP_TESTING \
-    -I "$module_dir" -L "$module_dir" -lTelevyBackupTestSupport \
+    -parse-as-library -I "$module_dir" -L "$module_dir" -lTelevyBackupTestSupport \
     -Xlinker -rpath -Xlinker "$module_dir" \
     -framework SwiftUI -framework AppKit -o "$output" "${generated_sources[@]}"
 }
