@@ -1086,7 +1086,8 @@ fn classify_busy_status(
         && status.recovery_leases.is_empty()
         && status.inventory_drift_leases.len() == status.active_mounts as usize
         && status.inventory_drift_leases.iter().all(|lease| {
-            lease.state == "released" && uuid::Uuid::parse_str(&lease.lease_id).is_ok()
+            lease.state == "released_inventory_drift"
+                && uuid::Uuid::parse_str(&lease.lease_id).is_ok()
         })
         && status
             .inventory_drift_leases
@@ -2557,7 +2558,7 @@ mod tests {
             inventory_drift_leases: (0..72)
                 .map(|_| televybackup_snapshot_access::MountRecoveryLease {
                     lease_id: uuid::Uuid::new_v4().to_string(),
-                    state: "released".into(),
+                    state: "released_inventory_drift".into(),
                 })
                 .collect(),
             ..Default::default()
@@ -2575,7 +2576,7 @@ mod tests {
 
     #[test]
     fn inventory_drift_upgrade_rejects_unsafe_partitions() {
-        for case in 0..13 {
+        for case in 0..14 {
             let mut status = stale_inventory_drift_status();
             match case {
                 0 => status.live_mounts = Some(1),
@@ -2600,6 +2601,7 @@ mod tests {
                         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
                 }
                 11 => status.build_commit = None,
+                12 => status.inventory_drift_leases[0].state = "released".into(),
                 _ => status.component_version = Some("unknown".into()),
             }
             assert!(

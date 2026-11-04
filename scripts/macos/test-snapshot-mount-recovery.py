@@ -779,6 +779,7 @@ def main():
             legacy_daemon_id,
             legacy_daemon_snapshot_uuid,
             legacy_daemon_reservation_uuid,
+            state="released",
         )
         legacy_before = request(ipc, "status")
         assert legacy_before["ok"]
@@ -807,6 +808,7 @@ def main():
             legacy_cli_id,
             legacy_cli_snapshot_uuid,
             legacy_cli_reservation_uuid,
+            state="released",
         )
         cli_repair = run(
             str(cli),

@@ -331,7 +331,7 @@ while True:
                "active_mounts": 72, "pending_cleanup": 0, "live_mounts": 0,
                "recoverable_stale_mounts": 0, "unknown_blocking_mounts": 0,
                "inventory_drift_mounts": 72, "pending_cleanup_leases": [], "recovery_leases": [],
-               "inventory_drift_leases": [{"lease_id": lease, "state": "released"} for lease in drift_leases]}
+               "inventory_drift_leases": [{"lease_id": lease, "state": "released_inventory_drift"} for lease in drift_leases]}
         old_server.write_text(old_server.read_text().replace('"active_mounts":0', '"active_mounts":72')
             .replace('connection.sendall(json.dumps(response)',
                      "response['result'].update(" + repr(old) + ")\n        connection.sendall(json.dumps(response)"))
