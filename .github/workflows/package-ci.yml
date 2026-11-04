@@ -243,7 +243,9 @@ jobs:
     timeout-minutes: 10
     needs: [classify, arm64, x86_64]
     if: >-
-      !cancelled() && needs.classify.result == 'success'
+      !cancelled() && needs.classify.result == 'success' &&
+      (needs.classify.outputs.kind == 'prepared' ||
+       (needs.arm64.result == 'success' && needs.x86_64.result == 'success'))
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

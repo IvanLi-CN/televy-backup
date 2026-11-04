@@ -141,6 +141,12 @@ grep -F 'timeout-minutes: 30' <<<"$release_text" >/dev/null || {
   printf 'release dependency cache action must be pinned to a full commit SHA\n' >&2
   exit 1
 }
+# Recovery builds must cache the resolved source, not the dispatch/workflow ref.
+for job in build-arm64 build-x86_64; do
+  cache_key="$(sed -n "/^  ${job}:/,/^  [a-z]/p" <<<"$release_text" | grep 'key: .*cargo-macos-v2-')"
+  assert_contains "$job resolved source cache identity" "$cache_key" '${{ needs.resolve.outputs.merge_sha }}'
+  assert_not_contains "$job event source cache identity" "$cache_key" '${{ github.sha }}'
+done
 assert_contains "release dependency cache architecture key" "$release_text" "runner.arch"
 assert_contains "release publication is non-preemptive" "$release_text" "group: release-product-main"
 assert_contains "release publication is serialized" "$release_text" "cancel-in-progress: false"

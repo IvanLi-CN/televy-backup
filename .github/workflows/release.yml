@@ -557,7 +557,7 @@ jobs:
             ~/Library/Caches/pip
             target
             crates/mtproto-helper/target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-${{ needs.resolve.outputs.merge_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-
       - name: Download immutable Snapshot Access helper source
@@ -651,7 +651,7 @@ jobs:
             ~/Library/Caches/pip
             target
             crates/mtproto-helper/target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-${{ github.sha }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-${{ needs.resolve.outputs.merge_sha }}
           restore-keys: |
             ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-
       - name: Download immutable Snapshot Access helper source

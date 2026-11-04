@@ -677,6 +677,30 @@ for job in x86_64 universal2; do
     exit 1
   fi
 done
+# Evaluate the actual job condition across source/prepared and dependency states.
+python3 - "$root_dir/.github/workflows/package-ci.yml" <<'PY_GUARDS'
+import itertools
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text().split("  universal2:", 1)[1]
+condition = text.split("    if: >-", 1)[1].split("    steps:", 1)[0].strip()
+for kind, arm, intel, classified, cancelled in itertools.product(
+    ("source", "prepared"), ("success", "failure", "skipped", "cancelled"),
+    ("success", "failure", "skipped", "cancelled"), (True, False), (True, False)
+):
+    expression = condition.replace("!cancelled()", str(not cancelled))
+    values = {"needs.classify.outputs.kind": kind,
+              "needs.classify.result": "success" if classified else "failure",
+              "needs.arm64.result": arm, "needs.x86_64.result": intel}
+    for name, value in values.items():
+        expression = expression.replace(name, repr(value))
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    actual = eval(re.sub(r"\s+", " ", expression), {"__builtins__": {}}, {})
+    expected = not cancelled and classified and (
+        kind == "prepared" or (arm == "success" and intel == "success"))
+    assert actual == expected, (kind, arm, intel, classified, cancelled, actual)
+PY_GUARDS
 [[ "$(grep -Fc 'timeout-minutes: 15' <<<"$package_workflow_text")" -eq 1 ]] || {
   echo "arm64 package CI job must have a 15-minute timeout" >&2
   exit 1
