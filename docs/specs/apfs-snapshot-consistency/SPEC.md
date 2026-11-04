@@ -225,6 +225,13 @@ and version. The result is a manual release artifact; tests MUST NOT modify TCC 
 
 ## Visual Evidence
 
+Stale-build inventory reconciliation sequence (synthetic light/dark previews):
+
+![Inventory upgrade sequence light](assets/mount-helper-inventory-upgrade-light.png)
+
+![Inventory upgrade sequence dark](assets/mount-helper-inventory-upgrade-dark.png)
+
+
 The Settings Snapshots screen is captured from the deterministic `SettingsUIDemo` source:
 
 - [Snapshot Access ready](assets/snapshot-access-ready.png)

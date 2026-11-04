@@ -159,6 +159,40 @@ enum BackupFailureHistoryPreview {
             else { exit(1) }
             try helperPNG.write(to: output.appendingPathComponent("mount-helper-update-\(name).png"))
 
+            let driftContent = HStack(alignment: .top, spacing: 24) {
+                ForEach([false, true], id: \.self) { updated in
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(updated ? "After verified helper update" : "Before helper update")
+                            .font(.system(size: 17, weight: .bold))
+                        SnapshotMountHelperStatusView(
+                            readiness: SnapshotMountHelperReadiness(
+                                reachable: true, daemonReady: updated,
+                                buildCommit: updated ? candidate : String(repeating: "b", count: 40),
+                                expectedBuildCommit: candidate, helperVersion: "0.5.7",
+                                activeMounts: 72, liveMounts: 0, pendingCleanup: 0,
+                                recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+                                inventoryDriftMounts: 72, pendingCleanupCandidates: 0
+                            ),
+                            path: "/Library/PrivilegedHelperTools/example.snapshot-mount-helper",
+                            version: "0.5.7", error: nil, activeMounts: 72,
+                            pendingCleanup: 0, pendingCleanupCandidates: 0, liveMounts: 0,
+                            recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+                            inventoryDriftMounts: 72, busy: false,
+                            install: {}, recover: {}, retryCleanup: {}, reconcileInventory: { _ in }
+                        )
+                    }.frame(width: 360, alignment: .topLeading)
+                }
+            }.padding(24)
+                .background(scheme == .dark ? Color(red: 0.16, green: 0.17, blue: 0.19) : Color.white)
+                .environment(\.colorScheme, scheme)
+            let driftRenderer = ImageRenderer(content: driftContent)
+            driftRenderer.scale = 2
+            guard let driftImage = driftRenderer.nsImage,
+                  let driftTiff = driftImage.tiffRepresentation,
+                  let driftBitmap = NSBitmapImageRep(data: driftTiff),
+                  let driftPNG = driftBitmap.representation(using: .png, properties: [:]) else { exit(1) }
+            try driftPNG.write(to: output.appendingPathComponent("mount-helper-inventory-upgrade-\(name).png"))
+
             let activeHelperContent = VStack(alignment: .leading, spacing: 12) {
                 Text("Settings → Snapshots").font(.system(size: 18, weight: .bold))
                 SnapshotMountHelperStatusView(
