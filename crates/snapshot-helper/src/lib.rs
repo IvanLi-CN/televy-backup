@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 pub mod mount_helper;
 
 pub const PROTOCOL_VERSION: u32 = 2;
-pub const COMPONENT_VERSION: &str = "0.2.0";
+pub const COMPONENT_VERSION: &str = "0.2.1";
 pub const ACCESS_BUNDLE_ID: &str = "com.ivan.televybackup.snapshot-access";
 pub const ACCESS_BUNDLE_RELATIVE_PATH: &str =
     "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app";

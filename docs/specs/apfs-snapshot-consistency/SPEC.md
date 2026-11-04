@@ -11,6 +11,17 @@ same managed-root, volume identity, and inventory checks before moving such a ro
 cleanup. Complete released tombstones MUST remain excluded from legacy migration; inventory
 drift still requires the separate explicit reconciliation operation.
 
+Historical `released` rows can retain the caller-owned
+`<data>/snapshot-access/mounts/<uid>/<lease>` layout. Explicit repair MAY retire only their
+journal identity when they are stale, owner-matching, have zero recorded mount device, and
+every recorded snapshot UUID is absent from the UUID-bound volume. It MUST validate the exact
+UID/lease suffix and no-follow ancestor metadata, reject matching snapshot sources and mounts
+at/below the root in a complete kernel mount-table observation, and repeat volume, inventory
+and mount observations. The guarded journal update MUST reject any non-released owner on the
+same volume and retain unrecorded snapshots as baseline. This branch MUST NOT unmount, delete
+snapshots or directories, or open source bytes. Unproven identity and concurrent changes leave
+the original row intact and blocking.
+
 TelevyBackup must read every file in a strict backup from one filesystem timepoint while live
 files continue changing. This topic owns the user-session Snapshot Access app, its IPC contract,
 the brokered core source, per-volume preferences, lifecycle cleanup, and macOS packaging. It does
@@ -83,6 +94,19 @@ material, backup indexes, or network data. Its root-owned journal records lease,
 volume/device identity, and the exact snapshot UUID manifest.
 
 Source directory validation MUST pin a no-follow directory metadata descriptor, derive its backing device from kernel filesystem information, and query `diskutil info -plist` by that validated device rather than by a nested source pathname. The filesystem type, device identifier and volume UUID MUST match the lease, and descriptor/path identity MUST remain unchanged through authorization and reservation. A successful, structurally valid empty snapshot inventory is a valid baseline; command failures or malformed inventories MUST remain blocking. Command failures MUST retain a fixed stage, command category, exit status and diagnostic channel. Diagnostic summaries MUST be sanitized before a 512-character limit is applied; raw command arguments, source paths, UUIDs, plist bodies and secrets MUST NOT enter IPC errors or logs. Acquire failures retain the external `snapshot.acquire_failed` code.
+
+Failed mounting MUST NOT make an owned snapshot permanently unreleasable merely because
+`mount_device` was never captured. A `prepared` or `cleanup_pending` row with zero device identity
+MAY use journal-bound cleanup only when its UID-derived managed root, snapshot name, exact manifests,
+volume binding and complete kernel mount table prove that no matching snapshot source or root/descendant
+is mounted. Root metadata checks remain no-follow and root-owned; the snapshot inventory must equal
+the reservation baseline plus recorded UUIDs, or already equal the baseline. Other non-released owners,
+unknown states, duplicate UUIDs, uncertain mounts and changed inventory remain blocked. This path never
+unmounts a filesystem without a recorded device. Exact zero-device pending rows are retry candidates,
+not proof of readiness. A released tombstone MAY account for extra UUIDs only when exactly one same-volume, same-UID
+unfinished owner records that exact set and an identical baseline, with a valid managed root,
+recognized state and validated journal manifests. The owning row MUST remain blocking. Successful
+cleanup restores the original inventory; unrelated or ambiguous drift is never silently ignored.
 
 ### REQ-APFS-004: Brokered strict reads
 
@@ -214,3 +238,18 @@ Build readiness and its explicit administrator action are rendered from the prod
 
 - [Mount helper update states, light](assets/mount-helper-update-light.png)
 - [Mount helper update states, dark](assets/mount-helper-update-dark.png)
+
+### Backup preparation and mounted-root cleanup
+
+- Snapshot acquisition uses a separate bounded long-operation deadline; status remains short-lived. A valid acquire response arriving after the status deadline must remain receivable.
+- Before acquiring a strict lease, the daemon holds its snapshot maintenance lock and may invoke the existing inventory-only reconciliation for verified released tombstones. Snapshot Access must be idle, all classification fields and counts must agree, and live, pending, stale, unknown or foreign-owned records continue to reject. Refresh remains read-only. Inventory reconciliation never deletes snapshots or opens source bytes.
+- A mounted snapshot root inherits source filesystem ownership and permissions. Cleanup validates protected managed ancestors and the recorded mount device rather than requiring the mounted filesystem root to have empty-mountpoint permissions. An unmounted managed directory remains root-owned, non-writable by other users, and no-follow.
+- Released-row audits validate the requested device/volume binding once per serialized audit and compare each row against that exact binding; they must not spawn a system query per historical row.
+
+### Snapshot Access recovery implementation identity
+
+Snapshot Access component 0.2.1 includes persisted cleanup retries and the current lease/path safety implementation. A reused older component must not be accepted as proof that current source behavior is installed. A component upgrade builds a fresh candidate artifact, verifies its metadata, binary identity and source commit, and requires a fresh FDA grant when macOS invalidates the prior code requirement. Subsequent product releases may reuse that verified artifact byte-for-byte under the existing component policy. Protocol 2 remains unchanged; 0.2.0 requires an explicit component upgrade.
+
+Snapshot Access releases a newly acquired lease when its response cannot be delivered to the caller; cleanup failures remain persisted for retry. The regression uses a disconnected Unix socket and verifies cleanup is scheduled only for the undelivered lease.
+
+Snapshot creation may coincide with Time Machine pruning older snapshots. RecordCleanup binds its sole new UUID to the exact name from the fixed tmutil creation receipt, keeps all currently existing non-owned snapshots as the retained baseline, and atomically aligns already-clean same-owner terminal baselines. Missing historical snapshots never become deletion targets. Ambiguous creation receipts or additional new UUIDs remain blocked. Explicit repair may audit inactive pending records together with released drift using the same age- and identity-gated root method; only a released-only residual partition may subsequently be reconciled. Live mounts and unknown or rejected identities remain blocked.

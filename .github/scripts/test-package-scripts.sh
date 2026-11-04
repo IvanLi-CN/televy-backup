@@ -766,7 +766,7 @@ assert payload["release_version"] == sys.argv[2]
 assert payload["signing"] == "ad-hoc"
 assert len(payload["assets"]) == 5
 assert payload["components"]["snapshot_access"]["source"] == "one-time-bootstrap-universal-build"
-assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.5.6", "0.5.5", "0.5.4", "0.5.3", "0.5.2", "0.5.1", "0.5.0", "0.9.8"]
+assert payload["components"]["snapshot_mount_helper"]["compatible_component_versions"] == ["0.5.7", "0.5.6", "0.5.5", "0.5.4", "0.5.3", "0.5.2", "0.5.1", "0.5.0", "0.9.8"]
 layout = payload["dmg_layout"]
 assert layout["builder"] == {"name": "dmgbuild", "version": "1.6.7"}
 assert layout["format"] == "UDZO"
@@ -863,7 +863,7 @@ access = lock["components"]["snapshot_access"]
 assert lock["signing"] == "ad-hoc"
 assert lock["bootstrap_release_tag"] == "v0.9.8-rc.1"
 assert access["bundle_id"] == "com.ivan.televybackup.snapshot-access"
-assert access["component_version"] == "0.2.0"
+assert access["component_version"] == "0.2.1"
 assert access["protocol_version"] == 2
 assert access["mount_helper_protocol_version"] == 4
 assert access["reuse_policy"] == "byte-identical-no-rebuild-no-lipo-no-resign"
@@ -878,7 +878,7 @@ assert mount_identity["artifact_sha256"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["cdhash"].startswith("BUILD-MANIFEST.json#/")
 assert mount_identity["designated_requirement"].startswith("BUILD-MANIFEST.json#/")
 mount = lock["components"]["snapshot_mount_helper"]
-assert mount["component_version"] == "0.5.6"
+assert mount["component_version"] == "0.5.7"
 assert mount["protocol_version"] == 4
 assert mount["identity_source"] == "bundled-release-artifact"
 assert mount["installed_observation"] == "manual-rc-acceptance-required"

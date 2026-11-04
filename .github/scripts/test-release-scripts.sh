@@ -371,7 +371,7 @@ identity = {
     "bundle_id": "com.ivan.televybackup.snapshot-access",
     "relative_path": "Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
     "binary": "Contents/MacOS/televybackup-snapshot-access",
-    "component_version": "0.2.0",
+    "component_version": "0.2.1",
     "protocol_version": 2,
     "mount_helper_protocol_version": 4,
     "reuse_policy": "byte-identical-no-rebuild-no-lipo-no-resign",
@@ -606,7 +606,7 @@ fi
                     digest.update(b"other\0")
         return digest.hexdigest()
 
-    helper_binary_bytes = b"#!/bin/sh\nprintf '%s\\n' '{\"bundleId\":\"com.ivan.televybackup.snapshot-access\",\"relativePath\":\"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app\",\"componentVersion\":\"0.2.0\",\"protocolVersion\":2,\"mountHelperProtocolVersion\":4}'\n"
+    helper_binary_bytes = b"#!/bin/sh\nprintf '%s\\n' '{\"bundleId\":\"com.ivan.televybackup.snapshot-access\",\"relativePath\":\"Contents/Library/LoginItems/TelevyBackup Snapshot Access.app\",\"componentVersion\":\"0.2.1\",\"protocolVersion\":2,\"mountHelperProtocolVersion\":4}'\n"
     helper_paths = []
     for number in (1, 2):
         tree = temp / f"TelevyBackup-1.0.0-rc.{number}.dmg.tree"

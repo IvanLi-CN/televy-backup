@@ -1242,7 +1242,7 @@ struct SettingsWindowRootView: View {
             snapshotStatus = SnapshotControlStatus(
                 consistencyMode: strict ? "strict" : "live",
                 serviceReachable: !accessMissing,
-                accessAppVersion: accessMissing ? nil : "0.2.0",
+                accessAppVersion: accessMissing ? nil : "0.2.1",
                 accessAppPath: accessMissing ? nil : "/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app",
                 managedBy: accessMissing ? nil : "launchctl-embedded",
                 migrationState: accessMissing ? nil : "ready",
@@ -1252,7 +1252,7 @@ struct SettingsWindowRootView: View {
                 mountHelperReachable: !accessMissing && !mountHelperMissing,
                 mountHelperReady: !accessMissing && !mountHelperMissing && !mountHelperOutdated,
                 mountHelperBuildCommit: mountHelperOutdated ? nil : expectedSnapshotBuildCommit,
-                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.6" : nil,
+                mountHelperVersion: !accessMissing && !mountHelperMissing ? "0.5.7" : nil,
                 mountHelperError: mountHelperMissing ? "Snapshot mount helper is not installed" : nil,
                 mountHelperActiveMounts: SettingsUIDemo.scene == "snapshots-inventory-drift" ? 1 : 0,
                 mountHelperPendingCleanup: 0,

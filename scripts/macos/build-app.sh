@@ -255,7 +255,7 @@ else
   <key>CFBundleShortVersionString</key><string>$short_version</string>
   <key>TelevyBackupReleaseVersion</key><string>$release_version</string>
   <key>TelevyBackupSourceCommit</key><string>$source_commit</string>
-  <key>TelevyBackupComponentVersion</key><string>0.2.0</string>
+  <key>TelevyBackupComponentVersion</key><string>0.2.1</string>
   <key>TelevyBackupProtocolVersion</key><integer>2</integer>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>televybackup-snapshot-access</string>

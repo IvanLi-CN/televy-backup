@@ -116,7 +116,7 @@ enum BackupFailureHistoryPreview {
                                 reachable: state != "missing", daemonReady: state == "current" || state == "recoverable" || state == "pending" || state == "legacy-repair" || state == "inventory-drift",
                                 buildCommit: state == "current" || state == "recoverable" || state == "pending" || state == "legacy-repair" || state == "inventory-drift" ? candidate : nil,
                                 expectedBuildCommit: candidate,
-                                helperVersion: state == "missing" ? nil : "0.5.6",
+                                helperVersion: state == "missing" ? nil : "0.5.7",
                                 activeMounts: state == "pending" || state == "recoverable" || state == "legacy-repair" || state == "inventory-drift" ? (state == "legacy-repair" ? 2 : 1) : 0,
                                 liveMounts: 0,
                                 pendingCleanup: state == "pending" ? 1 : 0,
@@ -126,7 +126,7 @@ enum BackupFailureHistoryPreview {
                                 pendingCleanupCandidates: state == "pending" ? 1 : 0
                             ),
                             path: "/Library/PrivilegedHelperTools/com.example.snapshot-mount-helper",
-                            version: state == "missing" ? nil : "0.5.6",
+                            version: state == "missing" ? nil : "0.5.7",
                             error: state == "missing" ? "The mount helper is not installed." : nil,
                             activeMounts: state == "pending" || state == "recoverable" || state == "legacy-repair" || state == "inventory-drift" ? (state == "legacy-repair" ? 2 : 1) : 0,
                             pendingCleanup: state == "pending" ? 1 : 0,

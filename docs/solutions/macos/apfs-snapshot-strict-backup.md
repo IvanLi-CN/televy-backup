@@ -307,6 +307,29 @@ duplicate current inventory, including the ambiguous `[A, A]` inventory with rec
 Malformed or duplicate reservation baselines leave the journal row unchanged and blocking;
 the hosted daemon-control fixture verifies this preservation through the production repair path.
 
+Historical released rows may use a caller-owned data-directory root, rather than the newer
+root-owned managed base. A fixture containing only new-style roots cannot prove recovery of
+these rows. Model both historical release and development layouts, absent snapshots, and an
+existing user-owned directory. Recovery can retire only obsolete journal identity after repeated
+volume/inventory and complete kernel mount-table checks; it must preserve that directory and
+all unrecorded snapshots. A present mount/snapshot, unsafe metadata, foreign/live owner, corrupt
+baseline or observation race must keep the row intact. An installed read-only predicate audit
+proves eligibility, not completed repair or a successful backup.
+
+## Mount denial and cleanup recovery
+
+A failed mount can leave a journaled snapshot without a captured mount device. Ordinary cleanup
+must distinguish an unmounted prepared root from a mounted root with unknown identity. Verify the
+UID-derived managed path, no-follow root metadata, complete kernel mount table and volume binding;
+then reuse exact UUID deletion with original baseline checks. Explicit Release retries must use
+the same proof after permissions are repaired. Removing the owned snapshot restores the existing
+tombstones' baseline; suppressing all inventory drift would instead hide unowned changes.
+
+An ad-hoc helper replacement can invalidate the TCC code requirement even if the settings entry
+remains visible. A historical mount denial is not proof that a later toggle failed: correlate the
+permission modification with the next request, which may be rejected before mounting due to the
+retained journal. Synthetic cleanup tests cannot establish an installed helper's effective FDA grant.
+
 ## References
 
 - [APFS snapshot consistency specification](../../specs/apfs-snapshot-consistency/SPEC.md)
@@ -315,3 +338,13 @@ the hosted daemon-control fixture verifies this preservation through the product
 - [Brokered read root](../../../crates/snapshot-helper/src/main.rs)
 - [Root mount command boundary](../../../crates/snapshot-helper/src/mount_helper.rs)
 - [Privacy-preserving integration verifier](../../../scripts/macos/verify-apfs-snapshot-integration.sh)
+
+### Preparation deadlines and cleanup metadata
+
+Acquire performs filesystem queries, snapshot creation and mounting, so it must not share the 30-second status deadline. The daemon uses a bounded acquisition deadline and keeps the maintenance lock through inventory-only reconciliation and acquire. The existing explicit reconciliation implementation is shared with backup preparation; it accepts only released tombstones with no active or unresolved leases. No cleanup is triggered by status refresh.
+
+During Release, mounted-root metadata belongs to the snapshot filesystem. A group-writable source volume root is not evidence that the protected mountpoint was writable before mounting. Protected ancestors, no-follow checks and the journaled mounted device remain mandatory. Once unmounted, ordinary managed-directory ownership and mode checks apply again. Regression coverage includes source mode 0775, substituted devices, unmounted writable directories, and an acquire reply beyond the status deadline.
+
+Local runtime evidence is private and must not be copied into repository fixtures. A passing fixture does not prove a successful installed backup; release requires current-candidate backup completion and repeat cleanup verification.
+
+Snapshot creation may coincide with Time Machine pruning older snapshots. RecordCleanup binds its sole new UUID to the exact name from the fixed tmutil creation receipt, keeps all currently existing non-owned snapshots as the retained baseline, and atomically aligns already-clean same-owner terminal baselines. Missing historical snapshots never become deletion targets. Ambiguous creation receipts or additional new UUIDs remain blocked. Explicit repair may audit inactive pending records together with released drift using the same age- and identity-gated root method; only a released-only residual partition may subsequently be reconciled. Live mounts and unknown or rejected identities remain blocked.
