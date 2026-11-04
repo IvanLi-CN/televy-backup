@@ -322,6 +322,14 @@ bin_menu_bar_icon="$out_dir/menu-bar-status-item-icon-tests"
 
 "$root_dir/scripts/macos/ui-store-static-check.sh"
 
+bin_snapshot_presentation="$out_dir/snapshot-maintenance-presentation-tests"
+"$swiftc" -sdk "$sdk_path" -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI -framework AppKit \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/SnapshotMaintenancePresentationTests.swift" \
+  -o "$bin_snapshot_presentation"
+"$bin_snapshot_presentation"
+
 bin_popover="$out_dir/popover-layout-size-tests"
 "$swiftc" \
   -sdk "$sdk_path" \

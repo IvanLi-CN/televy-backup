@@ -848,12 +848,12 @@ struct SettingsWindowRootView: View {
     @State private var snapshotError: String?
     @State private var snapshotBusy = false
     private var snapshotRecoveryToken: Int {
-        get { model.snapshotMountObservationGeneration }
-        nonmutating set { model.snapshotMountObservationGeneration = newValue }
+        get { settingsStore.snapshotMountObservationGeneration }
+        nonmutating set { settingsStore.snapshotMountObservationGeneration = newValue }
     }
     private var snapshotOperation: SnapshotMountOperationTracker {
-        get { model.snapshotMountOperation }
-        nonmutating set { model.snapshotMountOperation = newValue }
+        get { settingsStore.snapshotMountOperation }
+        nonmutating set { settingsStore.snapshotMountOperation = newValue }
     }
     @State private var snapshotRefresh = SnapshotStatusRefreshTracker()
     @State private var snapshotRefreshError: String?
@@ -1270,6 +1270,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func refreshSnapshotStatus(preservingError: String? = nil, background: Bool = false) {
+        if let preservingError { snapshotError = preservingError }
         if snapshotOperation.isActive && !background {
             resumeSnapshotMountOperation()
             return
@@ -1305,7 +1306,6 @@ struct SettingsWindowRootView: View {
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
             )
             snapshotBusy = false
-            snapshotError = preservingError
             return
         }
         let request = snapshotRefresh.begin()
@@ -1315,8 +1315,6 @@ struct SettingsWindowRootView: View {
             if !background { snapshotBusy = false }
             if let status { snapshotStatus = status }
             snapshotRefreshError = error
-            if !background { snapshotError = preservingError }
-
         }
     }
 

@@ -39,5 +39,9 @@ assert f.index('snapshotRefresh.complete(') < f.index('if let status { snapshotS
 assert 'snapshotRecoveryPollLimit' not in s, 'Fixed poll counts must not declare daemon work failed'
 assert 'SnapshotMountOperationProgressView(' in s
 assert 'refreshSnapshotStatus(background: true)' in s
+assert 'get { settingsStore.snapshotMountOperation }' in s
+assert 'snapshotError = preservingError' not in f.replace('if let preservingError { snapshotError = preservingError }', '')
+assert f.index('if let preservingError { snapshotError = preservingError }') < f.index('snapshotRefresh.begin()')
 print('GREEN: Settings applies the tested latest-response guard and keeps polling daemon work')
 PY
+bash "$root_dir/scripts/macos/ui-store-static-check.sh"
