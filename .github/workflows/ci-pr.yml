@@ -11,11 +11,6 @@ on:
         required: true
         type: string
 
-      performance_probe:
-        description: Run five paired Swift build comparisons instead of regular PR checks
-        type: boolean
-        default: false
-
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -31,7 +26,6 @@ env:
 
 jobs:
   classify:
-    if: inputs.performance_probe != true
     name: Classify CI preparation
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -400,29 +394,3 @@ jobs:
       - name: Verify prepared release source
         if: needs.classify.outputs.kind == 'prepared'
         run: python3 .github/scripts/release_chain.py verify-prepared --commit HEAD
-
-  swift-performance-probe:
-    if: github.event_name == 'workflow_dispatch' && inputs.performance_probe == true
-    name: Swift performance sample ${{ matrix.sample }}
-    runs-on: macos-latest
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        sample: [1, 2, 3, 4, 5]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Record platform and compare equivalent Swift tests
-        run: |
-          swiftc --version
-          xcodebuild -version
-          xcrun --sdk macosx --show-sdk-version
-          python3 scripts/macos/benchmark-swift-tests.py --sample '${{ matrix.sample }}' --output '${{ runner.temp }}/swift-comparison'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: swift-performance-${{ matrix.sample }}
-          path: ${{ runner.temp }}/swift-comparison
-          retention-days: 7
-          if-no-files-found: error

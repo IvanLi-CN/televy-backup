@@ -1,0 +1,43 @@
+name: CI performance probes
+
+# Editing this diagnostic workflow opts a PR into the five-pair experiment.
+# Routine source PRs incur no benchmark jobs; manual probes are independent of
+# required CI and never emit a skipped check with a required context's name.
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/ci-performance.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift-performance-probe:
+    name: Swift performance sample ${{ matrix.sample }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        sample: [1, 2, 3, 4, 5]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record platform and compare equivalent Swift tests
+        run: |
+          swiftc --version
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          python3 scripts/macos/benchmark-swift-tests.py --sample '${{ matrix.sample }}' --output '${{ runner.temp }}/swift-comparison'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: swift-performance-${{ matrix.sample }}
+          path: ${{ runner.temp }}/swift-comparison
+          retention-days: 7
+          if-no-files-found: error

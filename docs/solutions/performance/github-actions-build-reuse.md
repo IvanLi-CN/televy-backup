@@ -54,7 +54,8 @@ per run class and record source SHA, platform, workload, queue/pending time,
 step durations, runner total and cold/warm/partial cache state separately.
 Do not combine prepared identity-only runs or skipped releases with full builds.
 
-`CI (PR)` exposes an explicit `performance_probe` dispatch input. It runs five
+`CI performance probes` is a separate diagnostic workflow. Editing that workflow
+opts a PR into the experiment; it also accepts manual dispatch. It runs five
 paired Swift comparisons, at most two simultaneously, alternating mode order.
 Each mode has a fresh output directory and must produce the same success
 markers. Artifacts contain full logs and timing JSON. SDK module caches are
