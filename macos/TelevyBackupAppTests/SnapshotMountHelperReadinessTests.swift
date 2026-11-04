@@ -198,6 +198,19 @@ enum SnapshotMountHelperReadinessTests {
         )
         expectReadiness(!inconsistentAggregate.canUpdate, "legacy aggregate blockers must remain mutation blockers")
         expectReadiness(!inconsistentAggregate.canRecoverStaleMounts, "an inconsistent aggregate must disable recovery")
+        let staleDrift = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
+            activeMounts: 72, liveMounts: 0, pendingCleanup: 0,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+            inventoryDriftMounts: 72, pendingCleanupCandidates: 0
+        )
+        expectReadiness(staleDrift.canUpdate, "idle stale build with drift-only rows must allow guarded Update")
+        expectReadiness(!staleDrift.canReconcileInventory, "reconcile requires installed candidate identity")
+        expectReadiness(!staleDrift.isOperational, "Update eligibility must not serve leases")
+        expectReadiness(staleDrift.visibleUpdateBlockReason == nil, "actionable upgrade must not repeat a generic waiting warning")
+        expectReadiness(staleDrift.updateExplanation?.contains("Update the helper first") == true, "show recovery order")
+
         let inventoryDrift = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",

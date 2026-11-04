@@ -119,7 +119,7 @@ struct SnapshotMountHelperStatusView: View {
                     .accessibilityIdentifier("snapshot-mount-helper-repair-legacy")
                     .disabled(busy || !readiness.canRepairLegacyRecords)
             }
-            if let inventoryDriftMounts, inventoryDriftMounts > 0 {
+            if let inventoryDriftMounts, inventoryDriftMounts > 0, !readiness.isInventoryDriftUpgradeSafe {
                 Text("\(inventoryDriftMounts) released snapshot inventory record(s) changed outside the recorded baseline. Reconciliation updates only the journal baseline after identity checks; it does not delete snapshots.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
@@ -137,6 +137,11 @@ struct SnapshotMountHelperStatusView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if readiness.isInventoryDriftUpgradeSafe {
+                if let explanation = readiness.updateExplanation {
+                    Text(explanation).font(.system(size: 11)).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             } else if let updateBlockReason {
                 Text(updateBlockReason)
                     .font(.system(size: 11))

@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "kind": "version-impact-record",
+  "change": {
+    "description": "Unblock stale-build helper upgrades when all blockers are released inventory-drift tombstones.",
+    "release_unit_description": "CLI installer admission and macOS helper maintenance actions; root helper and Access code unchanged.",
+    "affected_contracts": [
+      "public-api",
+      "persistent-state"
+    ]
+  },
+  "classification": {
+    "allowed_impacts": [
+      "patch",
+      "minor",
+      "major"
+    ],
+    "planned": {
+      "impact": "patch",
+      "reasoning": "The CLI adds a guarded replacement admission case without changing IPC, component versions, journal schema or reconciliation writes. Existing released tombstones remain readable and are preserved during replacement; foreign, malformed and mixed records remain blocked.",
+      "evidence": [
+        "snapshot_mount_service::tests::stale_inventory_drift_only_enters_guarded_upgrade",
+        "snapshot_mount_service::tests::inventory_drift_upgrade_rejects_unsafe_partitions",
+        "SnapshotMountHelperReadinessTests stale drift upgrade cases"
+      ]
+    },
+    "current": {
+      "impact": "patch",
+      "reasoning": "The CLI adds a guarded replacement admission case without changing IPC, component versions, journal schema or reconciliation writes. Existing released tombstones remain readable and are preserved during replacement; foreign, malformed and mixed records remain blocked.",
+      "evidence": [
+        "snapshot_mount_service::tests::stale_inventory_drift_only_enters_guarded_upgrade",
+        "snapshot_mount_service::tests::inventory_drift_upgrade_rejects_unsafe_partitions",
+        "SnapshotMountHelperReadinessTests stale drift upgrade cases"
+      ]
+    },
+    "verified": {
+      "impact": "patch",
+      "reasoning": "The CLI adds a guarded replacement admission case without changing IPC, component versions, journal schema or reconciliation writes. Existing released tombstones remain readable and are preserved during replacement; foreign, malformed and mixed records remain blocked.",
+      "evidence": [
+        "snapshot_mount_service::tests::stale_inventory_drift_only_enters_guarded_upgrade",
+        "snapshot_mount_service::tests::inventory_drift_upgrade_rejects_unsafe_partitions",
+        "SnapshotMountHelperReadinessTests stale drift upgrade cases"
+      ]
+    }
+  },
+  "compatibility_evidence": {
+    "public_api": {
+      "change": "compatible",
+      "supported_consumer_range": "Existing v4 helper and v2 Access IPC consumers.",
+      "evidence": [
+        "No wire method, response schema or component version changed."
+      ]
+    },
+    "persistent_state": {
+      "applicable": true,
+      "state_description": "Existing released tombstones; replacement performs no journal mutation.",
+      "source_program_compatibility_range": "Supported 0.5.x helpers reading unchanged journal schema.",
+      "evidence": [
+        "No new durable fields or states; existing journal-bound Release remains the only inventory re-baselining operation."
+      ]
+    }
+  },
+  "release_unit": {
+    "member_change_records": [
+      "guarded-inventory-upgrade-cli",
+      "macos-inventory-upgrade-action"
+    ],
+    "maximum_verified_impact": "patch",
+    "calculation_evidence": [
+      "The CLI adds a guarded replacement admission case without changing IPC, component versions, journal schema or reconciliation writes. Existing released tombstones remain readable and are preserved during replacement; foreign, malformed and mixed records remain blocked."
+    ]
+  }
+}

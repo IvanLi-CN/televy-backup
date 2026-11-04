@@ -249,12 +249,12 @@ jobs:
             git worktree remove --force "${trusted_root}" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
-          gh release download v0.9.9-rc.122 --repo "${GITHUB_REPOSITORY}" \
-            --pattern TelevyBackup-0.9.9-rc.122.dmg --pattern BUILD-MANIFEST.json --pattern SHA256SUMS \
+          gh release download v0.9.9-rc.142 --repo "${GITHUB_REPOSITORY}" \
+            --pattern TelevyBackup-0.9.9-rc.142.dmg --pattern BUILD-MANIFEST.json --pattern SHA256SUMS \
             --dir "${fixture}/download"
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v0.9.9-rc.122" \
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v0.9.9-rc.142" \
             > "${fixture}/release.json"
-          python3 - "${fixture}/release.json" "${fixture}/download" "v0.9.9-rc.122" <<'PY'
+          python3 - "${fixture}/release.json" "${fixture}/download" "v0.9.9-rc.142" <<'PY'
           import hashlib
           import json
           from pathlib import Path
@@ -274,7 +274,7 @@ jobs:
               if asset["name"] in by_name:
                   raise SystemExit(f"GitHub Release contains duplicate asset: {asset['name']}")
               by_name[asset["name"]] = asset
-          required = ["BUILD-MANIFEST.json", "SHA256SUMS", "TelevyBackup-0.9.9-rc.122.dmg"]
+          required = ["BUILD-MANIFEST.json", "SHA256SUMS", "TelevyBackup-0.9.9-rc.142.dmg"]
           for name in required:
               asset = by_name.get(name)
               path = Path(asset_dir) / name
@@ -288,16 +288,16 @@ jobs:
                   raise SystemExit(f"GitHub Release asset digest does not match downloaded bytes: {name}")
           PY
           git fetch --force origin \
-            refs/tags/v0.9.9-rc.122:refs/tags/v0.9.9-rc.122
+            refs/tags/v0.9.9-rc.142:refs/tags/v0.9.9-rc.142
           python3 "${trusted_root}/.github/scripts/release_chain.py" verify-tag-provenance \
-            --tag v0.9.9-rc.122
-          source_tag_commit="$(git rev-list -n 1 v0.9.9-rc.122^{commit})"
+            --tag v0.9.9-rc.142
+          source_tag_commit="$(git rev-list -n 1 v0.9.9-rc.142^{commit})"
           python3 "${trusted_root}/.github/scripts/release_helper.py" verify-assets \
             --asset-dir "${fixture}/download" \
             --lock "${trusted_root}/packaging/macos/snapshot-components.lock.json" \
-            --source-tag v0.9.9-rc.122 \
+            --source-tag v0.9.9-rc.142 \
             --expected-source-commit "${source_tag_commit}"
-          hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" "${fixture}/download/TelevyBackup-0.9.9-rc.122.dmg"
+          hdiutil attach -readonly -nobrowse -mountpoint "${fixture}/mount" "${fixture}/download/TelevyBackup-0.9.9-rc.142.dmg"
           cp -R "${fixture}/mount/TelevyBackup.app" "${fixture}/TelevyBackup.app"
           cp target/debug/televybackup "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-cli"
           cp target/debug/televybackup-snapshot-mount-helper "${fixture}/TelevyBackup.app/Contents/MacOS/televybackup-snapshot-mount-helper"
@@ -317,6 +317,9 @@ jobs:
             --app "${fixture}/TelevyBackup.app" --require-readiness --legacy-build-only
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --stale-partial-classification
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness \
+            --expect-build-commit "${GITHUB_SHA}" --stale-inventory-drift
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --uninstall
 

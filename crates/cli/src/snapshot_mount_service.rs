@@ -964,6 +964,7 @@ enum BusyCheck {
     Clear,
     LegacyUpgrade,
     PendingCleanupUpgrade,
+    InventoryDriftUpgrade,
     RecoveryRequired,
 }
 
@@ -1068,6 +1069,38 @@ fn classify_busy_status(
             ),
         ));
     }
+    let inventory_only_upgrade = stale_partial_component
+        && status.helper_version == mount_helper::MOUNT_HELPER_WIRE_VERSION
+        && status.build_commit.as_deref().is_some_and(|commit| {
+            commit != env!("TELEVYBACKUP_BUILD_COMMIT")
+                && commit.len() == 40
+                && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        && status.active_mounts > 0
+        && status.pending_cleanup == Some(0)
+        && status.live_mounts == Some(0)
+        && status.recoverable_stale_mounts == Some(0)
+        && status.unknown_blocking_mounts == Some(0)
+        && status.inventory_drift_mounts == Some(status.active_mounts)
+        && status.pending_cleanup_leases.is_empty()
+        && status.recovery_leases.is_empty()
+        && status.inventory_drift_leases.len() == status.active_mounts as usize
+        && status.inventory_drift_leases.iter().all(|lease| {
+            lease.state == "released_inventory_drift"
+                && uuid::Uuid::parse_str(&lease.lease_id).is_ok()
+        })
+        && status
+            .inventory_drift_leases
+            .iter()
+            .filter_map(|lease| uuid::Uuid::parse_str(&lease.lease_id).ok())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == status.inventory_drift_leases.len();
+    if inventory_only_upgrade {
+        // Replacement preserves the journal. The current helper must subsequently repeat
+        // identity/inventory validation through explicit reconciliation before serving leases.
+        return Ok(BusyCheck::InventoryDriftUpgrade);
+    }
     let legacy_pending_component = status.component_version.as_deref().is_some_and(|version| {
         mount_helper::CLEANUP_COMPATIBLE_ROOT_MOUNT_HELPER_VERSIONS.contains(&version)
     });
@@ -1119,7 +1152,9 @@ fn classify_busy_status(
 fn ensure_uninstall_safe(check: BusyCheck) -> Result<(), CliError> {
     match check {
         BusyCheck::Clear => Ok(()),
-        BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => Err(CliError::retryable(
+        BusyCheck::LegacyUpgrade
+        | BusyCheck::PendingCleanupUpgrade
+        | BusyCheck::InventoryDriftUpgrade => Err(CliError::retryable(
             "snapshot_mount_helper.busy",
             "cannot uninstall the snapshot mount helper while snapshot mount records remain; update or reconcile the helper first",
         )),
@@ -1361,7 +1396,9 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
     let mut replace_legacy_helper = false;
     match busy {
         BusyCheck::Clear => {}
-        BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
+        BusyCheck::LegacyUpgrade
+        | BusyCheck::PendingCleanupUpgrade
+        | BusyCheck::InventoryDriftUpgrade => {
             replace_legacy_helper = true;
         }
         BusyCheck::RecoveryRequired => {
@@ -1375,7 +1412,9 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
             })?;
             match check_if_busy("install or update the snapshot mount helper")? {
                 BusyCheck::Clear => {}
-                BusyCheck::LegacyUpgrade | BusyCheck::PendingCleanupUpgrade => {
+                BusyCheck::LegacyUpgrade
+                | BusyCheck::PendingCleanupUpgrade
+                | BusyCheck::InventoryDriftUpgrade => {
                     replace_legacy_helper = true;
                 }
                 BusyCheck::RecoveryRequired => {
@@ -2501,6 +2540,76 @@ mod tests {
                     Ok(BusyCheck::LegacyUpgrade)
                 ),
                 "{component_version} with a recovery candidate must remain blocked"
+            );
+        }
+    }
+
+    fn stale_inventory_drift_status() -> MountStatusResult {
+        MountStatusResult {
+            helper_version: mount_helper::MOUNT_HELPER_WIRE_VERSION.into(),
+            component_version: Some(mount_helper::ROOT_MOUNT_HELPER_VERSION.into()),
+            build_commit: Some("b".repeat(40)),
+            active_mounts: 72,
+            pending_cleanup: Some(0),
+            live_mounts: Some(0),
+            recoverable_stale_mounts: Some(0),
+            unknown_blocking_mounts: Some(0),
+            inventory_drift_mounts: Some(72),
+            inventory_drift_leases: (0..72)
+                .map(|_| televybackup_snapshot_access::MountRecoveryLease {
+                    lease_id: uuid::Uuid::new_v4().to_string(),
+                    state: "released_inventory_drift".into(),
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stale_inventory_drift_only_enters_guarded_upgrade() {
+        assert_eq!(
+            classify_busy_status("install or update", &stale_inventory_drift_status()).unwrap(),
+            BusyCheck::InventoryDriftUpgrade
+        );
+        assert!(ensure_uninstall_safe(BusyCheck::InventoryDriftUpgrade).is_err());
+    }
+
+    #[test]
+    fn inventory_drift_upgrade_rejects_unsafe_partitions() {
+        for case in 0..14 {
+            let mut status = stale_inventory_drift_status();
+            match case {
+                0 => status.live_mounts = Some(1),
+                1 => status.pending_cleanup = Some(1),
+                2 => status.unknown_blocking_mounts = Some(1),
+                3 => status.recoverable_stale_mounts = Some(1),
+                4 => status.inventory_drift_mounts = None,
+                5 => {
+                    status.inventory_drift_leases.pop();
+                }
+                6 => status.inventory_drift_leases[0].state = "active".into(),
+                7 => {
+                    status.inventory_drift_leases[0].lease_id =
+                        status.inventory_drift_leases[1].lease_id.clone()
+                }
+                8 => status.inventory_drift_leases[0].lease_id = "invalid".into(),
+                9 => status.build_commit = Some(env!("TELEVYBACKUP_BUILD_COMMIT").into()),
+                10 => {
+                    status.inventory_drift_leases[0].lease_id =
+                        "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".into();
+                    status.inventory_drift_leases[1].lease_id =
+                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into();
+                }
+                11 => status.build_commit = None,
+                12 => status.inventory_drift_leases[0].state = "released".into(),
+                _ => status.component_version = Some("unknown".into()),
+            }
+            assert!(
+                !matches!(
+                    classify_busy_status("update", &status),
+                    Ok(BusyCheck::InventoryDriftUpgrade)
+                ),
+                "unsafe case {case}"
             );
         }
     }

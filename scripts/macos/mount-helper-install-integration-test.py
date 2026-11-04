@@ -30,12 +30,12 @@ def run(*args, check=True):
     return subprocess.run(args, check=check, capture_output=True, text=True, timeout=30)
 
 
-def request(path, version):
+def request(path, version, method="status", **params):
     request_id = str(uuid.uuid4())
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as stream:
-        stream.settimeout(5)
+        stream.settimeout(30)
         stream.connect(str(path))
-        stream.sendall(json.dumps({"version": version, "request_id": request_id, "method": "status"}).encode() + b"\n")
+        stream.sendall(json.dumps({"version": version, "request_id": request_id, "method": method, **params}).encode() + b"\n")
         reply = json.loads(stream.makefile("rb").readline())
     assert reply["request_id"] == request_id, "IPC response identity mismatch"
     return reply
@@ -229,9 +229,10 @@ def main():
         action="store_true",
         help="install the candidate, then verify the privileged uninstall transaction removes its assets",
     )
+    parser.add_argument("--stale-inventory-drift", action="store_true")
     args = parser.parse_args()
     legacy_fixture = args.legacy_blocking or args.legacy_build_only or args.stale_partial_classification
-    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.bootstrap_failure_rollback, args.orphaned_backup_recovery, args.uninstall)) <= 1, "fixture modes are mutually exclusive"
+    assert sum((args.legacy_blocking, args.legacy_build_only, args.stale_partial_classification, args.stale_inventory_drift, args.bootstrap_failure_rollback, args.orphaned_backup_recovery, args.uninstall)) <= 1, "fixture modes are mutually exclusive"
     # Never run this integration test on an owner's machine.
     assert os.environ.get("GITHUB_ACTIONS") == "true", "GitHub Actions runner required"
     assert sys.platform == "darwin" and os.geteuid() != 0, "macOS user session required"
@@ -323,6 +324,17 @@ while True:
             .replace('"helper_version":"0.9.8"', replacement))
     if legacy_fixture:
         old_server.write_text(old_server.read_text().replace('"active_mounts":0', '"active_mounts":1'))
+    drift_leases = [str(uuid.uuid4()) for _ in range(72)] if args.stale_inventory_drift else []
+    if args.stale_inventory_drift:
+        assert args.expect_build_commit and args.require_readiness
+        old = {"helper_version": "0.5.0", "component_version": "0.5.7", "build_commit": "0" * 40,
+               "active_mounts": 72, "pending_cleanup": 0, "live_mounts": 0,
+               "recoverable_stale_mounts": 0, "unknown_blocking_mounts": 0,
+               "inventory_drift_mounts": 72, "pending_cleanup_leases": [], "recovery_leases": [],
+               "inventory_drift_leases": [{"lease_id": lease, "state": "released_inventory_drift"} for lease in drift_leases]}
+        old_server.write_text(old_server.read_text().replace('"active_mounts":0', '"active_mounts":72')
+            .replace('connection.sendall(json.dumps(response)',
+                     "response['result'].update(" + repr(old) + ")\n        connection.sendall(json.dumps(response)"))
     seed_plist = fixture / "old.plist"
     seed_plist.write_bytes(plistlib.dumps({
         "Label": LABEL,
@@ -443,6 +455,23 @@ while True:
                 "SEEDED: one age-gated legacy reservation row before candidate helper startup",
                 flush=True,
             )
+        if args.stale_inventory_drift:
+            seed_legacy_stale_journal(os.getuid())
+            # Queries only the disposable runner's APFS identity; no snapshot creation or FDA.
+            info = plistlib.loads(run("/usr/sbin/diskutil", "info", "-plist", "/").stdout.encode())
+            assert info["FilesystemType"].lower() == "apfs"
+            volume, device = info["VolumeUUID"], info["DeviceIdentifier"]
+            baseline = json.dumps([{"device_identifier": device, "uuid": str(uuid.uuid4())}])
+            seed = """import json, sqlite3, sys
+with sqlite3.connect(sys.argv[1]) as c:
+    c.execute('DELETE FROM mounts')
+    for lease in json.loads(sys.argv[2]):
+        c.execute("INSERT INTO mounts (lease_id,uid,volume_uuid,device_identifier,snapshot_name,mount_root,snapshot_manifest,reservation_manifest,reservation_manifest_valid,state,created_at,last_renewed_at) VALUES (?,?,?,?, '', '', '[]', ?,1,'released',datetime('now','-1 day'),datetime('now','-1 day'))", (lease,int(sys.argv[3]),sys.argv[4],sys.argv[5],sys.argv[6]))
+"""
+            run("sudo", "-n", "/usr/bin/python3", "-c", seed, str(JOURNAL / "journal.sqlite"),
+                json.dumps(drift_leases), str(os.getuid()), volume, device, baseline)
+            seed_journal_sentinel()
+            print("REPRODUCED: stale helper reports 72 released inventory-drift rows", flush=True)
         # Same privileged CLI entrypoint as the GUI's password-authorized command.
         if args.bootstrap_failure_rollback:
             assert args.require_readiness, "bootstrap failure fixture requires the candidate readiness check"
@@ -552,6 +581,25 @@ with sqlite3.connect(journal / "journal.sqlite") as connection:
             assert installation["buildCommit"] == args.expect_build_commit
             assert installation["binarySha256"] == digest == installed_digest
             print("PASS: installed file hash and running IPC build match the candidate", flush=True)
+        if args.stale_inventory_drift:
+            candidate_status = direct["result"]
+            assert candidate_status["inventory_drift_mounts"] == 72
+            assert candidate_status["live_mounts"] == candidate_status["pending_cleanup"] == candidate_status["unknown_blocking_mounts"] == 0
+            assert {row["lease_id"] for row in candidate_status["inventory_drift_leases"]} == set(drift_leases)
+            assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
+            preserved = run("sudo", "-n", "/usr/bin/python3", "-c",
+                "import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute(\"SELECT count(*) FROM mounts WHERE uid=? AND volume_uuid=? AND device_identifier=? AND state='released' AND mount_root='' AND mount_device=0 AND snapshot_manifest='[]' AND reservation_manifest=? AND reservation_manifest_valid=1\",(int(sys.argv[2]),sys.argv[3],sys.argv[4],sys.argv[5])).fetchone()[0])",
+                str(JOURNAL / "journal.sqlite"), str(os.getuid()), volume, device, baseline)
+            assert preserved.stdout.strip() == "72", "replacement changed journal ownership, manifests or state"
+            # Reuse the production journal-bound Release, authenticated as this non-root peer.
+            for lease in drift_leases:
+                reply = request(MOUNT_SOCKET, expected_protocol, "release", uid=os.getuid(),
+                                lease_id=lease, reconcile_inventory=True)
+                assert reply["ok"] and reply["result"]["cleanup_state"] == "released", reply.get("code")
+            final = request(MOUNT_SOCKET, expected_protocol)["result"]
+            assert final["active_mounts"] == final["inventory_drift_mounts"] == 0
+            assert read_journal_sentinel() == JOURNAL_SENTINEL_VALUE
+            print("PASS: real CLI upgraded stale helper without losing 72 tombstones; production Release reconciled all and blockers reached zero", flush=True)
         if args.uninstall:
             removed = run(
                 "sudo", "-n", str(cli), "--json", "--config-dir", str(config), "--data-dir", str(data),
