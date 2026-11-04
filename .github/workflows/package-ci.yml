@@ -147,7 +147,7 @@ jobs:
   x86_64:
     needs: classify
     if: >-
-      always() &&
+      !cancelled() &&
       needs.classify.result == 'success' &&
       (needs.classify.outputs.kind == 'prepared' || needs.classify.outputs.kind == 'source')
     name: x86_64 native package
@@ -242,7 +242,8 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     needs: [classify, arm64, x86_64]
-    if: always() && needs.classify.result == 'success'
+    if: >-
+      !cancelled() && needs.classify.result == 'success'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:

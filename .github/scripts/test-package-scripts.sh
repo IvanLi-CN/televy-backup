@@ -664,6 +664,19 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "package matrix jobs must validate their persisted DMG event streams" >&2
   exit 1
 }
+# Job-level always() survives workflow cancellation. Keep long native/assembly
+# consumers cancellable while preserving their explicit dependency guards.
+for job in x86_64 universal2; do
+  job_condition="$(sed -n "/^  ${job}:/,/^    steps:/p" <<<"$package_workflow_text")"
+  grep -F '!cancelled() &&' <<<"$job_condition" >/dev/null || {
+    echo "$job must stop when its PR workflow is cancelled" >&2
+    exit 1
+  }
+  if grep -F 'always() &&' <<<"$job_condition" >/dev/null; then
+    echo "$job must not bypass workflow cancellation" >&2
+    exit 1
+  fi
+done
 [[ "$(grep -Fc 'timeout-minutes: 15' <<<"$package_workflow_text")" -eq 1 ]] || {
   echo "arm64 package CI job must have a 15-minute timeout" >&2
   exit 1

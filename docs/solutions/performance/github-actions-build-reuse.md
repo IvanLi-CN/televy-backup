@@ -40,7 +40,9 @@ Evidence:
   baseline. PR caches remain subject to GitHub's branch cache visibility; no
   cross-PR artifact is used as authoritative release input.
 - Package cancellation applies only to superseded candidates of the same PR.
-  Merge-group and manual runs do not use that cancellation rule.
+  Merge-group and manual runs do not use that cancellation rule. Long native
+  and assembly jobs use `!cancelled()` rather than job-level `always()`, so
+  GitHub cancellation can stop an obsolete build instead of letting it continue.
 - Existing native and Universal DMG verification, Snapshot Access identity,
   signing, acceptance and release gates remain intact. Repeated DMG validation
   is retained until its persisted evidence can be safely shared.
