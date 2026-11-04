@@ -28,6 +28,8 @@ jobs:
         sample: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Record platform and compare equivalent Swift tests
         run: |
           swiftc --version

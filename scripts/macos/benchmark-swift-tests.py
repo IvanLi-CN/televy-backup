@@ -33,7 +33,8 @@ for mode in order:
 passed = (len(results) == 2 and all(r['exit_code'] == 0 for r in results.values())
           and results['isolated']['test_markers'] == results['shared']['test_markers']
           and len(results['shared']['test_markers']) > 10)
-report = {'source_sha': os.environ.get('GITHUB_SHA'), 'sample': args.sample,
+report = {'source_sha': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip(),
+          'workflow_sha': os.environ.get('GITHUB_SHA'), 'sample': args.sample,
           'order': order, 'results': results, 'equivalent_pass': passed,
           'compiled_app_cache': 'none: each mode compiles into a fresh output directory',
           'sdk_module_cache': 'runner ambient; order alternates across samples'}
