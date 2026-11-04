@@ -269,39 +269,57 @@ bin_command_environment="$out_dir/command-environment-selection-tests"
   "$root_dir/macos/TelevyBackupAppTests/CommandEnvironmentSelectionTests.swift"
 "$bin_command_environment"
 
+# Each executable keeps its own @main and process state. Only the unchanged
+# application module is shared; tests retain access to internal declarations.
+# isolated is a reference mode for controlled performance comparisons.
+swift_test_build_mode="${TELEVYBACKUP_SWIFT_TEST_BUILD_MODE:-shared}"
+case "$swift_test_build_mode" in shared|isolated) ;; *) echo "Invalid Swift test build mode" >&2; exit 2 ;; esac
+shared_module_ready=false
+compile_app_test() {
+  local output="$1"
+  shift
+  if [[ "$swift_test_build_mode" == isolated ]]; then
+    "$swiftc" -sdk "$sdk_path" -O -D TELEVYBACKUP_TESTING \
+      -framework SwiftUI -framework AppKit -o "$output" \
+      "$root_dir/macos/TelevyBackupApp"/*.swift "$@"
+    return
+  fi
+  local module_dir="$out_dir/app-test-module"
+  mkdir -p "$module_dir"
+  if [[ "$shared_module_ready" == false ]]; then
+    "$swiftc" -sdk "$sdk_path" -O -D TELEVYBACKUP_TESTING \
+      -enable-testing -parse-as-library -emit-library -emit-module \
+      -module-name TelevyBackupTestSupport \
+      -emit-module-path "$module_dir/TelevyBackupTestSupport.swiftmodule" \
+      -framework SwiftUI -framework AppKit \
+      "$root_dir/macos/TelevyBackupApp"/*.swift \
+      -o "$module_dir/libTelevyBackupTestSupport.dylib"
+    shared_module_ready=true
+  fi
+  local source generated_sources=()
+  for source in "$@"; do
+    local generated="$module_dir/$(basename "$source")"
+    { printf '@testable import TelevyBackupTestSupport\n'; cat "$source"; } > "$generated"
+    generated_sources+=("$generated")
+  done
+  "$swiftc" -sdk "$sdk_path" -O -D TELEVYBACKUP_TESTING \
+    -parse-as-library -I "$module_dir" -L "$module_dir" -lTelevyBackupTestSupport \
+    -Xlinker -rpath -Xlinker "$module_dir" \
+    -framework SwiftUI -framework AppKit -o "$output" "${generated_sources[@]}"
+}
+
 bin_target_presentation="$out_dir/target-presentation-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_target_presentation" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_target_presentation" \
   "$root_dir/macos/TelevyBackupAppTests/TargetPresentationTests.swift"
 "$bin_target_presentation"
 
 bin_window_activation="$out_dir/window-activation-coordinator-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_window_activation" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_window_activation" \
   "$root_dir/macos/TelevyBackupAppTests/WindowActivationCoordinatorTests.swift"
 "$bin_window_activation"
 
 bin_menu_bar="$out_dir/menu-bar-presentation-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_menu_bar" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_menu_bar" \
   "$root_dir/macos/TelevyBackupAppTests/MenuBarPresentationTests.swift"
 "$bin_menu_bar"
 
@@ -328,26 +346,12 @@ bin_menu_bar_icon="$out_dir/menu-bar-status-item-icon-tests"
 "$root_dir/scripts/macos/ui-store-static-check.sh"
 
 bin_popover="$out_dir/popover-layout-size-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_popover" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_popover" \
   "$root_dir/macos/TelevyBackupAppTests/PopoverLayoutSizeTests.swift"
 "$bin_popover"
 
 bin_demo_paths="$out_dir/ui-demo-sandbox-path-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_demo_paths" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_demo_paths" \
   "$root_dir/macos/TelevyBackupAppTests/UIDemoSandboxPathTests.swift"
 "$bin_demo_paths"
 
@@ -369,52 +373,24 @@ bin_snapshot_access_launch_agent="$out_dir/snapshot-access-launch-agent-tests"
 "$bin_snapshot_access_launch_agent"
 
 bin_snapshot_inspection="$out_dir/snapshot-inspection-presentation-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_snapshot_inspection" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_snapshot_inspection" \
   "$root_dir/macos/TelevyBackupAppTests/SnapshotInspectionPresentationTests.swift"
 "$bin_snapshot_inspection"
 
 bin_main_window_navigation="$out_dir/main-window-navigation-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_main_window_navigation" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_main_window_navigation" \
   "$root_dir/macos/TelevyBackupAppTests/MainWindowNavigationTests.swift"
 "$bin_main_window_navigation"
 
 bin_backup_failure_history="$out_dir/backup-failure-history-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_backup_failure_history" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_backup_failure_history" \
   "$root_dir/macos/TelevyBackupAppTests/BackupFailureHistoryTests.swift"
 "$bin_backup_failure_history"
 
 
 
 bin_diagnostics="$out_dir/diagnostics-settings-tests"
-"$swiftc" \
-  -sdk "$sdk_path" \
-  -O \
-  -D TELEVYBACKUP_TESTING \
-  -framework SwiftUI \
-  -framework AppKit \
-  -o "$bin_diagnostics" \
-  "$root_dir/macos/TelevyBackupApp"/*.swift \
+compile_app_test "$bin_diagnostics" \
   "$root_dir/macos/TelevyBackupAppTests/DiagnosticsSettingsTests.swift" \
   "$root_dir/macos/TelevyBackupAppTests/ProductionCommandEnvironmentTests.swift"
 "$bin_diagnostics"

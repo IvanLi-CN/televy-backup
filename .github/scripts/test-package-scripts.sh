@@ -664,11 +664,48 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "package matrix jobs must validate their persisted DMG event streams" >&2
   exit 1
 }
+# Job-level always() survives workflow cancellation. Keep long native/assembly
+# consumers cancellable while preserving their explicit dependency guards.
+for job in x86_64 universal2; do
+  job_condition="$(sed -n "/^  ${job}:/,/^    steps:/p" <<<"$package_workflow_text")"
+  grep -F '!cancelled() &&' <<<"$job_condition" >/dev/null || {
+    echo "$job must stop when its PR workflow is cancelled" >&2
+    exit 1
+  }
+  if grep -F 'always() &&' <<<"$job_condition" >/dev/null; then
+    echo "$job must not bypass workflow cancellation" >&2
+    exit 1
+  fi
+done
+# Evaluate the actual job condition across source/prepared and dependency states.
+python3 - "$root_dir/.github/workflows/package-ci.yml" <<'PY_GUARDS'
+import itertools
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text().split("  universal2:", 1)[1]
+condition = text.split("    if: >-", 1)[1].split("    steps:", 1)[0].strip()
+for kind, arm, intel, classified, cancelled in itertools.product(
+    ("source", "prepared"), ("success", "failure", "skipped", "cancelled"),
+    ("success", "failure", "skipped", "cancelled"), (True, False), (True, False)
+):
+    expression = condition.replace("!cancelled()", str(not cancelled))
+    values = {"needs.classify.outputs.kind": kind,
+              "needs.classify.result": "success" if classified else "failure",
+              "needs.arm64.result": arm, "needs.x86_64.result": intel}
+    for name, value in values.items():
+        expression = expression.replace(name, repr(value))
+    expression = expression.replace("&&", " and ").replace("||", " or ")
+    actual = eval(re.sub(r"\s+", " ", expression), {"__builtins__": {}}, {})
+    expected = not cancelled and classified and (
+        kind == "prepared" or (arm == "success" and intel == "success"))
+    assert actual == expected, (kind, arm, intel, classified, cancelled, actual)
+PY_GUARDS
 [[ "$(grep -Fc 'timeout-minutes: 15' <<<"$package_workflow_text")" -eq 1 ]] || {
   echo "arm64 package CI job must have a 15-minute timeout" >&2
   exit 1
 }
-sed -n '/^  x86_64:/,/^  warm-x86_64:/p' <<<"$package_workflow_text" | grep -F 'timeout-minutes: 30' >/dev/null || {
+sed -n '/^  x86_64:/,/^  universal2:/p' <<<"$package_workflow_text" | grep -F 'timeout-minutes: 30' >/dev/null || {
   echo "x86_64 package CI job must have a bounded 30-minute timeout" >&2
   exit 1
 }
@@ -676,7 +713,7 @@ sed -n '/^  x86_64:/,/^  warm-x86_64:/p' <<<"$package_workflow_text" | grep -F '
   echo "native package CI jobs must cache build dependencies" >&2
   exit 1
 }
-[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 3 ]] || {
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 2 ]] || {
   echo "package dependency cache action must be pinned to a full commit SHA" >&2
   exit 1
 }
@@ -716,7 +753,7 @@ grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/
   echo "package classification must record the checked-out source SHA" >&2
   exit 1
 }
-[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 4 ]] || {
+[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 3 ]] || {
   echo "all package jobs must checkout the classified immutable source SHA" >&2
   exit 1
 }
@@ -884,5 +921,7 @@ assert mount["identity_source"] == "bundled-release-artifact"
 assert mount["installed_observation"] == "manual-rc-acceptance-required"
 assert mount["update_policy"] == "compatibility-check-only"
 PY
+
+python3 "$root_dir/.github/scripts/test-swift-test-build.py"
 
 echo "package script contract tests passed"
