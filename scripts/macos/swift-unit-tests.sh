@@ -24,12 +24,7 @@ bin_mount_helper_readiness="$out_dir/snapshot-mount-helper-readiness-tests"
   -o "$bin_mount_helper_readiness"
 "$bin_mount_helper_readiness"
 
-bin_mount_helper_control_action="$out_dir/snapshot-mount-helper-control-action-tests"
-"$swiftc" -sdk "$sdk_path" \
-  "$root_dir/macos/TelevyBackupApp/SnapshotMountHelperControlAction.swift" \
-  "$root_dir/macos/TelevyBackupAppTests/SnapshotMountHelperControlActionTests.swift" \
-  -o "$bin_mount_helper_control_action"
-"$bin_mount_helper_control_action"
+bash "$root_dir/scripts/macos/test-snapshot-operation-feedback.sh"
 
 search_file() {
   local pattern="$1"
@@ -344,6 +339,14 @@ bin_menu_bar_icon="$out_dir/menu-bar-status-item-icon-tests"
   "$root_dir/macos/TelevyBackupApp"/*.swift
 
 "$root_dir/scripts/macos/ui-store-static-check.sh"
+
+bin_snapshot_presentation="$out_dir/snapshot-maintenance-presentation-tests"
+"$swiftc" -sdk "$sdk_path" -D TELEVYBACKUP_TESTING \
+  -framework SwiftUI -framework AppKit \
+  "$root_dir/macos/TelevyBackupApp"/*.swift \
+  "$root_dir/macos/TelevyBackupAppTests/SnapshotMaintenancePresentationTests.swift" \
+  -o "$bin_snapshot_presentation"
+"$bin_snapshot_presentation"
 
 bin_popover="$out_dir/popover-layout-size-tests"
 compile_app_test "$bin_popover" \

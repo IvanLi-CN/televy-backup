@@ -2,6 +2,9 @@ import Combine
 import Foundation
 
 final class SettingsStore: ObservableObject {
+    // Accepted maintenance work survives Settings pane/window recreation.
+    @Published var snapshotMountOperation = SnapshotMountOperationTracker()
+    var snapshotMountObservationGeneration = 0
     @Published var sourcePath = ""
     @Published var label = "manual"
     @Published var chatId = ""

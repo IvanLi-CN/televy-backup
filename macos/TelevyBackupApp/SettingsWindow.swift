@@ -847,8 +847,17 @@ struct SettingsWindowRootView: View {
     @State private var snapshotStatus: SnapshotControlStatus?
     @State private var snapshotError: String?
     @State private var snapshotBusy = false
-    @State private var snapshotRecoveryToken = 0
-    private static let snapshotRecoveryPollLimit = 60
+    private var snapshotRecoveryToken: Int {
+        get { settingsStore.snapshotMountObservationGeneration }
+        nonmutating set { settingsStore.snapshotMountObservationGeneration = newValue }
+    }
+    private var snapshotOperation: SnapshotMountOperationTracker {
+        get { settingsStore.snapshotMountOperation }
+        nonmutating set { settingsStore.snapshotMountOperation = newValue }
+    }
+    @State private var snapshotRefresh = SnapshotStatusRefreshTracker()
+    @State private var snapshotRefreshError: String?
+    private var snapshotControlsBusy: Bool { snapshotBusy || snapshotOperation.isActive }
 
     private struct ImportConfigBundleSheetRequest: Identifiable {
         let id = UUID()
@@ -1027,10 +1036,10 @@ struct SettingsWindowRootView: View {
                             Spacer()
                             Button("Enable all") { setAllSnapshotVolumes(enabled: true) }
                                 .buttonStyle(.bordered)
-                                .disabled(configured.isEmpty || snapshotBusy)
+                                .disabled(configured.isEmpty || snapshotControlsBusy)
                             Button("Disable all") { setAllSnapshotVolumes(enabled: false) }
                                 .buttonStyle(.borderless)
-                                .disabled(configured.isEmpty || snapshotBusy)
+                                .disabled(configured.isEmpty || snapshotControlsBusy)
                         }
 
                         if configured.isEmpty {
@@ -1060,7 +1069,7 @@ struct SettingsWindowRootView: View {
                                         }
                                     ))
                                     .labelsHidden()
-                                    .disabled(snapshotBusy)
+                                    .disabled(snapshotControlsBusy)
                                 }
                                 .padding(.vertical, 3)
                             }
@@ -1083,7 +1092,7 @@ struct SettingsWindowRootView: View {
                                 Spacer()
                                 Button("Verify volume") { discoverSnapshotVolume(target.source_path) }
                                     .buttonStyle(.bordered)
-                                    .disabled(snapshotBusy)
+                                    .disabled(snapshotControlsBusy)
                             }
                         }
                     }
@@ -1102,6 +1111,16 @@ struct SettingsWindowRootView: View {
                     SnapshotSettingsErrorNotice(message: snapshotError)
                 }
 
+                if let label = snapshotOperation.label {
+                    SnapshotMountOperationProgressView(label: label, isObserving: snapshotOperation.isObserving) {
+                        resumeSnapshotMountOperation()
+                    }
+                }
+                SnapshotStatusFreshnessView(
+                    lastUpdatedAt: snapshotRefresh.lastUpdatedAt,
+                    isRefreshing: snapshotRefresh.isRefreshing,
+                    error: snapshotRefreshError
+                )
                 snapshotAccessView
             }
             .frame(maxWidth: 700, alignment: .leading)
@@ -1110,6 +1129,23 @@ struct SettingsWindowRootView: View {
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .onAppear { refreshSnapshotStatus() }
+        .task {
+            do {
+                while !Task.isCancelled {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                    guard !Task.isCancelled else { return }
+                    if !SettingsUIDemo.enabled && !snapshotRefresh.isRefreshing
+                        && (!snapshotBusy || snapshotOperation.isActive) {
+                        refreshSnapshotStatus(background: true)
+                    }
+                }
+            } catch { /* Leaving the pane cancels its read-only refresh loop. */ }
+        }
+        .onDisappear {
+            snapshotRecoveryToken += 1
+            snapshotRefresh.invalidate()
+            if snapshotOperation.isActive { snapshotOperation.suspend() }
+        }
     }
 
     private var snapshotAccessView: some View {
@@ -1177,7 +1213,7 @@ struct SettingsWindowRootView: View {
                             recoverableStaleMounts: snapshotStatus.mountHelperRecoverableStaleMounts,
                             unknownBlockingMounts: snapshotStatus.mountHelperUnknownBlockingMounts,
                             inventoryDriftMounts: snapshotStatus.mountHelperInventoryDriftMounts,
-                            busy: snapshotBusy || SettingsUIDemo.enabled,
+                            busy: snapshotControlsBusy || SettingsUIDemo.enabled,
                             install: installSnapshotMountHelper,
                             recover: recoverSnapshotMountRecords,
                             retryCleanup: retrySnapshotCleanup,
@@ -1203,10 +1239,9 @@ struct SettingsWindowRootView: View {
                 HStack {
                     Button("Open Privacy Settings") { openSnapshotPrivacySettings() }
                         .buttonStyle(.bordered)
-                    .disabled(snapshotBusy)
-                    Button("Refresh") { refreshSnapshotStatus() }
+                    Button(snapshotOperation.isActive ? "Check operation status" : "Refresh") { refreshSnapshotStatus() }
                         .buttonStyle(.borderless)
-                        .disabled(snapshotBusy)
+                        .disabled(snapshotBusy && !snapshotOperation.isActive)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1224,6 +1259,7 @@ struct SettingsWindowRootView: View {
     }
 
     private func installSnapshotMountHelper() {
+        snapshotRefresh.invalidate()
         snapshotBusy = true
         snapshotError = nil
         model.installSnapshotMountHelper { success, error, status in
@@ -1233,7 +1269,12 @@ struct SettingsWindowRootView: View {
         }
     }
 
-    private func refreshSnapshotStatus(preservingError: String? = nil) {
+    private func refreshSnapshotStatus(preservingError: String? = nil, background: Bool = false) {
+        if let preservingError { snapshotError = preservingError }
+        if snapshotOperation.isActive && !background {
+            resumeSnapshotMountOperation()
+            return
+        }
         if SettingsUIDemo.enabled {
             let strict = SettingsUIDemo.scene != "snapshots-disabled"
             let accessMissing = SettingsUIDemo.scene == "snapshots-helper-missing"
@@ -1265,14 +1306,15 @@ struct SettingsWindowRootView: View {
                 volumes: (settings?.snapshot_volumes ?? [:]).map { SnapshotVolumeStatus(volumeUuid: $0.key, enabled: $0.value.enabled, mode: $0.value.enabled ? "strict" : "disabled") }
             )
             snapshotBusy = false
-            snapshotError = preservingError
             return
         }
-        snapshotBusy = true
+        let request = snapshotRefresh.begin()
+        if !background { snapshotBusy = true }
         model.fetchSnapshotStatus { status, error in
-            snapshotBusy = false
-            snapshotStatus = status
-            snapshotError = preservingError ?? error
+            guard snapshotRefresh.complete(request, succeeded: status != nil) else { return }
+            if !background { snapshotBusy = false }
+            if let status { snapshotStatus = status }
+            snapshotRefreshError = error
         }
     }
 
@@ -1291,6 +1333,9 @@ struct SettingsWindowRootView: View {
     }
 
     private func performSnapshotMountOperation(method: String, operationLabel: String) {
+        guard !snapshotOperation.isActive else { return }
+        snapshotOperation.start(label: operationLabel)
+        snapshotRefresh.invalidate()
         snapshotRecoveryToken += 1
         let token = snapshotRecoveryToken
         snapshotBusy = true
@@ -1302,24 +1347,37 @@ struct SettingsWindowRootView: View {
                 method: method,
             )
             DispatchQueue.main.async {
-                guard self.snapshotRecoveryToken == token else { return }
+                // The request may be accepted while this tab is disappearing. Retain its
+                // ID even when observation was suspended, so returning cannot resubmit it.
+                if case let .success(accepted) = result {
+                    snapshotOperation.accept(operationID: accepted.operationId)
+                }
+                guard self.snapshotRecoveryToken == token else {
+                    if case .failure = result {
+                        snapshotOperation = SnapshotMountOperationTracker()
+                        snapshotBusy = false
+                    } else {
+                        snapshotOperation.suspend()
+                    }
+                    return
+                }
                 switch result {
                 case let .success(accepted):
                     pollSnapshotMountRecovery(
                         operationId: accepted.operationId,
                         operationLabel: operationLabel,
-                        token: token,
-                        attempts: 0
+                        token: token
                     )
                 case let .failure(error):
                     snapshotBusy = false
+                    snapshotOperation = SnapshotMountOperationTracker()
                     snapshotError = controlFailureMessage(error)
                 }
             }
         }
     }
 
-    private func pollSnapshotMountRecovery(operationId: String, operationLabel: String, token: Int, attempts: Int) {
+    private func pollSnapshotMountRecovery(operationId: String, operationLabel: String, token: Int) {
         guard snapshotRecoveryToken == token else { return }
         let socketPath = model.controlSocketPath()
         DispatchQueue.global(qos: .userInitiated).async {
@@ -1329,26 +1387,23 @@ struct SettingsWindowRootView: View {
                 switch result {
                 case let .failure(error):
                     snapshotBusy = false
-                    snapshotError = controlFailureMessage(error)
+                    snapshotOperation.suspend()
+                    snapshotError = "Could not check the operation status. It may still be running. Resume the status check before retrying. " + controlFailureMessage(error)
                 case let .success(status):
                     switch status.state {
                     case "pending", "running":
-                        guard attempts < Self.snapshotRecoveryPollLimit else {
-                            snapshotBusy = false
-                            snapshotError = "\(operationLabel) timed out. Refresh diagnostics before retrying."
-                            return
-                        }
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             pollSnapshotMountRecovery(
                                 operationId: operationId,
                                 operationLabel: operationLabel,
-                                token: token,
-                                attempts: attempts + 1
+                                token: token
                             )
                         }
                     case "succeeded":
+                        snapshotOperation.observe(state: status.state)
                         refreshSnapshotStatus()
                     case "failed":
+                        snapshotOperation.observe(state: status.state)
                         let failure = ControlRequestFailure(
                             code: status.error?.code ?? "operation.failed",
                             message: status.error?.message ?? "\(operationLabel) failed.",
@@ -1357,11 +1412,21 @@ struct SettingsWindowRootView: View {
                         refreshSnapshotStatus(preservingError: controlFailureMessage(failure))
                     default:
                         snapshotBusy = false
-                        snapshotError = "\(operationLabel) returned an invalid state."
+                        snapshotOperation.suspend()
+                        snapshotError = "The operation status could not be understood. Resume the status check before retrying."
                     }
                 }
             }
         }
+    }
+
+    private func resumeSnapshotMountOperation() {
+        guard let operationID = snapshotOperation.operationID, let label = snapshotOperation.label else { return }
+        snapshotRecoveryToken += 1
+        let token = snapshotRecoveryToken
+        snapshotOperation.accept(operationID: operationID)
+        snapshotError = nil
+        pollSnapshotMountRecovery(operationId: operationID, operationLabel: label, token: token)
     }
 
     private func setAllSnapshotVolumes(enabled: Bool) {
