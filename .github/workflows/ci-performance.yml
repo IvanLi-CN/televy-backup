@@ -38,6 +38,8 @@ jobs:
         if: always()
         with:
           name: swift-performance-${{ matrix.sample }}
-          path: ${{ runner.temp }}/swift-comparison
+          path: |
+            ${{ runner.temp }}/swift-comparison/*.log
+            ${{ runner.temp }}/swift-comparison/result.json
           retention-days: 7
           if-no-files-found: error
