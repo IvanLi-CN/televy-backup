@@ -319,6 +319,9 @@ jobs:
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --stale-partial-classification
           python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${fixture}/TelevyBackup.app" --require-readiness \
+            --expect-build-commit "${GITHUB_SHA}" --stale-inventory-drift
+          python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --uninstall
 
       - name: Stale mount recovery and unknown blocker fixture

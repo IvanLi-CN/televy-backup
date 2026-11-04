@@ -1,5 +1,7 @@
 # Implementation
 
+- The CLI permits a stale compatible helper with an exact distinct released-only inventory-drift partition to use the existing guarded replacement transaction. Replacement preserves journal records and rechecks Access idle and status under locks; only the verified replacement can reconcile them. Rust negatives cover mixed partitions, duplicate/invalid IDs, missing fields and matching build identity. The hosted installer fixture reproduces 72 drift rows, verifies replacement identity and journal preservation, then exercises journal-bound Release to reconcile them to zero. Settings offers Update first in this state and suppresses the duplicate wait/reconcile prompts.
+
 - Release checks the authenticated caller against the stored journal owner before age-gated
   recovery or any journal mutation. The stale empty-reservation regression proves a foreign
   caller cannot change the row or invoke inventory/deletion, while its owner retains the
