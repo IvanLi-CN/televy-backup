@@ -366,7 +366,9 @@ jobs:
         run: bash scripts/macos/test-backup-failure-presentation-regression.sh
       - name: Render synthetic backup failure views
         if: needs.classify.outputs.kind == 'source'
-        run: bash scripts/macos/render-backup-failure-preview.sh "${RUNNER_TEMP}/backup-failure-preview"
+        run: |
+          bash scripts/macos/render-backup-failure-preview.sh "${RUNNER_TEMP}/backup-failure-preview"
+          bash scripts/macos/render-snapshot-operation-preview.sh "${RUNNER_TEMP}/backup-failure-preview"
       - name: Upload synthetic backup failure views
         if: needs.classify.outputs.kind == 'source'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

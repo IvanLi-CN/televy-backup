@@ -1,5 +1,7 @@
 # History
 
+- Maintenance UI could report failure after 60 pending/running polls while the daemon continued reconciliation. The status callback also admitted out-of-order replies without a request fence. UI observation now follows the daemon terminal state, preserves accepted operation IDs when a query disconnects, and applies only the latest status response. A synthetic 72-to-zero reply-order regression covers stale overwrites; it does not establish that this race was the sole cause of a particular owner screenshot.
+
 - The first legacy-repair release could leave every old row blocked when the journal omitted its
   reservation baseline, the APFS device node had been renumbered, or the recorded mount directory
   had already disappeared. The `0.5.5` helper resolves the volume by UUID, matches inventory by

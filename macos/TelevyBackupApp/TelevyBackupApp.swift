@@ -305,6 +305,10 @@ final class AppModel {
         televybackupToolEnv()
     }
 #endif
+    // Accepted maintenance operations outlive the Settings pane/window in this app session.
+    @Published var snapshotMountOperation = SnapshotMountOperationTracker()
+    var snapshotMountObservationGeneration = 0
+
     var menuQuickActionFailureHandler: ((String) -> Void)? = nil
     var persistentWindowPresentationHandler: ((NSWindow, String) -> Void)? = nil
 

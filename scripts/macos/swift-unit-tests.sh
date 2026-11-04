@@ -24,12 +24,7 @@ bin_mount_helper_readiness="$out_dir/snapshot-mount-helper-readiness-tests"
   -o "$bin_mount_helper_readiness"
 "$bin_mount_helper_readiness"
 
-bin_mount_helper_control_action="$out_dir/snapshot-mount-helper-control-action-tests"
-"$swiftc" -sdk "$sdk_path" \
-  "$root_dir/macos/TelevyBackupApp/SnapshotMountHelperControlAction.swift" \
-  "$root_dir/macos/TelevyBackupAppTests/SnapshotMountHelperControlActionTests.swift" \
-  -o "$bin_mount_helper_control_action"
-"$bin_mount_helper_control_action"
+bash "$root_dir/scripts/macos/test-snapshot-operation-feedback.sh"
 
 search_file() {
   local pattern="$1"
