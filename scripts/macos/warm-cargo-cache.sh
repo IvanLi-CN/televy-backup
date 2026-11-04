@@ -20,7 +20,8 @@ case "$arch" in
   *) usage ;;
 esac
 
-# Populate the target cache before the packaging job starts. The workspace
+# Compile in the consuming package job: an exact cache hit is immutable and
+# cannot hand updated build outputs to another runner. The workspace
 # and MTProto helper use separate target trees, so compiling them concurrently
 # removes the avoidable serial build time on a cold Intel runner.
 workspace_log="$(mktemp)"

@@ -126,7 +126,23 @@ workspace_build+=(-p televybackup -p televybackupd)
 if [[ -z "${TELEVYBACKUP_SNAPSHOT_ACCESS_BUNDLE:-}" ]]; then
   workspace_build+=(-p televybackup-snapshot-access)
 fi
-"${workspace_build[@]}"
+# Compile independent target trees concurrently in the consuming job, after
+# product build identity has been exported. Never rely on an immutable cache
+# entry to transfer newly compiled outputs between runners.
+helper_build=(cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --locked --release)
+if [[ -n "$cargo_target" ]]; then
+  helper_build+=(--target "$cargo_target")
+fi
+"${helper_build[@]}" &
+helper_build_pid=$!
+workspace_build_status=0
+"${workspace_build[@]}" || workspace_build_status=$?
+helper_build_status=0
+wait "$helper_build_pid" || helper_build_status=$?
+if [[ "$workspace_build_status" -ne 0 || "$helper_build_status" -ne 0 ]]; then
+  echo "ERROR: workspace or MTProto helper compilation failed" >&2
+  exit 1
+fi
 cp "$binary_dir/televybackup" "$macos_dir/televybackup-cli"
 
 cp "$binary_dir/televybackupd" "$macos_dir/televybackupd"
@@ -143,8 +159,7 @@ fi
 cp "$snapshot_mount_helper_binary" "$macos_dir/televybackup-snapshot-mount-helper"
 chmod 755 "$macos_dir/televybackup-snapshot-mount-helper"
 
-echo "Building MTProto helper..."
-if [[ -n "$cargo_target" ]]; then cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --locked --release --target "$cargo_target"; else cargo build --manifest-path "$root_dir/crates/mtproto-helper/Cargo.toml" --locked --release; fi
+echo "Copying compiled MTProto helper..."
 helper_binary_dir="$root_dir/crates/mtproto-helper/target/release"
 if [[ -n "$cargo_target" ]]; then
   helper_binary_dir="$root_dir/crates/mtproto-helper/target/$cargo_target/release"

@@ -668,7 +668,7 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "arm64 package CI job must have a 15-minute timeout" >&2
   exit 1
 }
-sed -n '/^  x86_64:/,/^  warm-x86_64:/p' <<<"$package_workflow_text" | grep -F 'timeout-minutes: 30' >/dev/null || {
+sed -n '/^  x86_64:/,/^  universal2:/p' <<<"$package_workflow_text" | grep -F 'timeout-minutes: 30' >/dev/null || {
   echo "x86_64 package CI job must have a bounded 30-minute timeout" >&2
   exit 1
 }
@@ -676,7 +676,7 @@ sed -n '/^  x86_64:/,/^  warm-x86_64:/p' <<<"$package_workflow_text" | grep -F '
   echo "native package CI jobs must cache build dependencies" >&2
   exit 1
 }
-[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 3 ]] || {
+[[ "$(grep -Fc 'uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830' <<<"$package_workflow_text")" -eq 2 ]] || {
   echo "package dependency cache action must be pinned to a full commit SHA" >&2
   exit 1
 }
@@ -716,7 +716,7 @@ grep -F 'echo "source_sha=$(git rev-parse HEAD)"' <<<"$package_workflow_text" >/
   echo "package classification must record the checked-out source SHA" >&2
   exit 1
 }
-[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 4 ]] || {
+[[ "$(grep -Fc 'ref: ${{ needs.classify.outputs.source_sha }}' <<<"$package_workflow_text")" -eq 3 ]] || {
   echo "all package jobs must checkout the classified immutable source SHA" >&2
   exit 1
 }
@@ -884,5 +884,7 @@ assert mount["identity_source"] == "bundled-release-artifact"
 assert mount["installed_observation"] == "manual-rc-acceptance-required"
 assert mount["update_policy"] == "compatibility-check-only"
 PY
+
+python3 "$root_dir/.github/scripts/test-swift-test-build.py"
 
 echo "package script contract tests passed"

@@ -11,6 +11,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: package-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   checks: read
@@ -82,6 +86,13 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: aarch64-apple-darwin
+      - name: Fingerprint macOS build platform
+        id: build-platform
+        if: needs.classify.outputs.kind == 'source'
+        shell: bash
+        run: |
+          fingerprint="$( { rustc --version; swiftc --version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -d ' ' -f 1)"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
       - name: Cache macOS arm64 build dependencies
         if: needs.classify.outputs.kind == 'source'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -93,9 +104,9 @@ jobs:
             ~/Library/Caches/pip
             target
             crates/mtproto-helper/target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-
       - name: Build arm64 package (up to 2 attempts)
         if: needs.classify.outputs.kind == 'source'
         run: |
@@ -134,11 +145,11 @@ jobs:
           if-no-files-found: error
 
   x86_64:
-    needs: [classify, warm-x86_64]
+    needs: classify
     if: >-
       always() &&
       needs.classify.result == 'success' &&
-      (needs.classify.outputs.kind == 'prepared' || needs.warm-x86_64.result == 'success')
+      (needs.classify.outputs.kind == 'prepared' || needs.classify.outputs.kind == 'source')
     name: x86_64 native package
     runs-on: macos-15-intel
     # Cold Rust builds plus Swift compilation exceeded 16 minutes on hosted Intel.
@@ -166,6 +177,13 @@ jobs:
         with:
           toolchain: 1.91.0
           targets: x86_64-apple-darwin
+      - name: Fingerprint macOS build platform
+        id: build-platform
+        if: needs.classify.outputs.kind == 'source'
+        shell: bash
+        run: |
+          fingerprint="$( { rustc --version; swiftc --version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -d ' ' -f 1)"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
       - name: Cache macOS x86_64 build dependencies
         if: needs.classify.outputs.kind == 'source'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
@@ -177,9 +195,9 @@ jobs:
             ~/Library/Caches/pip
             target
             crates/mtproto-helper/target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-v2-${{ steps.build-platform.outputs.fingerprint }}-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}-
       - name: Build x86_64 package (up to 2 attempts)
         if: needs.classify.outputs.kind == 'source'
         run: |
@@ -218,37 +236,6 @@ jobs:
           path: ${{ runner.temp }}/dmg-layout-x86_64-events.jsonl
           if-no-files-found: error
           overwrite: true
-
-  warm-x86_64:
-    needs: classify
-    if: needs.classify.result == 'success' && needs.classify.outputs.kind == 'source'
-    name: Warm x86_64 cargo cache
-    runs-on: macos-15-intel
-    timeout-minutes: 16
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ needs.classify.outputs.source_sha }}
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772
-        with:
-          toolchain: 1.91.0
-          targets: x86_64-apple-darwin
-      - name: Cache macOS x86_64 build dependencies
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cache/pip
-            ~/Library/Caches/pip
-            target
-            crates/mtproto-helper/target
-          key: ${{ runner.os }}-${{ runner.arch }}-cargo-macos-${{ hashFiles('Cargo.lock', 'crates/mtproto-helper/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-cargo-macos-
-      - name: Build x86_64 cargo cache
-        run: bash scripts/macos/warm-cargo-cache.sh --arch x86_64
 
   universal2:
     name: Universal 2 assembly
