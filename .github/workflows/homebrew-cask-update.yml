@@ -219,13 +219,6 @@ jobs:
           else
             gh pr edit "${pr_number}" --repo "${GITHUB_REPOSITORY}" --title "${title}" --body-file "${body_file}" >/dev/null
           fi
-          for label in type:major type:minor type:patch type:skip channel:prod channel:beta channel:rc channel:dev; do
-            gh pr edit "${pr_number}" --repo "${GITHUB_REPOSITORY}" --remove-label "${label}" >/dev/null 2>&1 || true
-          done
-          gh pr edit "${pr_number}" --repo "${GITHUB_REPOSITORY}" --add-label type:docs >/dev/null
-          labels="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${pr_number}/labels?per_page=100" --jq '[.[].name] | join(",")')"
-          [[ ",${labels}," == *",type:docs,"* ]]
-          [[ "${labels}" != *"channel:"* ]]
           {
             echo "skip=false"
             echo "number=${pr_number}"
@@ -238,11 +231,17 @@ jobs:
           HEAD_SHA: ${{ steps.commit.outputs.sha }}
         run: |
           set -euo pipefail
-          gh workflow run ci-pr.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
-          gh workflow run package-ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
-          gh workflow run label-gate.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
-          gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run ci-pr.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
+          gh workflow run package-ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
+          gh workflow run legacy-label-gate-bridge.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
           gh workflow run homebrew-cask.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run release-target-gate.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
+          gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
 
       - name: Wait for exact Cask PR checks
         if: steps.release.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
@@ -265,7 +264,7 @@ jobs:
           import sys
 
           required = {
-              "Release intent label gate",
+              "Release target gate",
               "quality",
               "macOS Swift tests",
               "arm64 native package",

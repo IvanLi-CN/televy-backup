@@ -14,7 +14,6 @@ import release_reservation as RESERVATION  # noqa: E402
 
 
 REQUIRED_SOURCE_CHECKS = {
-    "Release intent label gate",
     "quality",
     "macOS Swift tests",
     "arm64 native package",
@@ -85,26 +84,24 @@ def prepare(args: argparse.Namespace) -> None:
     if not repo_root.is_dir():
         raise PreparationError(f"repository worktree does not exist: {repo_root}")
     CHAIN.ROOT = repo_root
-    labels = read_json(args.labels_json)
-    intent = CHAIN.intent_from_labels(labels)
+    target = CHAIN.parse_release_target(args.release_target)
     release_mode = args.release_mode
-    if intent["action"] == "skip":
-        output({"prepared": "not_required", "release_action": "skip", "source_sha": args.source_sha}, args.github_output)
-        return
     if not source_checks_ready(read_json(args.checks_json)):
-        output({"prepared": "waiting", "release_action": intent["action"], "source_sha": args.source_sha}, args.github_output)
+        output({"prepared": "waiting", "release_action": "prepare", "source_sha": args.source_sha}, args.github_output)
         return
     try:
         existing = CHAIN.find_prepared(args.source_sha, args.base_sha)
     except CHAIN.ReleaseChainError:
         existing = None
     if existing is not None:
-        if existing["type"] != intent["type"] or existing["channel"] != intent["channel"]:
-            raise PreparationError("existing preparation intent does not match current PR labels")
+        if existing["releaseTarget"] != target["raw"]:
+            raise PreparationError("existing preparation target does not match the requested release_target")
         output(
             {
                 "prepared": "existing",
                 "release_action": existing["action"],
+                "release_target": existing["releaseTarget"],
+                "release_policy": existing["policy"],
                 "release_sha": existing["releaseSha"],
                 "preparation_sha": existing["preparationSha"],
                 "source_sha": existing["sourceSha"],
@@ -127,17 +124,25 @@ def prepare(args: argparse.Namespace) -> None:
         raise PreparationError("reservation JSON is missing immutable identity fields")
     source_is_ready(repo_root, args.source_sha, args.base_sha, release_mode)
     reservation_channel = str(reservation.get("channel", "")).removeprefix("channel:")
-    expected_channel = intent["channel"].removeprefix("channel:")
+    expected_channel = str(reservation.get("channel", "")).removeprefix("channel:")
+    if reservation.get("releaseTarget") != target["raw"]:
+        raise PreparationError("reservation target does not match the requested release_target")
+    if reservation.get("policy") != CHAIN.VERSION_POLICY_ID:
+        raise PreparationError("reservation policy does not match the active version policy")
+    if expected_channel != target["channel"]:
+        raise PreparationError("reservation channel does not match the release_target")
     reservation_source_sha = str(reservation.get("sourceSha", ""))
     if not reservation_source_sha or not CHAIN.is_ancestor(reservation_source_sha, args.source_sha):
         raise PreparationError("reservation source must be an ancestor of the preparation source")
     if reservation_channel != expected_channel:
-        raise PreparationError("reservation source or channel does not match the release intent")
+        raise PreparationError("reservation source or channel does not match the release target")
     reservation_expected = {
         "ref": reservation["ref"],
         "sourceSha": reservation_source_sha,
         "version": reservation["version"],
         "channel": expected_channel,
+        "releaseTarget": target["raw"],
+        "policy": CHAIN.VERSION_POLICY_ID,
         "reservationId": reservation["reservationId"],
         "Reservation-Owner": reservation["Reservation-Owner"],
         "Reservation-Claim-Key": reservation["Reservation-Claim-Key"],
@@ -153,7 +158,9 @@ def prepare(args: argparse.Namespace) -> None:
                 reservation_ref_value=reservation_expected["ref"], version=reservation_expected["version"],
                 reservation_id=reservation_expected["reservationId"], owner=reservation_expected["Reservation-Owner"],
                 claim_key=reservation_expected["Reservation-Claim-Key"],
-                boundary_token=reservation_expected["Reservation-Boundary-Token"], cwd=repo_root,
+                boundary_token=reservation_expected["Reservation-Boundary-Token"],
+                release_target=reservation_expected["releaseTarget"],
+                policy=reservation_expected["policy"], cwd=repo_root,
             )
     except RESERVATION.ReservationError as error:
         raise PreparationError(f"reservation provenance is not verified: {error}") from error
@@ -165,10 +172,8 @@ def prepare(args: argparse.Namespace) -> None:
         source_sha=args.source_sha,
         mode="exact",
         version=reservation["version"],
-        intent_type=intent["type"],
-        intent_channel=intent["channel"],
-        intent_action=intent["action"],
-        intent_components=intent["components"],
+        release_target=target["raw"],
+        release_policy=CHAIN.VERSION_POLICY_ID,
         release_mode=release_mode,
         reservation_id=reservation["reservationId"],
         reservation_ref=reservation["ref"],
@@ -180,11 +185,15 @@ def prepare(args: argparse.Namespace) -> None:
         provenance=args.provenance,
     )
     CHAIN.stage(stage_args)
-    prepared = CHAIN.verify_prepared(CHAIN.git("rev-parse", "HEAD"), args.source_sha)
+    prepared = CHAIN.verify_prepared(
+        CHAIN.git("rev-parse", "HEAD"), args.source_sha, expected_target=target["raw"]
+    )
     output(
         {
             "prepared": "created",
             "release_action": prepared["action"],
+            "release_target": prepared["releaseTarget"],
+            "release_policy": prepared["policy"],
             "release_sha": prepared["releaseSha"],
             "source_sha": prepared["sourceSha"],
             "version": prepared["version"],
@@ -202,10 +211,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path, required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--base-sha", required=True)
-    parser.add_argument("--labels-json", type=Path, required=True)
+    parser.add_argument("--release-target", required=True)
     parser.add_argument("--checks-json", type=Path, required=True)
-    parser.add_argument("--mode", choices=("automatic", "allocate", "exact"), default="allocate")
-    parser.add_argument("--exact-version")
     parser.add_argument("--release-mode", choices=("normal", "version-only-release-pr"), default="normal")
     parser.add_argument("--covered-merge-sha", default="")
     parser.add_argument("--reservation-json", type=Path)

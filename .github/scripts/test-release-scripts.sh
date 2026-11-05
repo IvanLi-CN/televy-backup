@@ -3,14 +3,15 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 
-bash -n "$root_dir/.github/scripts/label-gate.sh"
 bash -n "$root_dir/.github/scripts/merge-group-release-gate.sh"
 python3 -m py_compile \
   "$root_dir/.github/scripts/release_chain.py" \
   "$root_dir/.github/scripts/release_reservation.py" \
   "$root_dir/.github/scripts/release_preparation.py" \
   "$root_dir/.github/scripts/release_completion.py" \
+  "$root_dir/.github/scripts/release_target_gate.py" \
   "$root_dir/.github/scripts/release_helper.py" \
+  "$root_dir/.github/scripts/publish-pr-check.py" \
   "$root_dir/.github/scripts/verify-macos-rc-acceptance.py"
 
 python3 "$root_dir/scripts/test-product-version.py"
@@ -18,18 +19,26 @@ bash "$root_dir/.github/scripts/test-release-helper.sh"
 bash "$root_dir/.github/scripts/test-release-failure-context.sh"
 bash "$root_dir/.github/scripts/test-release-github-api.sh"
 
-out="$(LABELS_JSON='[{"name":"type:patch"},{"name":"channel:prod"}]' \
-  "$root_dir/.github/scripts/label-gate.sh")"
-[[ "$out" == *"Intent label OK: type:patch"* ]]
-[[ "$out" == *"release_channel=prod"* ]]
-if LABELS_JSON='[{"name":"type:patch"}]' "$root_dir/.github/scripts/label-gate.sh" >/dev/null 2>&1; then
-  echo "label gate accepted a missing channel" >&2
-  exit 1
-fi
-if LABELS_JSON='[{"name":"type:patch"},{"name":"channel:prod"},{"name":"channel:rc"}]' "$root_dir/.github/scripts/label-gate.sh" >/dev/null 2>&1; then
-  echo "label gate accepted duplicate channels" >&2
-  exit 1
-fi
+python3 - "$root_dir" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("release_chain", root / ".github/scripts/release_chain.py")
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.parse_release_target("patch")["kind"] == "symbolic"
+assert module.parse_release_target("1.0.0-rc.1")["channel"] == "rc"
+for invalid in (" v1.0.0", "v1.0.0", "type:patch"):
+    try:
+        module.parse_release_target(invalid)
+    except module.ReleaseChainError:
+        pass
+    else:
+        raise AssertionError(invalid)
+PY
 
 python3 - "$root_dir" <<'PY'
 from pathlib import Path
@@ -67,11 +76,18 @@ assert contract["identity_refs"]["ruleset_excluded_identity_patterns"] == [
     "refs/tags/release-bound/*",
     "refs/tags/release-consumed/*",
     "refs/tags/release-released/*",
+    "refs/tags/release-artifact-pending/*",
+    "refs/tags/release-artifact-attempts/*",
+    "refs/tags/release-artifacts/*",
 ]
 assert contract["identity_refs"]["no_additional_ci_credentials"] is True
 assert contract["recovery"]["dispatch_requires_existing_bound"] is False
+assert contract["recovery"]["artifact_reuse"]["source_artifact_name"] == "release-assets-<run-id>-<run-attempt>"
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
+assert contract["recovery"]["artifact_reuse"]["same_identity_requires_original_release_assets"] is True
+assert contract["recovery"]["artifact_reuse"]["rebuild_on_recovery"] is False
 reservation_text = (root / ".github/scripts/release_reservation.py").read_text(encoding="utf-8")
+assert "find_local_reservation_by_claim" in reservation_text
 assert "GIT_CONFIG_KEY_0" in reservation_text
 assert 'self._git("push", "origin", f"{sha}:{ref}")' in reservation_text
 assert "/git/tags" in reservation_text
@@ -80,7 +96,7 @@ assert "IDENTITY_METADATA_TREE_SHA" in reservation_text
 assert "IDENTITY_METADATA_CONTENT" in reservation_text
 assert "/git/trees" in reservation_text
 assert "existing remote ref does not match the requested identity" in reservation_text
-for gate in ("label_gate", "completion"):
+for gate in ("target_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
     assert scheduling["cancel_in_progress"] is False
     assert scheduling["pending_policy"] == "latest-per-group"
@@ -135,9 +151,13 @@ assert "preferred helper source manifest failed" not in release_workflow
 assert "Keep the trusted main checkout for release policy scripts" in release_workflow
 assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
 assert 'policy_sha: ${{ steps.release.outputs.policy_sha }}' in release_workflow
+assert 'execution_policy_sha: ${{ steps.release.outputs.execution_policy_sha }}' in release_workflow
+assert 'packaging_policy_sha: ${{ steps.release.outputs.packaging_policy_sha }}' in release_workflow
 assert 'policy_sha="$(git rev-parse HEAD)"' in release_workflow
 assert 'test "${policy_sha}" = "${main_sha}"' in release_workflow
 assert 'echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
+assert 'echo "execution_policy_sha=${execution_policy_sha}"' in release_workflow
+assert 'echo "packaging_policy_sha=${packaging_policy_sha}"' in release_workflow
 assert 'git cat-file -e "${POLICY_SHA}^{commit}"' in release_workflow
 assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in release_workflow
 assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow
@@ -177,7 +197,7 @@ assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
-assert "reusing descendant-compatible reservation" in (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
+assert "reservation source must be an ancestor" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in release_workflow
 assert "reservationSourceSha // .sourceSha" in (root / ".github/scripts/merge-group-release-gate.sh").read_text(encoding="utf-8")
@@ -877,7 +897,7 @@ PY
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \
   "$root_dir/.github/workflows/ci-pr.yml" \
   "$root_dir/.github/workflows/ci-main.yml" \
-  "$root_dir/.github/workflows/label-gate.yml" \
+  "$root_dir/.github/workflows/release-target-gate.yml" \
   "$root_dir/.github/workflows/package-ci.yml" \
   "$root_dir/.github/workflows/release-preparation.yml" \
   "$root_dir/.github/workflows/release-completion.yml" \

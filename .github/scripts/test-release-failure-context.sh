@@ -8,8 +8,8 @@ for marker in identity_status no-identity resolver-error merge_sha merge_commit_
   [[ "$text" == *"$marker"* ]] || { echo "missing failure context marker: $marker" >&2; exit 1; }
 done
 [[ "$text" == *"not-applicable: superseded_by_product_tag"* ]]
-[[ "$text" != *"contents/VERSION"* ]]
-[[ "$text" != *"base64.b64decode"* ]]
+[[ "$text" == *"contents/VERSION?ref="* ]]
+[[ "$text" == *"base64.b64decode"* ]]
 [[ "$text" == *"no version or tag was inferred"* ]]
 [[ "$text" == *"release-intent artifact"* ]]
 [[ "$text" == *'target_sha: ${{ needs.resolve_release_context.outputs.merge_sha }}'* ]]

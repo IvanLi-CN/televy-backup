@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import tempfile
 import textwrap
@@ -48,12 +49,12 @@ def json_response(value: object) -> Response:
 
 def intent(
     declared_pull_request: str = "7",
-    release_type: str = "type:patch",
+    release_target: str = "1.2.3-rc.1",
     run_attempt: str = "1",
     artifact_names: list[str] | None = None,
 ) -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "pull_request": declared_pull_request,
         "source_sha": SOURCE,
         "preparation_commit_sha": PREPARATION,
@@ -63,10 +64,9 @@ def intent(
         "branch_head": MERGE,
         "release_mode": "normal",
         "covered_merge_sha": "",
-        "labels": [release_type, "channel:rc"],
-        "type": release_type,
+        "release_target": release_target,
+        "policy": "televybackup-manual-semver-v1",
         "channel": "rc",
-        "components": ["component:app"],
         "version": "1.2.3-rc.1",
         "tag": "v1.2.3-rc.1",
         "tag_target_sha": MERGE,
@@ -75,7 +75,7 @@ def intent(
             "id": "res-1",
             "ref": "refs/tags/release-reservation/v1.2.3-rc.1",
             "owner": "github-actions[bot]",
-            "claim_key": "pr:7:source:a:type:patch:channel:rc",
+            "claim_key": "pr:7:target:1.2.3-rc.1",
             "boundary_token": "bnd-1",
             "state": "bound",
             "merge_commit_sha": MERGE,
@@ -108,13 +108,14 @@ def commit_payload(sha: str) -> dict[str, object]:
 
 Release-Source-SHA: {SOURCE}
 Product-Version: 1.2.3-rc.1
-Release-Intent-Type: type:patch
-Release-Intent-Channel: channel:rc
+Release-Target: 1.2.3-rc.1
+Release-Policy: televybackup-manual-semver-v1
+Release-Channel: rc
 Release-Mode: normal
 Release-Reservation-Id: res-1
 Release-Reservation-Ref: refs/tags/release-reservation/v1.2.3-rc.1
 Release-Reservation-Owner: github-actions[bot]
-Release-Claim-Key: pr:7:source:a:type:patch:channel:rc
+Release-Claim-Key: pr:7:target:1.2.3-rc.1
 Release-Boundary-Token: bnd-1
 Release-Provenance: github-native-verified
 """
@@ -136,10 +137,12 @@ Release-Provenance: github-native-verified
 
 Reservation-Id: res-1
 Reservation-Owner: github-actions[bot]
-Reservation-Claim-Key: pr:7:source:a:type:patch:channel:rc
+Reservation-Claim-Key: pr:7:target:1.2.3-rc.1
 Reservation-Boundary-Token: bnd-1
 Release-Version: 1.2.3-rc.1
 Release-Channel: rc
+Release-Target: 1.2.3-rc.1
+Release-Policy: televybackup-manual-semver-v1
 Reservation-State: claimed
 """
         verification = {"verified": False}
@@ -150,10 +153,12 @@ Reservation-State: claimed
 
 Receipt-State: bound
 Release-Version: 1.2.3-rc.1
+Release-Target: 1.2.3-rc.1
+Release-Policy: televybackup-manual-semver-v1
 Release-Merge-SHA: {MERGE}
 Release-Reservation-Id: res-1
 Release-Owner: github-actions[bot]
-Release-Claim-Key: pr:7:source:a:type:patch:channel:rc
+Release-Claim-Key: pr:7:target:1.2.3-rc.1
 Release-Boundary-Token: bnd-1
 Release-Reservation-Ref: refs/tags/release-reservation/v1.2.3-rc.1
 Receipt-Provenance: immutable-receipt
@@ -166,10 +171,12 @@ Receipt-Provenance: immutable-receipt
 
 Decision-State: bound
 Release-Version: 1.2.3-rc.1
+Release-Target: 1.2.3-rc.1
+Release-Policy: televybackup-manual-semver-v1
 Release-Merge-SHA: {MERGE}
 Release-Reservation-Id: res-1
 Release-Owner: github-actions[bot]
-Release-Claim-Key: pr:7:source:a:type:patch:channel:rc
+Release-Claim-Key: pr:7:target:1.2.3-rc.1
 Release-Boundary-Token: bnd-1
 Release-Reservation-Ref: refs/tags/release-reservation/v1.2.3-rc.1
 Decision-Provenance: immutable-decision
@@ -193,12 +200,13 @@ class GitHubMock:
         tag_mode: str,
         declared_pull_request: str,
         artifact_available: bool,
-        release_type: str,
+        release_target: str,
         trusted_resolver: bool = True,
         artifact_run_attempt: str = "1",
         artifact_url: str = "https://api.fixture/archive",
         artifact_names: list[str] | None = None,
         decision_mode: str = "valid",
+        preparation_mode: str = "valid",
     ):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
@@ -206,11 +214,12 @@ class GitHubMock:
         self.trusted_resolver = trusted_resolver
         self.artifact_url = artifact_url
         self.decision_mode = decision_mode
+        self.preparation_mode = preparation_mode
         archive = BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr(
                 "release-intent.json",
-                json.dumps(intent(declared_pull_request, release_type, artifact_run_attempt, artifact_names)),
+                json.dumps(intent(declared_pull_request, release_target, artifact_run_attempt, artifact_names)),
             )
         self.archive = archive.getvalue()
 
@@ -244,6 +253,21 @@ class GitHubMock:
                     f"Release-Merge-SHA: {MERGE}", f"Release-Merge-SHA: {'6' * 40}"
                 )
             return json_response(payload)
+        if path.endswith(f"/commits/{PREPARATION}"):
+            payload = commit_payload(PREPARATION)
+            if self.preparation_mode == "trailers":
+                payload["commit"]["message"] = payload["commit"]["message"].replace(
+                    "Release-Policy: televybackup-manual-semver-v1",
+                    "Release-Policy: forged-policy",
+                )
+            return json_response(payload)
+        if path.endswith("/contents/VERSION"):
+            version = "1.2.3-rc.1\n" if self.preparation_mode != "version" else "1.2.3-rc.2\n"
+            return json_response({
+                "type": "file",
+                "encoding": "base64",
+                "content": base64.b64encode(version.encode("utf-8")).decode("ascii"),
+            })
         if "/commits/" in path:
             return json_response(commit_payload(path.rsplit("/", 1)[-1]))
         if path.endswith("release-reservation/v1.2.3-rc.1"):
@@ -271,12 +295,13 @@ def run_case(
     tag_mode: str,
     declared_pull_request: str,
     artifact_available: bool = True,
-    release_type: str = "type:patch",
+    release_target: str = "1.2.3-rc.1",
     trusted_resolver: bool = True,
     artifact_run_attempt: str = "1",
     artifact_url: str = "https://api.fixture/archive",
     artifact_names: list[str] | None = None,
     decision_mode: str = "valid",
+    preparation_mode: str = "valid",
 ) -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
@@ -304,12 +329,13 @@ def run_case(
                 tag_mode,
                 declared_pull_request,
                 artifact_available,
-                release_type,
+                release_target,
                 trusted_resolver,
                 artifact_run_attempt,
                 artifact_url,
                 artifact_names,
                 decision_mode,
+                preparation_mode,
             ),
         ):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
@@ -333,8 +359,10 @@ assert "tag_status=present" in annotated
 mismatched_pr = run_case("missing", "99")
 assert "identity_status=resolver-error" in mismatched_pr
 assert "merge_sha=\n" in mismatched_pr
-invalid_type = run_case("missing", "7", release_type="type:invalid")
-assert "identity_status=resolver-error" in invalid_type
+invalid_target = run_case("missing", "7", release_target="type:invalid")
+assert "identity_status=resolver-error" in invalid_target
+symbolic_prerelease = run_case("missing", "7", release_target="patch")
+assert "identity_status=resolver-error" in symbolic_prerelease
 stale_artifact = run_case("missing", "7", artifact_run_attempt="2")
 assert "identity_status=resolver-error" in stale_artifact
 untrusted_marker = run_case("missing", "7", trusted_resolver=False)
@@ -350,4 +378,8 @@ missing_decision = run_case("missing", "7", decision_mode="missing")
 assert "identity_status=resolver-error" in missing_decision
 mismatched_decision = run_case("missing", "7", artifact_available=False, decision_mode="mismatched")
 assert "identity_status=resolver-error" in mismatched_decision
+tampered_preparation_version = run_case("missing", "7", preparation_mode="version")
+assert "identity_status=resolver-error" in tampered_preparation_version
+tampered_preparation_trailers = run_case("missing", "7", preparation_mode="trailers")
+assert "identity_status=resolver-error" in tampered_preparation_trailers
 print("release failure resolver mock tests passed")

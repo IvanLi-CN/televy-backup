@@ -10,6 +10,10 @@ on:
         description: Open same-repository PR to validate
         required: true
         type: string
+      head_sha:
+        description: Exact PR head SHA to validate
+        required: true
+        type: string
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -44,21 +48,23 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha }}
         run: |
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/ci-pr.json"
           jq -e \
             --arg repository "${GITHUB_REPOSITORY}" \
             --arg head_ref "${GITHUB_REF_NAME}" \
-            --arg head_sha "${GITHUB_SHA}" \
+            --arg head_sha "${EXPECTED_HEAD_SHA}" \
             '.state == "open" and .base.ref == "main" and .head.repo.full_name == $repository and .head.ref == $head_ref and .head.sha == $head_sha' \
             "${RUNNER_TEMP}/ci-pr.json" >/dev/null
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
 
       - name: Checkout dispatched pull request head
         if: github.event_name == 'workflow_dispatch'
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.head_sha }}
           fetch-depth: 2
 
       - name: Classify VERSION preparation commit
@@ -269,7 +275,7 @@ jobs:
             refs/tags/v0.9.9-rc.142:refs/tags/v0.9.9-rc.142
           python3 "${trusted_root}/.github/scripts/release_chain.py" verify-tag-provenance \
             --tag v0.9.9-rc.142
-          source_tag_commit="$(git rev-list -n 1 v0.9.9-rc.142^{commit})"
+          source_tag_commit="$(git rev-list -n 1 'v0.9.9-rc.142^{commit}')"
           python3 "${trusted_root}/.github/scripts/release_helper.py" verify-assets \
             --asset-dir "${fixture}/download" \
             --lock "${trusted_root}/packaging/macos/snapshot-components.lock.json" \

@@ -37,7 +37,8 @@ jobs:
       recovery_candidate: ${{ steps.resolve.outputs.recovery_candidate }}
       pull_request: ${{ steps.resolve.outputs.pull_request }}
       source_sha: ${{ steps.resolve.outputs.source_sha }}
-      release_type: ${{ steps.resolve.outputs.release_type }}
+      release_target: ${{ steps.resolve.outputs.release_target }}
+      policy: ${{ steps.resolve.outputs.policy }}
       tag_target_sha: ${{ steps.resolve.outputs.tag_target_sha }}
       tag_owner: ${{ steps.resolve.outputs.tag_owner }}
       reservation_id: ${{ steps.resolve.outputs.reservation_id }}
@@ -67,6 +68,7 @@ jobs:
           python3 - <<'PYCODE'
           from __future__ import annotations
 
+          import base64
           import json
           import os
           import re
@@ -156,11 +158,9 @@ jobs:
               preparation_sha, preparation, values = candidates[0]
               source_sha = require_sha(values.get('Release-Source-SHA'), 'reconstructed source SHA')
               version = str(values.get('Product-Version', ''))
-              channel_label = str(values.get('Release-Intent-Channel', ''))
-              release_type = str(values.get('Release-Intent-Type', ''))
-              channel = channel_label.removeprefix('channel:')
-              components_value = str(values.get('Release-Intent-Components', 'none'))
-              components = [] if components_value == 'none' else [item for item in components_value.split(',') if item]
+              release_target = str(values.get('Release-Target', ''))
+              policy = str(values.get('Release-Policy', ''))
+              channel = str(values.get('Release-Channel', ''))
               reservation_ref = f'refs/tags/release-reservation/v{version}'
               reservation_ref_payload = api_json(f'/repos/{repository}/git/ref/{reservation_ref.removeprefix("refs/")}')
               reservation_sha = require_sha(reservation_ref_payload.get('object', {}).get('sha'), 'reconstructed reservation SHA')
@@ -172,6 +172,8 @@ jobs:
                   'owner': reservation_values.get('Reservation-Owner', ''),
                   'claim_key': reservation_values.get('Reservation-Claim-Key', ''),
                   'boundary_token': reservation_values.get('Reservation-Boundary-Token', ''),
+                  'release_target': reservation_values.get('Release-Target', release_target),
+                  'policy': reservation_values.get('Release-Policy', policy),
                   'state': 'bound',
                   'merge_commit_sha': merge_sha,
               }
@@ -187,10 +189,9 @@ jobs:
                   'branch_head': merge_sha,
                   'release_mode': values.get('Release-Mode', 'normal'),
                   'covered_merge_sha': values.get('Release-Covered-Merge-SHA', ''),
-                  'labels': [release_type, f'channel:{channel}', *components],
-                  'type': release_type,
+                  'release_target': release_target,
+                  'policy': policy,
                   'channel': channel,
-                  'components': components,
                   'version': version,
                   'tag': f'v{version}',
                   'tag_target_sha': product_tag_target(f'v{version}') or '',
@@ -259,11 +260,31 @@ jobs:
                           values[key.strip()] = value.strip()
               return values
 
+          def preparation_version(preparation_sha: str) -> str:
+              payload = api_json(f'/repos/{repository}/contents/VERSION?ref={preparation_sha}')
+              if payload.get('type') != 'file' or payload.get('encoding') != 'base64':
+                  raise RuntimeError('preparation VERSION content is unavailable')
+              encoded = ''.join(str(payload.get('content', '')).split())
+              try:
+                  return base64.b64decode(encoded, validate=True).decode('utf-8')
+              except (ValueError, UnicodeDecodeError) as exc:
+                  raise RuntimeError('preparation VERSION content is invalid') from exc
+
           def require_sha(value: object, label: str) -> str:
               normalized = str(value or '').strip()
               if not re.fullmatch(r'[0-9a-f]{40}', normalized):
                   raise RuntimeError(f'{label} is not a full SHA')
               return normalized
+
+          def validate_target_identity(release_target: str, version: str, channel: str) -> None:
+              version_channel = version.rsplit('-', 1)[-1].split('.', 1)[0] if '-' in version else 'prod'
+              if version_channel != channel:
+                  raise RuntimeError('release version channel does not match the release identity')
+              if release_target in {'patch', 'minor', 'major'}:
+                  if channel != 'prod' or '-' in version:
+                      raise RuntimeError('symbolic release targets must resolve to a final product version')
+              elif release_target != version:
+                  raise RuntimeError('explicit release target does not match the release version')
 
           def verify_preparation(intent: dict, source_sha: str, merge_sha: str) -> tuple[str, bool]:
               preparation_sha = require_sha(intent.get('preparation_commit_sha'), 'preparation commit SHA')
@@ -273,6 +294,18 @@ jobs:
               verification = preparation.get('verification')
               if not isinstance(verification, dict) or verification.get('verified') is not True:
                   raise RuntimeError('preparation commit GitHub signature is not verified')
+              expected_trailers = {
+                  'Release-Source-SHA': source_sha,
+                  'Product-Version': str(intent['version']),
+                  'Release-Target': str(intent['release_target']),
+                  'Release-Policy': str(intent['policy']),
+                  'Release-Channel': str(intent['channel']),
+              }
+              preparation_trailers = trailers(preparation['message'])
+              if any(preparation_trailers.get(key) != value for key, value in expected_trailers.items()):
+                  raise RuntimeError('preparation commit trailers do not match the release identity')
+              if preparation_version(preparation_sha) != f"{intent['version']}\n":
+                  raise RuntimeError('preparation VERSION does not match the release identity')
               merge = commit_snapshot(merge_sha)
               if preparation_sha not in merge['parents']:
                   raise RuntimeError('merge commit does not contain the preparation commit')
@@ -302,6 +335,8 @@ jobs:
                   'Reservation-Boundary-Token': str(reservation['boundary_token']),
                   'Release-Version': version,
                   'Release-Channel': channel,
+                  'Release-Target': str(intent['release_target']),
+                  'Release-Policy': str(intent['policy']),
                   'Reservation-State': 'claimed',
               }
               if any(reservation_trailers.get(key) != value for key, value in expected_trailers.items()):
@@ -312,6 +347,8 @@ jobs:
                   'owner': reservation_trailers['Reservation-Owner'],
                   'claim_key': reservation_trailers['Reservation-Claim-Key'],
                   'boundary_token': reservation_trailers['Reservation-Boundary-Token'],
+                  'release_target': reservation_trailers['Release-Target'],
+                  'policy': reservation_trailers['Release-Policy'],
                   'merge_commit_sha': require_sha(reservation['merge_commit_sha'], 'reservation merge SHA'),
               }, reservation_commit
 
@@ -326,6 +363,8 @@ jobs:
               expected_trailers = {
                   'Receipt-State': 'bound',
                   'Release-Version': version,
+                  'Release-Target': reservation['release_target'],
+                  'Release-Policy': reservation['policy'],
                   'Release-Merge-SHA': merge_sha,
                   'Release-Reservation-Id': reservation['id'],
                   'Release-Owner': reservation['owner'],
@@ -351,6 +390,8 @@ jobs:
               expected_trailers = {
                   'Decision-State': 'bound',
                   'Release-Version': version,
+                  'Release-Target': reservation['release_target'],
+                  'Release-Policy': reservation['policy'],
                   'Release-Merge-SHA': merge_sha,
                   'Release-Reservation-Id': reservation['id'],
                   'Release-Owner': reservation['owner'],
@@ -388,16 +429,10 @@ jobs:
               sha_re = re.compile(r'^[0-9a-f]{40}$')
               provenance = intent.get('provenance')
               artifacts = intent.get('artifact_names')
-              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head', 'release_mode', 'type', 'channel', 'version', 'tag', 'tag_owner', 'run_id', 'run_attempt', 'run_url', 'recovery_instruction')
+              required = ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head', 'release_mode', 'release_target', 'policy', 'channel', 'version', 'tag', 'tag_owner', 'run_id', 'run_attempt', 'run_url', 'recovery_instruction')
               if any(not str(intent.get(key, '')).strip() for key in required):
                   raise RuntimeError('release intent is incomplete')
-              labels = intent.get('labels')
-              components = intent.get('components')
               artifact_name_re = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$')
-              if not isinstance(labels, list) or any(not isinstance(item, str) or not item for item in labels):
-                  raise RuntimeError('release intent labels are incomplete')
-              if not isinstance(components, list) or any(not isinstance(item, str) or not item.startswith('component:') for item in components):
-                  raise RuntimeError('release intent components are incomplete')
               if not isinstance(artifacts, list) or not artifacts or any(not isinstance(item, str) or not artifact_name_re.fullmatch(item) for item in artifacts):
                   raise RuntimeError('release intent artifact names are incomplete')
               for key in ('source_sha', 'preparation_commit_sha', 'merge_sha', 'merge_commit_sha', 'head_sha', 'branch_head'):
@@ -412,15 +447,15 @@ jobs:
                   raise RuntimeError('release intent identity fields do not agree')
               if not re.fullmatch(r'(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?', str(intent['version'])):
                   raise RuntimeError('release intent version is not a valid product version')
-              if str(intent['type']) not in {'type:major', 'type:minor', 'type:patch'}:
-                  raise RuntimeError('release intent type is not a supported product type')
+              if not re.fullmatch(r'(?:patch|minor|major|(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)', str(intent['release_target'])):
+                  raise RuntimeError('release target is not a supported manual target')
+              if str(intent['policy']) != 'televybackup-manual-semver-v1':
+                  raise RuntimeError('release policy is not the active manual version policy')
               if str(intent['channel']) not in {'prod', 'beta', 'rc', 'dev'}:
                   raise RuntimeError('release intent channel is not a supported release channel')
+              validate_target_identity(str(intent['release_target']), str(intent['version']), str(intent['channel']))
               if str(intent['tag_owner']) != 'protected-release-automation':
                   raise RuntimeError('release intent tag owner is not the protected release automation owner')
-              expected_labels = {str(intent['type']), f"channel:{intent['channel']}"}
-              if not expected_labels.issubset(set(labels)):
-                  raise RuntimeError('release intent labels do not contain the locked release intent')
               source_sha = require_sha(intent['source_sha'], 'source SHA')
               merge_sha = require_sha(intent['merge_sha'], 'merge SHA')
               preparation_sha, signature_verified = verify_preparation(intent, source_sha, merge_sha)
@@ -449,7 +484,8 @@ jobs:
                   'head_sha': preparation_sha,
                   'merge_sha': merge_sha,
                   'merge_commit_sha': merge_sha,
-                  'release_type': str(intent['type']),
+                  'release_target': str(intent['release_target']),
+                  'policy': str(intent['policy']),
                   'channel': str(intent['channel']),
                   'version': str(intent['version']),
                   'tag': str(intent['tag']),
@@ -577,7 +613,7 @@ jobs:
               handle.write(extra)
               handle.write('\nEOF\n')
               handle.write(f'recovery_candidate={recovery}\n')
-              for key in ('pull_request', 'source_sha', 'preparation_commit_sha', 'merge_commit_sha', 'release_type', 'tag_status', 'tag_target_sha', 'tag_owner', 'reservation_id', 'reservation_owner', 'reservation_state', 'reservation_merge_commit_sha', 'provenance_verified', 'signature_verified', 'branch_head', 'artifact_names', 'recovery_instruction'):
+              for key in ('pull_request', 'source_sha', 'preparation_commit_sha', 'merge_commit_sha', 'release_target', 'policy', 'tag_status', 'tag_target_sha', 'tag_owner', 'reservation_id', 'reservation_owner', 'reservation_state', 'reservation_merge_commit_sha', 'provenance_verified', 'signature_verified', 'branch_head', 'artifact_names', 'recovery_instruction'):
                   handle.write(f'{key}={identity.get(key, "")}\n')
           PYCODE
 
@@ -614,7 +650,8 @@ jobs:
         recovery_candidate: ${{ needs.resolve_release_context.outputs.recovery_candidate }}
         pull_request: ${{ needs.resolve_release_context.outputs.pull_request }}
         source_sha: ${{ needs.resolve_release_context.outputs.source_sha }}
-        type: ${{ needs.resolve_release_context.outputs.release_type }}
+        release_target: ${{ needs.resolve_release_context.outputs.release_target }}
+        policy: ${{ needs.resolve_release_context.outputs.policy }}
         tag_target_sha: ${{ needs.resolve_release_context.outputs.tag_target_sha }}
         tag_owner: ${{ needs.resolve_release_context.outputs.tag_owner }}
         reservation_id: ${{ needs.resolve_release_context.outputs.reservation_id }}

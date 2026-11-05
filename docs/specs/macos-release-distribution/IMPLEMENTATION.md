@@ -14,7 +14,7 @@ The distribution contract is implemented in the `th/feat/macos-release-distribut
 | Managed service | `crates/cli/src/service.rs` | REQ-MRD-005, 006 |
 | Snapshot Access and mount services | `crates/snapshot-helper/`, `crates/cli/src/snapshot_service.rs`, `crates/cli/src/snapshot_mount_service.rs` | REQ-MRD-010 |
 | GUI service control | `macos/TelevyBackupApp/SettingsWindow.swift` | REQ-MRD-007 |
-| Release orchestration | `.github/workflows/release.yml`, `.github/workflows/release-completion.yml`, `.github/scripts/release_helper.py`, `.github/scripts/verify-macos-rc-acceptance.py` | REQ-MRD-008, REQ-MRD-010; see `product-version-release-chain` for the current VERSION-only contract |
+| Release orchestration | `.github/workflows/release.yml`, `.github/workflows/release-completion.yml`, `.github/scripts/release_helper.py`, `.github/scripts/verify-macos-rc-acceptance.py` | REQ-MRD-008, REQ-MRD-010; see `manual-version-release-delivery` for the active VERSION-only contract |
 | Homebrew GUI Cask | `Casks/televybackup.rb`, `scripts/homebrew/cask_release.py`, `.github/workflows/homebrew-cask.yml` | REQ-MRD-012 |
 
 ## Required Evidence

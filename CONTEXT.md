@@ -73,9 +73,20 @@ _Avoid_: Upload attempt, pack
 
 ## Product Release Identity
 
+**Release Target**:
+The single owner-provided `release_target` value that expresses `patch`, `minor`, `major`, or an explicit final/prerelease version. It is release intent and is not the canonical version until Version Policy resolves it.
+_Avoid_: PR label, current VERSION, inferred bump
+
+**Version Policy**:
+The checked-in release policy that parses one Release Target, verifies the trusted final baseline, resolves the Canonical Version, rejects collisions, and maps the identity to publication surfaces.
+_Avoid_: release workflow default, compatibility classification
+
+**Canonical Version**:
+The exact version resolved by Version Policy for one Release Target. It is written to `VERSION`, used by the product tag, and retained in the Merged Identity.
+_Avoid_: raw target, current branch version
+
 **Product Release Identity**:
-The immutable tuple `(merge SHA, product version, release channel)` that names one published
-product boundary. A release identity is created only after a trusted preparation has been merged.
+The immutable tuple `(merge SHA, canonical version, release channel, policy id, reservation id)` that names one published product boundary. A release identity is created only after a trusted preparation has been merged.
 _Avoid_: VERSION value alone, release run, artifact name
 
 **Final Version Baseline**:
@@ -94,8 +105,7 @@ formal dev version and is never inferred from merge order.
 _Avoid_: patch number, short SHA
 
 **Reservation**:
-An append-only repository tag under `release-reservation/` that claims one version and records its
-pre-merge provenance before VERSION preparation.
+An append-only repository tag under `release-reservation/` that claims one Canonical Version and records its pre-merge provenance before VERSION preparation or publication.
 _Avoid_: queue entry, mutable lock, Git note
 
 **Boundary Token**:
@@ -126,8 +136,7 @@ reservation, merge, and publication chain.
 _Avoid_: workflow success, release status
 
 **Same-SHA Recovery**:
-A retry of publish or receipt work for an existing merged identity without recalculating a version,
-changing VERSION, or creating a new identity.
+A retry of publication or receipt work for an existing Merged Identity without recalculating a version, changing VERSION, changing target, or creating a new identity.
 _Avoid_: backfill, successor allocation
 
 **VERSION-only Release PR**:
