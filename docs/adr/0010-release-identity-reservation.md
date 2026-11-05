@@ -40,6 +40,8 @@ Every receipt writer independently verifies the reservation's parent, tree, and 
 append the first `bound` receipt only after re-verifying the merged preparation identity and the
 reservation. A `released` receipt is rejected once a bound or consumed receipt exists.
 
+An old unmerged claim is not migrated by editing its refs. The controlled unpublished-legacy retirement and reclaimed-namespace procedure is defined separately by [ADR 0018](0018-unpublished-legacy-identity-retirement.md); it appends a retirement receipt only after proving that no product publication or stable artifact consumption occurred, then allocates a distinct reservation and decision ref for the new claim.
+
 The release intent JSON is an Actions artifact snapshot only. Recovery reconstructs identity from
 reservation and receipt refs, preparation/merge trailers, and the product tag. The normal PR mode,
 the explicit `version-only-release-pr` mode, and same-SHA recovery remain separate contracts.

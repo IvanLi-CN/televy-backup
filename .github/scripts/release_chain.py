@@ -27,7 +27,7 @@ PRODUCT_TAG_RE = re.compile(
     r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
 )
 IDENTITY_REF_RE = re.compile(
-    r"^refs/tags/release-(?:reservation|decision|bound|consumed|released|artifact-pending|artifact-attempts|artifacts)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
+    r"^refs/tags/release-(?:reservation|decision|reservation-reclaimed|decision-reclaimed|bound|consumed|released|retired|artifact-pending|artifact-attempts|artifacts)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/.*)?$"
 )
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PRODUCT_TAG_OWNER = "protected-release-automation"
@@ -401,21 +401,140 @@ def product_tags() -> list[dict[str, str]]:
     return values
 
 
+def _ref_target(ref: str) -> str | None:
+    value = git("rev-parse", f"{ref}^{{commit}}", check=False)
+    return value if SHA_RE.fullmatch(value) else None
+
+
+def valid_retirement_receipt(ref: str) -> tuple[str, set[str]] | None:
+    """Return a retired version and its legacy source refs only for a valid receipt."""
+    match = IDENTITY_REF_RE.fullmatch(ref)
+    if not match or not ref.startswith("refs/tags/release-retired/"):
+        return None
+    target = _ref_target(ref)
+    if not target:
+        return None
+    values = trailers(target)
+    version = match.group("version")
+    required = {
+        "Retirement-State": "retired",
+        "Release-Version": version,
+        "Retirement-Product-Tag": "absent",
+        "Retirement-GitHub-Release": "absent",
+        "Retirement-Consumed-Refs": "none",
+        "Retirement-Artifact-Refs": "none",
+        "Retirement-Provenance": "immutable-retirement-reconciliation",
+    }
+    if any(values.get(key) != value for key, value in required.items()):
+        return None
+    expected_reservation_ref = f"refs/tags/release-reservation/v{version}"
+    expected_decision_ref = f"refs/tags/release-decision/v{version}"
+    expected_released_prefix = f"refs/tags/release-released/v{version}/"
+    if (
+        values.get("Retirement-Source-Reservation-Ref") != expected_reservation_ref
+        or values.get("Retirement-Source-Decision-Ref") != expected_decision_ref
+        or not values.get("Retirement-Source-Released-Ref", "").startswith(expected_released_prefix)
+    ):
+        return None
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", values.get("Retirement-Evidence-Digest", "")):
+        return None
+    try:
+        canonical_sha(values["Retirement-Evidence-Main-SHA"], "retirement evidence main SHA")
+        canonical_sha(values["Retirement-Source-Reservation-SHA"], "retired reservation SHA")
+        canonical_sha(values["Retirement-Source-Decision-SHA"], "retired decision SHA")
+        canonical_sha(values["Retirement-Source-Released-SHA"], "retired released SHA")
+    except ReleaseChainError:
+        return None
+    source_refs = {
+        values.get("Retirement-Source-Reservation-Ref", ""),
+        values.get("Retirement-Source-Decision-Ref", ""),
+        values.get("Retirement-Source-Released-Ref", ""),
+        ref,
+    }
+    if any(not value.startswith("refs/tags/") for value in source_refs):
+        return None
+    if any(_ref_target(source_ref) != values.get(source_key) for source_ref, source_key in (
+        (values["Retirement-Source-Reservation-Ref"], "Retirement-Source-Reservation-SHA"),
+        (values["Retirement-Source-Decision-Ref"], "Retirement-Source-Decision-SHA"),
+        (values["Retirement-Source-Released-Ref"], "Retirement-Source-Released-SHA"),
+    )):
+        return None
+    reservation_target = values["Retirement-Source-Reservation-SHA"]
+    decision_target = values["Retirement-Source-Decision-SHA"]
+    released_target = values["Retirement-Source-Released-SHA"]
+    reservation_parents = git("show", "-s", "--format=%P", reservation_target).split()
+    if len(reservation_parents) != 1 or git("show", "-s", "--format=%T", reservation_target) != git("show", "-s", "--format=%T", reservation_parents[0]):
+        return None
+    reservation_values = trailers(reservation_target)
+    reservation_id = values.get("Retirement-Reservation-Id", "")
+    owner = values.get("Retirement-Owner", "")
+    if not reservation_id or not owner:
+        return None
+    if any(reservation_values.get(key) != expected for key, expected in {
+        "Reservation-Id": reservation_id,
+        "Reservation-Owner": owner,
+        "Release-Version": version,
+        "Reservation-State": "claimed",
+    }.items()):
+        return None
+    if git("show", "-s", "--format=%P", decision_target).split() != [reservation_target]:
+        return None
+    decision_values = trailers(decision_target)
+    if any(decision_values.get(key) != expected for key, expected in {
+        "Decision-State": "released",
+        "Release-Version": version,
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Reservation-Ref": expected_reservation_ref,
+    }.items()):
+        return None
+    merge_sha = decision_values.get("Release-Merge-SHA", "")
+    try:
+        canonical_sha(merge_sha, "retired release merge SHA")
+    except ReleaseChainError:
+        return None
+    if git("show", "-s", "--format=%P", released_target).split() != [merge_sha]:
+        return None
+    released_values = trailers(released_target)
+    if any(released_values.get(key) != expected for key, expected in {
+        "Receipt-State": "released",
+        "Release-Version": version,
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Reservation-Ref": expected_reservation_ref,
+    }.items()):
+        return None
+    parents = git("show", "-s", "--format=%P", target).split()
+    if parents != [values["Retirement-Source-Released-SHA"]]:
+        return None
+    return version, source_refs
+
+
 def occupied_identity_versions() -> list[str]:
-    """Return versions already claimed by any append-only release identity ref."""
+    """Return versions claimed by identity refs, excluding only verified retired legacy refs."""
     prefixes = (
         "refs/tags/release-reservation",
         "refs/tags/release-decision",
+        "refs/tags/release-reservation-reclaimed",
+        "refs/tags/release-decision-reclaimed",
         "refs/tags/release-bound",
         "refs/tags/release-consumed",
         "refs/tags/release-released",
+        "refs/tags/release-retired",
         "refs/tags/release-artifact-pending",
         "refs/tags/release-artifact-attempts",
         "refs/tags/release-artifacts",
     )
     refs = git("for-each-ref", "--format=%(refname)", *prefixes).splitlines()
+    retired_sources: set[str] = set()
+    for ref in refs:
+        verified = valid_retirement_receipt(ref)
+        if verified:
+            retired_sources.update(verified[1])
     versions = []
     for ref in refs:
+        if ref in retired_sources:
+            continue
         match = IDENTITY_REF_RE.fullmatch(ref)
         if match:
             versions.append(match.group("version"))

@@ -12,7 +12,8 @@
 
 - Requirement coverage: Version Policy, manual preparation, target gate, completion gate, release contract, reservation provenance, and same-identity recovery with immutable release-asset reuse are implemented.
 - Verification commands: `test-release-chain.sh`, `test-release-preparation.sh`, `test-release-completion.sh`, `test-release-reservation.sh`, `test-release-github-api.sh`, `test-release-failure-context.py`, `test-release-workflows.sh`, `test-homebrew-cask.sh`, `test-release-scripts.sh`, and `scripts/test-product-version.py` pass locally.
-- Rollout facts: existing `v0.9.9` reservation and decision refs are immutable historical occupancy and are not rewritten or migrated by this topic.
+- Rollout facts: existing `v0.9.9` reservation, decision, and released refs were proven to have no product Tag, GitHub Release, stable consumed receipt, or release artifact receipt; reconciliation appends `release-retired/v0.9.9/<legacy-reservation-id>` and preserves every legacy ref SHA.
+- Reclaim facts: a future `0.9.9` claim uses the independent `release-reservation-reclaimed/v0.9.9/<reservation-id>` and `release-decision-reclaimed/v0.9.9/<reservation-id>` namespaces, so Git's ref-file/directory constraint cannot force an overwrite.
 
 ## Coverage / rollout summary
 
@@ -21,6 +22,7 @@ The active route will accept one owner-provided `release_target` through trusted
 ## Remaining Gaps
 
 - Run the active route against a new direct PR and collect CI evidence; PR #203 is historical evidence only.
+- Dispatch the controlled reconciliation for the verified legacy `0.9.9` claim before creating the new VERSION-only release PR.
 - Apply the checked-in quality-gate declaration to the repository's remote branch protection when the owner authorizes that external change.
 
 ## Related Changes

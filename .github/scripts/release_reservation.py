@@ -83,6 +83,23 @@ def reservation_ref(version: str) -> str:
     return f"refs/tags/release-reservation/v{version}"
 
 
+def reclaimed_reservation_ref(version: str, reservation_id: str) -> str:
+    validate_version(version)
+    if not IDENTITY_SEGMENT_RE.fullmatch(reservation_id):
+        raise ReservationError(f"invalid reservation identity: {reservation_id!r}")
+    return f"refs/tags/release-reservation-reclaimed/v{version}/{reservation_id}"
+
+
+def validate_reservation_ref(version: str, value: str) -> None:
+    expected = reservation_ref(version)
+    if value == expected:
+        return
+    prefix = f"refs/tags/release-reservation-reclaimed/v{version}/"
+    if value.startswith(prefix) and IDENTITY_SEGMENT_RE.fullmatch(value.removeprefix(prefix)):
+        return
+    raise ReservationError("reservation ref does not match the release version")
+
+
 def receipt_ref(state: str, version: str, identity: str) -> str:
     if state not in {"bound", "consumed", "released"}:
         raise ReservationError(f"unsupported receipt state: {state}")
@@ -121,9 +138,20 @@ def artifact_receipt_ref(
     return f"refs/tags/{namespace}/v{version}/{merge}"
 
 
-def decision_ref(version: str) -> str:
+def decision_ref(version: str, reservation_ref_value: str | None = None) -> str:
     validate_version(version)
-    return f"refs/tags/release-decision/v{version}"
+    if reservation_ref_value is None or reservation_ref_value == reservation_ref(version):
+        return f"refs/tags/release-decision/v{version}"
+    validate_reservation_ref(version, reservation_ref_value)
+    reservation_id = reservation_ref_value.rsplit("/", 1)[-1]
+    return f"refs/tags/release-decision-reclaimed/v{version}/{reservation_id}"
+
+
+def retirement_ref(version: str, reservation_id: str) -> str:
+    validate_version(version)
+    if not IDENTITY_SEGMENT_RE.fullmatch(reservation_id):
+        raise ReservationError(f"invalid retirement identity: {reservation_id!r}")
+    return f"refs/tags/release-retired/v{version}/{reservation_id}"
 
 
 def deterministic_identity(owner: str, claim_key: str) -> dict[str, str]:
@@ -229,8 +257,7 @@ def validate_expected_reservation(expected: dict[str, Any]) -> None:
     validate_release_target(release_target, policy)
     if policy == RELEASE_POLICY_ID:
         validate_target_identity(release_target, version, channel)
-    if str(expected["ref"]) != reservation_ref(version):
-        raise ReservationError("reservation ref does not match the release version")
+    validate_reservation_ref(version, str(expected["ref"]))
     normalize_sha(str(expected["sourceSha"]), "source SHA")
     for key in (
         "reservationId",
@@ -365,6 +392,57 @@ def find_local_reservation_by_claim(
     if len(matches) > 1:
         raise ReservationError("multiple reservations match the same claim")
     return matches[0] if matches else None
+
+
+def reservation_ref_for_claim(
+    *, version: str, reservation_id: str, owner: str = "", claim_key: str = "",
+    release_target: str = "", repository: str | None = None, token: str | None = None,
+    api_root: str = "https://api.github.com", cwd: Path = ROOT
+) -> str:
+    """Choose the immutable reservation path, reclaiming only a verified retired legacy claim."""
+    default_ref = reservation_ref(version)
+    if repository and token:
+        client = GitHubRefClient(repository, token, api_root)
+        if not client.ref_target(default_ref):
+            return default_ref
+        legacy_target = client.ref_target(default_ref)
+        if not legacy_target:
+            raise ReservationError("release reservation changed while resolving its immutable path")
+        legacy_info = client.commit_info(legacy_target)
+        legacy_trailers = trailers_from_message(str(legacy_info.get("message", "")))
+        legacy_id = legacy_trailers.get("Reservation-Id", "")
+        if not legacy_id:
+            raise ReservationError("existing reservation has no immutable reservation id")
+        if (
+            legacy_id == reservation_id
+            and legacy_trailers.get("Reservation-Owner") == owner
+            and legacy_trailers.get("Reservation-Claim-Key") == claim_key
+            and legacy_trailers.get("Release-Target") == release_target
+        ):
+            return default_ref
+        verify_github_retirement(
+            version=version, reservation_id=legacy_id, repository=repository, token=token,
+            api_root=api_root,
+        )
+        return reclaimed_reservation_ref(version, reservation_id)
+    if not local_ref_target(default_ref, cwd):
+        return default_ref
+    legacy_target = local_ref_target(default_ref, cwd)
+    if not legacy_target:
+        raise ReservationError("release reservation changed while resolving its immutable path")
+    legacy_trailers = trailers_from_message(local_commit_info(legacy_target, cwd)["message"])
+    legacy_id = legacy_trailers.get("Reservation-Id", "")
+    if not legacy_id:
+        raise ReservationError("existing reservation has no immutable reservation id")
+    if (
+        legacy_id == reservation_id
+        and legacy_trailers.get("Reservation-Owner") == owner
+        and legacy_trailers.get("Reservation-Claim-Key") == claim_key
+        and legacy_trailers.get("Release-Target") == release_target
+    ):
+        return default_ref
+    verify_local_retirement(version=version, reservation_id=legacy_id, cwd=cwd)
+    return reclaimed_reservation_ref(version, reservation_id)
 
 
 class GitHubRefClient:
@@ -554,10 +632,465 @@ class GitHubRefClient:
         return target
 
 
+def retirement_evidence_digest(evidence: dict[str, Any]) -> str:
+    canonical = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return f"sha256:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()}"
+
+
+def validate_retirement_evidence(evidence: dict[str, Any], version: str) -> None:
+    if not isinstance(evidence, dict) or evidence.get("version") != version:
+        raise ReservationError("retirement evidence version does not match the release version")
+    if evidence.get("schema_version") != 1:
+        raise ReservationError("unsupported retirement evidence schema")
+    if evidence.get("product_tag", {}).get("status") != "absent":
+        raise ReservationError("retirement requires an absent product tag")
+    if evidence.get("github_release", {}).get("status") != "absent":
+        raise ReservationError("retirement requires an absent GitHub Release")
+    if evidence.get("consumed_refs") != []:
+        raise ReservationError("retirement requires no stable consumed refs")
+    if evidence.get("artifact_refs") != []:
+        raise ReservationError("retirement requires no stable artifact refs")
+    runs = evidence.get("release_runs")
+    if not isinstance(runs, list) or not runs:
+        raise ReservationError("retirement evidence must list the checked Release Product runs")
+    for run in runs:
+        if not isinstance(run, dict) or not str(run.get("id", "")).strip():
+            raise ReservationError("retirement evidence has an invalid Release Product run")
+        if run.get("artifacts") != []:
+            raise ReservationError("retirement requires checked Release Product runs with no artifacts")
+    normalize_sha(str(evidence.get("main_sha", "")), "retirement evidence main SHA")
+
+
+def _retirement_static_fields(
+    *, version: str, reservation_id: str, reservation_ref_value: str, decision_ref_value: str,
+    released_ref_value: str, reservation_target: str, decision_target: str, released_target: str,
+    owner: str, reason: str
+) -> dict[str, str]:
+    return {
+        "Retirement-State": "retired",
+        "Release-Version": version,
+        "Retirement-Reservation-Id": reservation_id,
+        "Retirement-Source-Reservation-Ref": reservation_ref_value,
+        "Retirement-Source-Reservation-SHA": reservation_target,
+        "Retirement-Source-Decision-Ref": decision_ref_value,
+        "Retirement-Source-Decision-SHA": decision_target,
+        "Retirement-Source-Released-Ref": released_ref_value,
+        "Retirement-Source-Released-SHA": released_target,
+        "Retirement-Product-Tag": "absent",
+        "Retirement-GitHub-Release": "absent",
+        "Retirement-Consumed-Refs": "none",
+        "Retirement-Artifact-Refs": "none",
+        "Retirement-Owner": owner,
+        "Retirement-Reason": reason,
+        "Retirement-Provenance": "immutable-retirement-reconciliation",
+    }
+
+
+def retirement_fields(
+    *, version: str, reservation_id: str, reservation_ref_value: str, decision_ref_value: str,
+    released_ref_value: str, reservation_target: str, decision_target: str, released_target: str,
+    owner: str, reason: str, evidence: dict[str, Any]
+) -> dict[str, str]:
+    validate_retirement_evidence(evidence, version)
+    fields = _retirement_static_fields(
+        version=version, reservation_id=reservation_id, reservation_ref_value=reservation_ref_value,
+        decision_ref_value=decision_ref_value, released_ref_value=released_ref_value,
+        reservation_target=reservation_target, decision_target=decision_target,
+        released_target=released_target, owner=owner, reason=reason,
+    )
+    run_ids = [str(run["id"]) for run in evidence["release_runs"]]
+    fields.update({
+        "Retirement-Artifact-Runs": ",".join(run_ids),
+        "Retirement-Evidence-Main-SHA": normalize_sha(str(evidence["main_sha"]), "retirement evidence main SHA"),
+        "Retirement-Evidence-Digest": retirement_evidence_digest(evidence),
+    })
+    return fields
+
+
+def retirement_message(fields: dict[str, str]) -> str:
+    lines = ["release: immutable legacy identity retirement", ""]
+    lines.extend(f"{key}: {value}" for key, value in fields.items())
+    return "\n".join(lines) + "\n"
+
+
+def verify_retirement_trailers(actual: dict[str, str], fields: dict[str, str], evidence: dict[str, Any] | None) -> None:
+    if any(actual.get(key) != value for key, value in fields.items()):
+        raise ReservationError("retirement receipt does not match the requested identity")
+    if evidence is None:
+        if not actual.get("Retirement-Artifact-Runs") or actual.get("Retirement-Artifact-Runs") == "none":
+            raise ReservationError("retirement receipt is missing checked Release Product runs")
+        normalize_sha(actual.get("Retirement-Evidence-Main-SHA", ""), "retirement evidence main SHA")
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", actual.get("Retirement-Evidence-Digest", "")):
+            raise ReservationError("retirement receipt has an invalid evidence digest")
+    else:
+        expected = retirement_fields(
+            version=fields["Release-Version"], reservation_id=fields["Retirement-Reservation-Id"],
+            reservation_ref_value=fields["Retirement-Source-Reservation-Ref"],
+            decision_ref_value=fields["Retirement-Source-Decision-Ref"],
+            released_ref_value=fields["Retirement-Source-Released-Ref"],
+            reservation_target=fields["Retirement-Source-Reservation-SHA"],
+            decision_target=fields["Retirement-Source-Decision-SHA"],
+            released_target=fields["Retirement-Source-Released-SHA"],
+            owner=fields["Retirement-Owner"], reason=fields["Retirement-Reason"], evidence=evidence,
+        )
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise ReservationError("retirement receipt does not match the supplied evidence")
+
+
+def _verify_retirement_source_local(
+    *, version: str, reservation_id: str, owner: str, cwd: Path = ROOT
+) -> dict[str, Any]:
+    reservation_ref_value = reservation_ref(version)
+    decision_ref_value = decision_ref(version)
+    released_ref_value = receipt_ref("released", version, reservation_id)
+    reservation_target = local_ref_target(reservation_ref_value, cwd)
+    decision_target = local_ref_target(decision_ref_value, cwd)
+    released_target = local_ref_target(released_ref_value, cwd)
+    if not reservation_target or not decision_target or not released_target:
+        raise ReservationError("legacy retirement source refs are incomplete")
+    reservation_info = local_commit_info(reservation_target, cwd)
+    if len(reservation_info["parents"]) != 1:
+        raise ReservationError("legacy reservation must have one source parent")
+    source_info = local_commit_info(reservation_info["parents"][0], cwd)
+    if reservation_info["tree"] != source_info["tree"]:
+        raise ReservationError("legacy reservation tree does not match its source")
+    reservation_trailers = trailers_from_message(reservation_info["message"])
+    if any(reservation_trailers.get(key) != value for key, value in {
+        "Reservation-Id": reservation_id,
+        "Reservation-Owner": owner,
+        "Release-Version": version,
+        "Reservation-State": "claimed",
+    }.items()):
+        raise ReservationError("legacy reservation identity does not match the retirement request")
+    decision_info = local_commit_info(decision_target, cwd)
+    if decision_info["parents"] != [reservation_target] or decision_info["tree"] not in {reservation_info["tree"], IDENTITY_METADATA_TREE_SHA}:
+        raise ReservationError("legacy decision provenance does not match the reservation")
+    decision_trailers = trailers_from_message(decision_info["message"])
+    for key, value in {
+        "Decision-State": "released",
+        "Release-Version": version,
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Reservation-Ref": reservation_ref_value,
+        "Decision-Provenance": "immutable-decision",
+    }.items():
+        if decision_trailers.get(key) != value:
+            raise ReservationError(f"legacy decision trailer {key} does not match")
+    merge_sha = normalize_sha(decision_trailers.get("Release-Merge-SHA", ""), "legacy release merge SHA")
+    released_info = local_commit_info(released_target, cwd)
+    merge_info = local_commit_info(merge_sha, cwd)
+    if released_info["parents"] != [merge_sha] or released_info["tree"] not in {merge_info["tree"], IDENTITY_METADATA_TREE_SHA}:
+        raise ReservationError("legacy released receipt provenance does not match its merge SHA")
+    released_trailers = trailers_from_message(released_info["message"])
+    for key, value in {
+        "Receipt-State": "released",
+        "Release-Version": version,
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Reservation-Ref": reservation_ref_value,
+        "Receipt-Provenance": "immutable-receipt",
+    }.items():
+        if released_trailers.get(key) != value:
+            raise ReservationError(f"legacy released trailer {key} does not match")
+    return {
+        "reservationRef": reservation_ref_value,
+        "decisionRef": decision_ref_value,
+        "releasedRef": released_ref_value,
+        "reservationTarget": reservation_target,
+        "decisionTarget": decision_target,
+        "releasedTarget": released_target,
+        "mergeSha": merge_sha,
+        "reservationTrailers": reservation_trailers,
+        "decisionTrailers": decision_trailers,
+        "releasedTrailers": released_trailers,
+    }
+
+
+def verify_local_retirement(
+    *, version: str, reservation_id: str, owner: str = "github-actions[bot]",
+    reason: str = "no-product-publication", evidence: dict[str, Any] | None = None,
+    cwd: Path = ROOT
+) -> dict[str, Any]:
+    source = _verify_retirement_source_local(version=version, reservation_id=reservation_id, owner=owner, cwd=cwd)
+    ref = retirement_ref(version, reservation_id)
+    target = local_ref_target(ref, cwd)
+    if not target:
+        raise ReservationError(f"retirement ref is missing: {ref}")
+    if evidence is None:
+        fields = _retirement_static_fields(
+            version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
+            decision_ref_value=source["decisionRef"], released_ref_value=source["releasedRef"],
+            reservation_target=source["reservationTarget"], decision_target=source["decisionTarget"],
+            released_target=source["releasedTarget"], owner=owner, reason=reason,
+        )
+    else:
+        fields = retirement_fields(
+            version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
+            decision_ref_value=source["decisionRef"], released_ref_value=source["releasedRef"],
+            reservation_target=source["reservationTarget"], decision_target=source["decisionTarget"],
+            released_target=source["releasedTarget"], owner=owner, reason=reason, evidence=evidence,
+        )
+    info = local_commit_info(target, cwd)
+    released_info = local_commit_info(source["releasedTarget"], cwd)
+    if info["parents"] != [source["releasedTarget"]] or info["tree"] not in {released_info["tree"], IDENTITY_METADATA_TREE_SHA}:
+        raise ReservationError("retirement receipt provenance does not match the released receipt")
+    actual = trailers_from_message(info["message"])
+    verify_retirement_trailers(actual, fields, evidence)
+    return {"ref": ref, "target": target, **fields}
+
+
+def _verify_retirement_source_github(
+    *, client: GitHubRefClient, version: str, reservation_id: str, owner: str
+) -> dict[str, Any]:
+    reservation_ref_value = reservation_ref(version)
+    decision_ref_value = decision_ref(version)
+    released_ref_value = receipt_ref("released", version, reservation_id)
+    reservation_target = client.ref_target(reservation_ref_value)
+    decision_target = client.ref_target(decision_ref_value)
+    released_target = client.ref_target(released_ref_value)
+    if not reservation_target or not decision_target or not released_target:
+        raise ReservationError("legacy retirement source refs are incomplete")
+    reservation_info = client.commit_info(reservation_target)
+    reservation_parents = [parent.get("sha") for parent in reservation_info.get("parents", [])]
+    if len(reservation_parents) != 1 or not isinstance(reservation_parents[0], str):
+        raise ReservationError("legacy reservation must have one source parent")
+    source_info = client.commit_info(reservation_parents[0])
+    if reservation_info.get("tree", {}).get("sha") != source_info.get("tree", {}).get("sha"):
+        raise ReservationError("legacy reservation tree does not match its source")
+    reservation_trailers = trailers_from_message(str(reservation_info.get("message", "")))
+    for key, value in {
+        "Reservation-Id": reservation_id,
+        "Reservation-Owner": owner,
+        "Release-Version": version,
+        "Reservation-State": "claimed",
+    }.items():
+        if reservation_trailers.get(key) != value:
+            raise ReservationError(f"legacy reservation trailer {key} does not match")
+    decision_info = client.commit_info(decision_target)
+    decision_parents = [parent.get("sha") for parent in decision_info.get("parents", [])]
+    if decision_parents != [reservation_target] or decision_info.get("tree", {}).get("sha") not in {
+        reservation_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA
+    }:
+        raise ReservationError("legacy decision provenance does not match the reservation")
+    decision_trailers = trailers_from_message(str(decision_info.get("message", "")))
+    for key, value in {
+        "Decision-State": "released",
+        "Release-Version": version,
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Reservation-Ref": reservation_ref_value,
+        "Decision-Provenance": "immutable-decision",
+    }.items():
+        if decision_trailers.get(key) != value:
+            raise ReservationError(f"legacy decision trailer {key} does not match")
+    merge_sha = normalize_sha(decision_trailers.get("Release-Merge-SHA", ""), "legacy release merge SHA")
+    released_info = client.commit_info(released_target)
+    merge_info = client.commit_info(merge_sha)
+    released_parents = [parent.get("sha") for parent in released_info.get("parents", [])]
+    if released_parents != [merge_sha] or released_info.get("tree", {}).get("sha") not in {
+        merge_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA
+    }:
+        raise ReservationError("legacy released receipt provenance does not match its merge SHA")
+    released_trailers = trailers_from_message(str(released_info.get("message", "")))
+    for key, value in {
+        "Receipt-State": "released",
+        "Release-Version": version,
+        "Release-Reservation-Id": reservation_id,
+        "Release-Owner": owner,
+        "Release-Reservation-Ref": reservation_ref_value,
+        "Receipt-Provenance": "immutable-receipt",
+    }.items():
+        if released_trailers.get(key) != value:
+            raise ReservationError(f"legacy released trailer {key} does not match")
+    return {
+        "reservationRef": reservation_ref_value,
+        "decisionRef": decision_ref_value,
+        "releasedRef": released_ref_value,
+        "reservationTarget": reservation_target,
+        "decisionTarget": decision_target,
+        "releasedTarget": released_target,
+        "mergeSha": merge_sha,
+        "reservationTrailers": reservation_trailers,
+        "decisionTrailers": decision_trailers,
+        "releasedTrailers": released_trailers,
+    }
+
+
+def verify_github_retirement(
+    *, version: str, reservation_id: str, repository: str, token: str,
+    api_root: str = "https://api.github.com", owner: str = "github-actions[bot]",
+    reason: str = "no-product-publication", evidence: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    client = GitHubRefClient(repository, token, api_root)
+    source = _verify_retirement_source_github(
+        client=client, version=version, reservation_id=reservation_id, owner=owner
+    )
+    ref = retirement_ref(version, reservation_id)
+    target = client.ref_target(ref)
+    if not target:
+        raise ReservationError(f"retirement ref is missing: {ref}")
+    if evidence is None:
+        fields = _retirement_static_fields(
+            version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
+            decision_ref_value=source["decisionRef"], released_ref_value=source["releasedRef"],
+            reservation_target=source["reservationTarget"], decision_target=source["decisionTarget"],
+            released_target=source["releasedTarget"], owner=owner, reason=reason,
+        )
+    else:
+        fields = retirement_fields(
+            version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
+            decision_ref_value=source["decisionRef"], released_ref_value=source["releasedRef"],
+            reservation_target=source["reservationTarget"], decision_target=source["decisionTarget"],
+            released_target=source["releasedTarget"], owner=owner, reason=reason, evidence=evidence,
+        )
+    info = client.commit_info(target)
+    released_info = client.commit_info(source["releasedTarget"])
+    parents = [parent.get("sha") for parent in info.get("parents", [])]
+    if parents != [source["releasedTarget"]] or info.get("tree", {}).get("sha") not in {
+        released_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA
+    }:
+        raise ReservationError("retirement receipt provenance does not match the released receipt")
+    actual = trailers_from_message(str(info.get("message", "")))
+    verify_retirement_trailers(actual, fields, evidence)
+    return {"ref": ref, "target": target, **fields}
+
+
+def _stable_identity_refs_local(version: str, cwd: Path) -> list[str]:
+    refs: list[str] = []
+    for namespace in (
+        "release-consumed",
+        "release-artifact-pending",
+        "release-artifact-attempts",
+        "release-artifacts",
+    ):
+        refs.extend(_git("for-each-ref", "--format=%(refname)", f"refs/tags/{namespace}/v{version}", cwd=cwd).splitlines())
+    return [ref for ref in refs if f"/v{version}/" in ref]
+
+
+def ensure_local_retirement_unpublished(version: str, cwd: Path = ROOT) -> None:
+    if local_ref_target(f"refs/tags/v{version}", cwd):
+        raise ReservationError("cannot retire a version with a product tag")
+    refs = _stable_identity_refs_local(version, cwd)
+    if refs:
+        raise ReservationError(f"cannot retire a version with stable identity refs: {', '.join(refs)}")
+
+
+def _remote_matching_refs(client: GitHubRefClient, namespace: str, version: str) -> list[str]:
+    status, payload = client.request_json(
+        "GET", f"/repos/{client.repository}/git/matching-refs/tags/{namespace}/v{version}"
+    )
+    if status == 404:
+        return []
+    if not isinstance(payload, list):
+        raise ReservationError(f"GitHub returned invalid matching refs for {namespace}")
+    prefix = f"refs/tags/{namespace}/v{version}/"
+    return [row.get("ref", "") for row in payload if isinstance(row, dict) and row.get("ref", "").startswith(prefix)]
+
+
+def ensure_github_retirement_unpublished(client: GitHubRefClient, version: str) -> None:
+    if client.ref_target(f"refs/tags/v{version}"):
+        raise ReservationError("cannot retire a version with a product tag")
+    status, _ = client.request_json("GET", f"/repos/{client.repository}/releases/tags/v{version}")
+    if status != 404:
+        raise ReservationError("cannot retire a version with a GitHub Release")
+    refs: list[str] = []
+    for namespace in (
+        "release-consumed",
+        "release-artifact-pending",
+        "release-artifact-attempts",
+        "release-artifacts",
+    ):
+        refs.extend(_remote_matching_refs(client, namespace, version))
+    if refs:
+        raise ReservationError(f"cannot retire a version with stable identity refs: {', '.join(refs)}")
+
+
+def create_local_retirement(
+    *, version: str, reservation_id: str, evidence: dict[str, Any], owner: str = "github-actions[bot]",
+    reason: str = "no-product-publication", cwd: Path = ROOT
+) -> dict[str, Any]:
+    ensure_local_retirement_unpublished(version, cwd)
+    source = _verify_retirement_source_local(version=version, reservation_id=reservation_id, owner=owner, cwd=cwd)
+    ref = retirement_ref(version, reservation_id)
+    existing = local_ref_target(ref, cwd)
+    if existing:
+        return verify_local_retirement(
+            version=version, reservation_id=reservation_id, owner=owner, reason=reason,
+            evidence=evidence, cwd=cwd,
+        )
+    fields = retirement_fields(
+        version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
+        decision_ref_value=source["decisionRef"], released_ref_value=source["releasedRef"],
+        reservation_target=source["reservationTarget"], decision_target=source["decisionTarget"],
+        released_target=source["releasedTarget"], owner=owner, reason=reason, evidence=evidence,
+    )
+    released_info = local_commit_info(source["releasedTarget"], cwd)
+    commit = _git(
+        "commit-tree", released_info["tree"], "-p", source["releasedTarget"],
+        "-m", retirement_message(fields), cwd=cwd,
+    )
+    update = subprocess.run(["git", "update-ref", ref, commit, "0" * 40], cwd=cwd, text=True, capture_output=True)
+    if update.returncode != 0:
+        existing = local_ref_target(ref, cwd)
+        if existing:
+            return verify_local_retirement(
+                version=version, reservation_id=reservation_id, owner=owner, reason=reason,
+                evidence=evidence, cwd=cwd,
+            )
+        raise ReservationError(update.stderr.strip() or "retirement ref creation failed")
+    return verify_local_retirement(
+        version=version, reservation_id=reservation_id, owner=owner, reason=reason,
+        evidence=evidence, cwd=cwd,
+    )
+
+
+def create_github_retirement(
+    *, version: str, reservation_id: str, evidence: dict[str, Any], repository: str, token: str,
+    api_root: str = "https://api.github.com", owner: str = "github-actions[bot]",
+    reason: str = "no-product-publication"
+) -> dict[str, Any]:
+    client = GitHubRefClient(repository, token, api_root)
+    ensure_github_retirement_unpublished(client, version)
+    source = _verify_retirement_source_github(
+        client=client, version=version, reservation_id=reservation_id, owner=owner
+    )
+    ref = retirement_ref(version, reservation_id)
+    existing = client.ref_target(ref)
+    if existing:
+        return verify_github_retirement(
+            version=version, reservation_id=reservation_id, repository=repository, token=token,
+            api_root=api_root, owner=owner, reason=reason, evidence=evidence,
+        )
+    fields = retirement_fields(
+        version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
+        decision_ref_value=source["decisionRef"], released_ref_value=source["releasedRef"],
+        reservation_target=source["reservationTarget"], decision_target=source["decisionTarget"],
+        released_target=source["releasedTarget"], owner=owner, reason=reason, evidence=evidence,
+    )
+    commit = client.create_commit(
+        tree=client.create_tree(), parent=source["releasedTarget"], message=retirement_message(fields)
+    )
+    try:
+        target = client.create_ref(ref, commit)
+    except ReservationError:
+        target = client.ref_target(ref)
+        if not target:
+            raise
+    if target != commit:
+        return verify_github_retirement(
+            version=version, reservation_id=reservation_id, repository=repository, token=token,
+            api_root=api_root, owner=owner, reason=reason, evidence=evidence,
+        )
+    return verify_github_retirement(
+        version=version, reservation_id=reservation_id, repository=repository, token=token,
+        api_root=api_root, owner=owner, reason=reason, evidence=evidence,
+    )
+
+
 def verify_github_decision(
     *, client: GitHubRefClient, fields: dict[str, str], reservation: dict[str, Any]
 ) -> dict[str, Any]:
-    ref = decision_ref(str(reservation["version"]))
+    ref = decision_ref(str(reservation["version"]), str(reservation["ref"]))
     target = client.ref_target(ref)
     if not target:
         raise ReservationError(f"decision ref is missing: {ref}")
@@ -579,7 +1112,7 @@ def create_github_decision(
     fields = decision_fields(
         state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
     )
-    ref = decision_ref(str(reservation["version"]))
+    ref = decision_ref(str(reservation["version"]), str(reservation["ref"]))
     existing = client.ref_target(ref)
     if existing:
         return {"ref": ref, **verify_github_decision(client=client, fields=fields, reservation=reservation)}
@@ -702,8 +1235,7 @@ def verify_local_reservation_claim(
     cwd: Path = ROOT
 ) -> dict[str, Any]:
     validate_version(version)
-    if reservation_ref_value != reservation_ref(version):
-        raise ReservationError("receipt reservation ref does not match the release version")
+    validate_reservation_ref(version, reservation_ref_value)
     target = local_ref_target(reservation_ref_value, cwd)
     if not target:
         raise ReservationError(f"reservation ref is missing: {reservation_ref_value}")
@@ -740,8 +1272,7 @@ def verify_github_reservation_claim(
 ) -> dict[str, Any]:
     client = GitHubRefClient(repository, token, api_root)
     validate_version(version)
-    if reservation_ref_value != reservation_ref(version):
-        raise ReservationError("receipt reservation ref does not match the release version")
+    validate_reservation_ref(version, reservation_ref_value)
     target = client.ref_target(reservation_ref_value)
     if not target:
         raise ReservationError(f"reservation ref is missing: {reservation_ref_value}")
@@ -827,7 +1358,7 @@ def verify_local_decision_state(
     fields = decision_fields(
         state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
     )
-    ref = decision_ref(str(reservation["version"]))
+    ref = decision_ref(str(reservation["version"]), str(reservation["ref"]))
     target = local_ref_target(ref, cwd)
     if not target:
         raise ReservationError(f"decision ref is missing: {ref}")
@@ -862,7 +1393,7 @@ def create_local_decision(
     fields = decision_fields(
         state=state, version=str(reservation["version"]), merge_sha=merge_sha, reservation=reservation
     )
-    ref = decision_ref(str(reservation["version"]))
+    ref = decision_ref(str(reservation["version"]), str(reservation["ref"]))
     existing = local_ref_target(ref, cwd)
     if existing:
         return {"ref": ref, **verify_decision_commit(existing, fields, reservation, cwd)}
@@ -1594,6 +2125,17 @@ def main(argv: list[str] | None = None) -> int:
     reserve.add_argument("--api-root", default="https://api.github.com")
     reserve.add_argument("--local-root", type=Path)
     reserve.add_argument("--output", type=Path)
+    retire = sub.add_parser("retire")
+    retire.add_argument("--version", required=True)
+    retire.add_argument("--reservation-id", required=True)
+    retire.add_argument("--owner", default="github-actions[bot]")
+    retire.add_argument("--reason", default="no-product-publication")
+    retire.add_argument("--evidence-json", type=Path, required=True)
+    retire.add_argument("--local-root", type=Path)
+    retire.add_argument("--repository")
+    retire.add_argument("--token")
+    retire.add_argument("--api-root", default="https://api.github.com")
+    retire.add_argument("--output", type=Path)
     find_claim = sub.add_parser("find-claim")
     find_claim.add_argument("--claim-key", required=True)
     find_claim.add_argument("--owner", required=True)
@@ -1645,14 +2187,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "reserve":
             generated = deterministic_identity(args.owner, args.claim_key)
+            reservation_id = args.reservation_id or generated["reservationId"]
             expected = {
-                "ref": reservation_ref(args.version),
+                "ref": reservation_ref_for_claim(
+                    version=args.version, reservation_id=reservation_id, owner=args.owner,
+                    claim_key=args.claim_key, release_target=args.release_target, repository=args.repository,
+                    token=args.token, api_root=args.api_root, cwd=args.local_root or ROOT,
+                ),
                 "sourceSha": normalize_sha(args.source_sha, "source SHA"),
                 "version": args.version,
                 "channel": args.channel,
                 "releaseTarget": args.release_target,
                 "policy": args.release_policy,
-                "reservationId": args.reservation_id or generated["reservationId"],
+                "reservationId": reservation_id,
                 "Reservation-Owner": args.owner,
                 "Reservation-Claim-Key": args.claim_key,
                 "Reservation-Boundary-Token": args.boundary_token or generated["boundaryToken"],
@@ -1661,6 +2208,20 @@ def main(argv: list[str] | None = None) -> int:
                 result = create_github_reservation(expected, repository=args.repository, token=args.token, api_root=args.api_root)
             else:
                 result = create_local_reservation(expected, args.local_root or ROOT)
+        elif args.command == "retire":
+            evidence = json.loads(args.evidence_json.read_text(encoding="utf-8"))
+            validate_retirement_evidence(evidence, args.version)
+            if args.repository and args.token:
+                result = create_github_retirement(
+                    version=args.version, reservation_id=args.reservation_id, evidence=evidence,
+                    repository=args.repository, token=args.token, api_root=args.api_root,
+                    owner=args.owner, reason=args.reason,
+                )
+            else:
+                result = create_local_retirement(
+                    version=args.version, reservation_id=args.reservation_id, evidence=evidence,
+                    owner=args.owner, reason=args.reason, cwd=args.local_root or ROOT,
+                )
         elif args.command == "find-claim":
             result = find_local_reservation_by_claim(
                 claim_key=args.claim_key,

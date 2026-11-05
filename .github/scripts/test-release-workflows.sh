@@ -110,6 +110,23 @@ assert_not_contains "completion label authority" "$completion_text" ".labels"
 assert_not_contains "completion label gate workflow" "$completion_text" "label-gate.yml"
 assert_not_contains "completion intent trailers" "$completion_text" "Release-Intent"
 
+reconciliation_text="$(<"$root_dir/.github/workflows/release-reconciliation.yml")"
+assert_contains "reconciliation workflow name" "$reconciliation_text" "name: Reconcile unpublished legacy release identity"
+assert_contains "reconciliation dispatch trigger" "$reconciliation_text" "workflow_dispatch:"
+assert_contains "reconciliation contents write" "$reconciliation_text" "contents: write"
+assert_contains "reconciliation product tag absence" "$reconciliation_text" 'git/ref/tags/v${RELEASE_VERSION}'
+assert_contains "reconciliation release absence" "$reconciliation_text" 'releases/tags/v${RELEASE_VERSION}'
+assert_contains "reconciliation consumed refs absence" "$reconciliation_text" 'release-consumed/v${RELEASE_VERSION}'
+assert_contains "reconciliation artifact refs absence" "$reconciliation_text" 'release-artifact-attempts/v${RELEASE_VERSION}'
+assert_contains "reconciliation run artifact check" "$reconciliation_text" 'actions/runs/${run_id}/artifacts'
+assert_contains "reconciliation trusted release run" "$reconciliation_text" 'head_branch == "main"'
+assert_contains "reconciliation trusted release workflow" "$reconciliation_text" 'path == ".github/workflows/release.yml"'
+assert_contains "reconciliation retirement writer" "$reconciliation_text" "release_reservation.py retire"
+assert_contains "reconciliation retirement namespace" "$reconciliation_text" "release-retired/v"
+assert_not_contains "reconciliation no ref deletion" "$reconciliation_text" "git update-ref -d"
+assert_not_contains "reconciliation no git push" "$reconciliation_text" "git push"
+assert_not_contains "reconciliation no force push" "$reconciliation_text" "git push --force"
+
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release target output" "$release_text" "release_target"
 assert_contains "release policy output" "$release_text" "policy"
@@ -158,6 +175,8 @@ assert_contains "notifier target validation" "$notify_text" "release target is n
 assert_contains "notifier policy validation" "$notify_text" "televybackup-manual-semver-v1"
 assert_contains "notifier immutable reservation validation" "$notify_text" "verify_reservation"
 assert_contains "notifier immutable bound receipt validation" "$notify_text" "verify_bound_receipt"
+assert_contains "notifier reclaimed reservation validation" "$notify_text" "release-reservation-reclaimed"
+assert_contains "notifier reclaimed decision validation" "$notify_text" "release-decision-reclaimed"
 assert_not_contains "notifier label authority" "$notify_text" "labels_json"
 assert_not_contains "notifier intent trailers" "$notify_text" "Release-Intent"
 
@@ -186,6 +205,7 @@ assert policy["symbolic_targets"] == ["patch", "minor", "major"]
 assert policy["successor_on_collision"] is False
 assert policy["reservation_key"] == "pull_request_number+release_target"
 assert contract["workflows"]["target_gate"] == "Release target gate"
+assert contract["workflows"]["reconciliation"] == "Reconcile unpublished legacy release identity"
 assert contract["preparation"]["reservation_before_version"] is True
 assert contract["release_sequence"]["successor_on_collision"] is False
 assert contract["release_sequence"]["successor_on_recovery"] is False
