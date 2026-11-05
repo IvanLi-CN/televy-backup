@@ -2,7 +2,7 @@
 
 本目录是项目唯一的 canonical topic Spec catalog。每个主题目录包含 `SPEC.md`、`IMPLEMENTATION.md` 和 `HISTORY.md`；实现状态与演进记录不再塞入 `SPEC.md`。
 
-当前 catalog 包含 51 个 canonical topics；其中 28 个由 legacy Plan 新建，`0003` 归并到既有的 `sync-logging-durability` 主题。
+当前 catalog 包含 52 个 canonical topics；其中 28 个由 legacy Plan 新建，`0003` 归并到既有的 `sync-logging-durability` 主题。
 
 > Legacy Plan sources remain under `docs/plan/**` until separately approved for deletion. Design assets remain at their existing paths.
 
@@ -43,9 +43,9 @@
 | MTProto upload resilience（retry + heartbeat） | active | implemented | mtproto-upload-resilience/SPEC.md | - | legacy plan njr29; pending delete approval=docs/plan/njr29:mtproto-upload-resilience/PLAN.md |
 | 设置窗口独立化与多备份目录（多 Telegram Endpoint + 金钥恢复） | active | implemented | multi-backup-directories-keyed-restore/SPEC.md | - | legacy plan 0005; pending delete approval=docs/plan/0005:multi-backup-directories-keyed-restore/PLAN.md |
 | Popover Targets 高度实时自适应与误滚动修复 | active | implemented | popover-targets-live-height/SPEC.md | - | legacy spec id 2e73n normalized to slug-only |
-| PR + Label 发布能力 | active | implemented | pr-label-release/SPEC.md | - | legacy spec id n2kbu normalized to slug-only |
+| PR + Label 发布能力 | superseded | historical | pr-label-release/SPEC.md | manual-version-release-delivery/SPEC.md | Retained as historical compatibility input; PR labels are not release authority |
 | 修复发行版最近备份/验证失败（Telegram 超时、索引误判、瞬态文件、Vault Key 缓存） | active | implemented | prod-backup-verify-stability/SPEC.md | - | legacy plan 7bq4a; pending delete approval=docs/plan/7bq4a:prod-backup-verify-stability/PLAN.md |
-| TelevyBackup VERSION-only Release Chain | active | implemented | product-version-release-chain/SPEC.md | - | canonical slug-only topic |
+| TelevyBackup VERSION-only Release Chain | superseded | historical | product-version-release-chain/SPEC.md | manual-version-release-delivery/SPEC.md | Identity-chain mechanics retained by the successor topic |
 | Release 失败 Telegram 告警接入 | active | implemented | release-failure-telegram-alerts/SPEC.md | - | legacy spec id zx5n2 normalized to slug-only |
 | 备份远端索引权威 + 本地自动同步（remote-first） | active | implemented | remote-first-index-sync/SPEC.md | - | legacy plan 0012; pending delete approval=docs/plan/0012:remote-first-index-sync/PLAN.md |
 | Settings Control IPC | active | in-progress | settings-control-ipc/SPEC.md | - | canonical slug-only topic |
@@ -61,6 +61,7 @@
 | 支持 `.televyignore` 的文件/目录忽略能力 | active | implemented | televyignore-target-ignore/SPEC.md | - | legacy spec id g7gt3 normalized to slug-only |
 | 统一进度条规范（含 Prepare 并行）与四处 UI 对齐 | active | implemented | unified-backup-progress-prepare/SPEC.md | - | legacy spec id z324m normalized to slug-only |
 | 备份目标 WebDAV 浏览卷 | active | planned | webdav-snapshot-browsing/SPEC.md | - | canonical slug-only topic |
+| Manual Version Release Delivery | active | contract-approved | manual-version-release-delivery/SPEC.md | - | Single manual target with Version Policy; replaces PR-label version selection |
 
 ## Migration Rules
 
