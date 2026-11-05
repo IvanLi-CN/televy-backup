@@ -206,9 +206,9 @@ jobs:
               --arg policy "$(printf '%s' "${claim_json}" | jq -r .policy)" \
               --arg reservation_id "$(printf '%s' "${claim_json}" | jq -r .reservationId)" \
               --arg ref "$(printf '%s' "${claim_json}" | jq -r .ref)" \
-              --arg owner "$(printf '%s' "${claim_json}" | jq -r '.Reservation-Owner')" \
-              --arg claim_key "$(printf '%s' "${claim_json}" | jq -r '.Reservation-Claim-Key')" \
-              --arg boundary_token "$(printf '%s' "${claim_json}" | jq -r '.Reservation-Boundary-Token')" \
+              --arg owner "$(printf '%s' "${claim_json}" | jq -r '."Reservation-Owner"')" \
+              --arg claim_key "$(printf '%s' "${claim_json}" | jq -r '."Reservation-Claim-Key"')" \
+              --arg boundary_token "$(printf '%s' "${claim_json}" | jq -r '."Reservation-Boundary-Token"')" \
               '{sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,channel:$channel,version:$version,releaseTarget:$releaseTarget,policy:$policy,reservationId:$reservation_id,ref:$ref,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claim_key,"Reservation-Boundary-Token":$boundary_token}' \
               > "${RUNNER_TEMP}/reservation.json"
           else
