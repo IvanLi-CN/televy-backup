@@ -95,6 +95,14 @@ jobs:
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
         run: |
           set -euo pipefail
+          validate_current_main() {
+            local current_main_sha
+            current_main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+            if [[ "${current_main_sha}" != "${BASE_SHA}" ]]; then
+              echo "PR base ${BASE_SHA} is not current main ${current_main_sha}" >&2
+              return 1
+            fi
+          }
           validate_current_pr() {
             local current_pr_path="$1"
             gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${current_pr_path}"
@@ -112,6 +120,7 @@ jobs:
               raise SystemExit("current PR base changed while Release completion was queued")
           PY
           }
+          validate_current_main
           validate_current_pr "${RUNNER_TEMP}/current-pr.json"
           deadline=$((SECONDS + 1800))
           while :; do
@@ -161,6 +170,7 @@ jobs:
               *) echo "unexpected source check state: ${state}" >&2; exit 1 ;;
             esac
           done
+          validate_current_main
           validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"
           gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
           prepared_json=""

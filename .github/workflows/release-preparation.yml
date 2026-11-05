@@ -77,6 +77,7 @@ jobs:
         id: pr
         env:
           PR_NUMBER: ${{ inputs.pr_number }}
+          TRUSTED_MAIN_SHA: ${{ steps.trusted-main.outputs.sha }}
         run: |
           set -euo pipefail
           [[ "${RELEASE_TARGET}" == "${RELEASE_TARGET// /}" && -n "${RELEASE_TARGET}" ]]
@@ -94,6 +95,10 @@ jobs:
           base_sha="$(jq -r '.base.sha' "${RUNNER_TEMP}/pull-request.json")"
           head_ref="$(jq -r '.head.ref' "${RUNNER_TEMP}/pull-request.json")"
           [[ "${source_sha}" =~ ^[0-9a-fA-F]{40}$ && "${base_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+          if [[ "${base_sha}" != "${TRUSTED_MAIN_SHA}" ]]; then
+            echo "PR base ${base_sha} is not current trusted main ${TRUSTED_MAIN_SHA}; refresh the PR before preparation" >&2
+            exit 1
+          fi
           git check-ref-format --branch "${head_ref}" >/dev/null
           git fetch --force --tags origin
           git fetch --no-tags origin "${source_sha}" "${base_sha}"
@@ -129,8 +134,19 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          TRUSTED_MAIN_SHA: ${{ steps.trusted-main.outputs.sha }}
         run: |
           set -euo pipefail
+          current_main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${current_main_sha}" == "${TRUSTED_MAIN_SHA}" ]]
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/current-pr-before-reservation.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${SOURCE_SHA}" \
+            --arg base_sha "${BASE_SHA}" \
+            --arg current_main_sha "${current_main_sha}" \
+            '.state == "open" and .base.ref == "main" and .base.repo.full_name == $repository and .head.repo.full_name == $repository and .head.sha == $source_sha and .base.sha == $base_sha and .base.sha == $current_main_sha' \
+            "${RUNNER_TEMP}/current-pr-before-reservation.json" >/dev/null
           if [[ "${{ steps.pr.outputs.source_checks_ready }}" != true ]]; then
             echo "source checks are not complete; no reservation or VERSION commit will be created"
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -224,10 +240,22 @@ jobs:
         env:
           RELEASE_SHA: ${{ steps.prepare.outputs.release_sha }}
           SOURCE_SHA: ${{ steps.pr.outputs.source_sha }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
           HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
           source_root="${RUNNER_TEMP}/release-source"
+          current_main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          [[ "${current_main_sha}" == "${BASE_SHA}" ]]
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/current-pr-before-version.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg source_sha "${SOURCE_SHA}" \
+            --arg base_sha "${BASE_SHA}" \
+            --arg current_main_sha "${current_main_sha}" \
+            '.state == "open" and .base.ref == "main" and .base.repo.full_name == $repository and .head.repo.full_name == $repository and .head.sha == $source_sha and .base.sha == $base_sha and .base.sha == $current_main_sha' \
+            "${RUNNER_TEMP}/current-pr-before-version.json" >/dev/null
           test "$(git ls-remote origin "refs/heads/${HEAD_REF}" | awk 'NR == 1 { print $1 }')" = "${SOURCE_SHA}"
           version_content="$(base64 < "${source_root}/VERSION" | tr -d '\n')"
           headline="$(git -C "${source_root}" show -s --format=%s "${RELEASE_SHA}")"
@@ -270,7 +298,8 @@ jobs:
         if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
         run: |
           set -euo pipefail
-          gh workflow run release-target-gate.yml --repo "${GITHUB_REPOSITORY}" --ref main --raw-field "pr_number=${PR_NUMBER}"
-          gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref main --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run release-target-gate.yml --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" --raw-field "pr_number=${PR_NUMBER}"

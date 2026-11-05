@@ -55,6 +55,10 @@ assert_contains "signed preparation expected head" "$preparation_text" "expected
 assert_contains "independent target gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
 assert_contains "independent completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 assert_contains "trusted main checkout" "$preparation_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
+assert_contains "preparation base lock" "$preparation_text" "PR base"
+assert_contains "preparation reservation race check" "$preparation_text" "current-pr-before-reservation.json"
+assert_contains "preparation version race check" "$preparation_text" "current-pr-before-version.json"
+assert_contains "preparation gate branch ref" "$preparation_text" '--ref "${HEAD_REF}"'
 assert_not_contains "preparation label input" "$preparation_text" "labels-json"
 assert_not_contains "preparation intent trailers" "$preparation_text" "Release-Intent"
 
@@ -64,6 +68,7 @@ assert_contains "target gate trusted main resolution" "$target_gate_text" "git/r
 assert_contains "target gate trusted policy checkout" "$target_gate_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
 assert_contains "target gate verifier" "$target_gate_text" "release_target_gate.py"
 assert_contains "target gate non-preemptive concurrency" "$target_gate_text" "cancel-in-progress: false"
+assert_contains "target gate current main check" "$target_gate_text" "current_main_sha"
 
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion target gate requirement" "$completion_text" "Release target gate"
@@ -72,6 +77,7 @@ assert_contains "completion reservation provenance" "$completion_text" "--reserv
 assert_contains "completion reservation target" "$completion_text" "releaseTarget:\$releaseTarget"
 assert_contains "completion reservation policy" "$completion_text" "policy:\$policy"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
+assert_contains "completion current main check" "$completion_text" "validate_current_main"
 assert_contains "completion trusted dispatch ref" "$completion_text" 'test "${GITHUB_REF}" = "refs/heads/main"'
 assert_not_contains "completion label authority" "$completion_text" ".labels"
 assert_not_contains "completion label gate workflow" "$completion_text" "label-gate.yml"

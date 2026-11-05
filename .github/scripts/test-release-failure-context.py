@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import base64
 import os
 import tempfile
 import textwrap
@@ -205,6 +206,7 @@ class GitHubMock:
         artifact_url: str = "https://api.fixture/archive",
         artifact_names: list[str] | None = None,
         decision_mode: str = "valid",
+        preparation_mode: str = "valid",
     ):
         self.tag_mode = tag_mode
         self.declared_pull_request = declared_pull_request
@@ -212,6 +214,7 @@ class GitHubMock:
         self.trusted_resolver = trusted_resolver
         self.artifact_url = artifact_url
         self.decision_mode = decision_mode
+        self.preparation_mode = preparation_mode
         archive = BytesIO()
         with zipfile.ZipFile(archive, "w") as bundle:
             bundle.writestr(
@@ -250,6 +253,21 @@ class GitHubMock:
                     f"Release-Merge-SHA: {MERGE}", f"Release-Merge-SHA: {'6' * 40}"
                 )
             return json_response(payload)
+        if path.endswith(f"/commits/{PREPARATION}"):
+            payload = commit_payload(PREPARATION)
+            if self.preparation_mode == "trailers":
+                payload["commit"]["message"] = payload["commit"]["message"].replace(
+                    "Release-Policy: televybackup-manual-semver-v1",
+                    "Release-Policy: forged-policy",
+                )
+            return json_response(payload)
+        if path.endswith("/contents/VERSION"):
+            version = "1.2.3-rc.1\n" if self.preparation_mode != "version" else "1.2.3-rc.2\n"
+            return json_response({
+                "type": "file",
+                "encoding": "base64",
+                "content": base64.b64encode(version.encode("utf-8")).decode("ascii"),
+            })
         if "/commits/" in path:
             return json_response(commit_payload(path.rsplit("/", 1)[-1]))
         if path.endswith("release-reservation/v1.2.3-rc.1"):
@@ -283,6 +301,7 @@ def run_case(
     artifact_url: str = "https://api.fixture/archive",
     artifact_names: list[str] | None = None,
     decision_mode: str = "valid",
+    preparation_mode: str = "valid",
 ) -> str:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     source = workflow.split("          python3 - <<'PYCODE'\n", 1)[1].split("\n          PYCODE", 1)[0]
@@ -316,6 +335,7 @@ def run_case(
                 artifact_url,
                 artifact_names,
                 decision_mode,
+                preparation_mode,
             ),
         ):
             exec(compile(textwrap.dedent(source), str(WORKFLOW), "exec"), {"__name__": "__main__"})
@@ -358,4 +378,8 @@ missing_decision = run_case("missing", "7", decision_mode="missing")
 assert "identity_status=resolver-error" in missing_decision
 mismatched_decision = run_case("missing", "7", artifact_available=False, decision_mode="mismatched")
 assert "identity_status=resolver-error" in mismatched_decision
+tampered_preparation_version = run_case("missing", "7", preparation_mode="version")
+assert "identity_status=resolver-error" in tampered_preparation_version
+tampered_preparation_trailers = run_case("missing", "7", preparation_mode="trailers")
+assert "identity_status=resolver-error" in tampered_preparation_trailers
 print("release failure resolver mock tests passed")

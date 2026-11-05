@@ -54,10 +54,15 @@ jobs:
 
       - name: Resolve trusted main SHA
         id: trusted-main
+        env:
+          EXPECTED_BASE_SHA: ${{ steps.pr.outputs.base_sha || '' }}
         run: |
           set -euo pipefail
           main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           [[ "${main_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+          if [[ "${GITHUB_EVENT_NAME}" != "merge_group" ]]; then
+            test "${main_sha}" = "${EXPECTED_BASE_SHA}"
+          fi
           echo "sha=${main_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout trusted release policy
@@ -72,8 +77,12 @@ jobs:
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          TRUSTED_MAIN_SHA: ${{ steps.trusted-main.outputs.sha }}
         run: |
           set -euo pipefail
+          current_main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          test "${current_main_sha}" = "${TRUSTED_MAIN_SHA}"
+          test "${BASE_SHA}" = "${TRUSTED_MAIN_SHA}"
           git fetch --no-tags origin "${HEAD_SHA}" "${BASE_SHA}"
           python3 .github/scripts/release_target_gate.py --commit "${HEAD_SHA}" --base "${BASE_SHA}"
 

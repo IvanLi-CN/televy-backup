@@ -24,14 +24,14 @@ The `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml` is gated b
 
 Release Product treats the highest eligible final product tag as the numeric baseline. Eligible
 product tags are protected annotated tags created by `github-actions[bot]` and reachable from
-`main`; foreign, lightweight, incomplete, or unreachable tags fail closed. Prerelease ordinals are
-allocated only within their base/channel. Reservation, bound, and consumed refs use append-only
-application write paths;
-any provenance or ownership conflict fails before packaging. A matching published Release is
-terminal and is not rebuilt or overwritten. Failure alerts use `recovery_candidate` only after a
-complete merged identity is rechecked. The intent artifact is also bound to the exact failed
-`Release Product` run attempt; a prior attempt's snapshot or resolver job cannot supply notification
-identity.
+`main`; foreign, lightweight, incomplete, or unreachable tags fail closed. The owner supplies one
+explicit `release_target`, including the complete prerelease ordinal when applicable; the policy
+never allocates an ordinal or successor target automatically. Reservation, bound, and consumed
+refs use append-only application write paths; any provenance or ownership conflict fails before
+packaging. A matching published Release is terminal and is not rebuilt or overwritten. Failure
+alerts use `recovery_candidate` only after a complete merged identity is rechecked. The intent
+artifact is also bound to the exact failed `Release Product` run attempt; a prior attempt's
+snapshot or resolver job cannot supply notification identity.
 
 Product tag refs (`refs/tags/v*`) remain server-protected and are created as annotated tags by
 `github-actions[bot]`. The five release identity namespaces are intentionally outside that
@@ -43,15 +43,13 @@ observable by that application-level authority.
 
 ## Release checks
 
-`Label Gate` enforces exactly one product `type:*` and one `channel:prod|beta|rc|dev` label, or a
-channel-free `type:docs|skip` intent. Source PR heads run the full Rust, Swift, and native package
-matrix. A trusted preparation run reserves identity, adds only `VERSION` to the PR branch, and then
-the same required check names run structural verification against that preparation commit.
-`Release completion` is the required PR-local contract for ancestry, VERSION, labels, source checks,
-reservation provenance, and the explicit version-only release PR mode. At runtime it reads the current
-PR from the GitHub API, verifies the event-bound head/base still match, and validates that current
-labels snapshot both before waiting for source checks and immediately before completion validation;
-queued event-payload labels are not authoritative.
+The label route is retired. Source PR heads run the full Rust, Swift, and native package matrix. A
+trusted preparation run reserves identity, adds only `VERSION` to the PR branch, and then the same
+required check names run structural verification against that preparation commit. `Release target
+gate` classifies an ordinary PR as `not-release` and validates a prepared PR's target, policy, and
+canonical VERSION. `Release completion` validates the current PR head/base, source checks,
+preparation provenance, reservation provenance, and the explicit version-only release PR mode; it
+does not inspect PR labels.
 If source checks finish after the PR advances, preparation may recover only the exact same-PR
 reservation whose immutable source is an ancestor of the current head; it records that original
 source and re-verifies the remote claim before creating the signed VERSION commit. A stale or

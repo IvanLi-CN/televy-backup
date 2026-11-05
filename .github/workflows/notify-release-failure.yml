@@ -68,6 +68,7 @@ jobs:
           python3 - <<'PYCODE'
           from __future__ import annotations
 
+          import base64
           import json
           import os
           import re
@@ -259,6 +260,16 @@ jobs:
                           values[key.strip()] = value.strip()
               return values
 
+          def preparation_version(preparation_sha: str) -> str:
+              payload = api_json(f'/repos/{repository}/contents/VERSION?ref={preparation_sha}')
+              if payload.get('type') != 'file' or payload.get('encoding') != 'base64':
+                  raise RuntimeError('preparation VERSION content is unavailable')
+              encoded = ''.join(str(payload.get('content', '')).split())
+              try:
+                  return base64.b64decode(encoded, validate=True).decode('utf-8')
+              except (ValueError, UnicodeDecodeError) as exc:
+                  raise RuntimeError('preparation VERSION content is invalid') from exc
+
           def require_sha(value: object, label: str) -> str:
               normalized = str(value or '').strip()
               if not re.fullmatch(r'[0-9a-f]{40}', normalized):
@@ -283,6 +294,18 @@ jobs:
               verification = preparation.get('verification')
               if not isinstance(verification, dict) or verification.get('verified') is not True:
                   raise RuntimeError('preparation commit GitHub signature is not verified')
+              expected_trailers = {
+                  'Release-Source-SHA': source_sha,
+                  'Product-Version': str(intent['version']),
+                  'Release-Target': str(intent['release_target']),
+                  'Release-Policy': str(intent['policy']),
+                  'Release-Channel': str(intent['channel']),
+              }
+              preparation_trailers = trailers(preparation['message'])
+              if any(preparation_trailers.get(key) != value for key, value in expected_trailers.items()):
+                  raise RuntimeError('preparation commit trailers do not match the release identity')
+              if preparation_version(preparation_sha) != f"{intent['version']}\n":
+                  raise RuntimeError('preparation VERSION does not match the release identity')
               merge = commit_snapshot(merge_sha)
               if preparation_sha not in merge['parents']:
                   raise RuntimeError('merge commit does not contain the preparation commit')
