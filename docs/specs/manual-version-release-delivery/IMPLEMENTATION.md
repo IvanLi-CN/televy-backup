@@ -27,7 +27,7 @@ The active route will accept one owner-provided `release_target` through trusted
 
 - Added the manual target Version Policy and target gate.
 - Retired the PR-label release workflow and label-derived target authority.
-- Bound reservation, preparation, completion, Release snapshots, and failure recovery to `release_target` and policy identity; same-identity recovery now reuses the original `release-assets` artifact and fails closed when it is unavailable.
+- Bound reservation, preparation, completion, Release snapshots, and failure recovery to `release_target` and policy identity; same-identity recovery now accepts only completed trusted-main Release Product runs, verifies the source artifact archive digest, preserves the original packaging policy SHA, and fails closed after an immutable artifact was recorded. A bound repair with no prior release-assets artifact can re-enter the pre-artifact build stage once.
 
 ## References
 

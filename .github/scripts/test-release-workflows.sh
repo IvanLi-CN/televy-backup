@@ -57,9 +57,12 @@ assert_contains "preparation base lock" "$preparation_text" "PR base"
 assert_contains "preparation reservation race check" "$preparation_text" "current-pr-before-reservation.json"
 assert_contains "preparation version race check" "$preparation_text" "current-pr-before-version.json"
 assert_contains "preparation claim recovery" "$preparation_text" "release_reservation.py find-claim"
+assert_contains "preparation CI dispatch" "$preparation_text" "gh workflow run ci-pr.yml"
+assert_contains "preparation package dispatch" "$preparation_text" "gh workflow run package-ci.yml"
 assert_contains "preparation manual target gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
 assert_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
-assert_contains "preparation dispatch head binding" "$preparation_text" 'head_sha=${PREPARED_SHA}'
+assert_contains "preparation dispatch head binding" "$preparation_text" 'head_sha=${prepared_head_sha}'
+assert_contains "preparation descendant head binding" "$preparation_text" "git merge-base --is-ancestor"
 assert_not_contains "preparation label input" "$preparation_text" "labels-json"
 assert_not_contains "preparation intent trailers" "$preparation_text" "Release-Intent"
 
@@ -78,6 +81,7 @@ assert_contains "target gate verifier" "$target_gate_text" "release_target_gate.
 assert_contains "target gate non-preemptive concurrency" "$target_gate_text" "cancel-in-progress: false"
 assert_contains "target gate current main check" "$target_gate_text" "current_main_sha"
 assert_contains "target gate exact check publisher" "$target_gate_text" "publish-pr-check.py"
+assert_contains "target gate pull request head publisher" "$target_gate_text" "github.event_name != 'merge_group'"
 
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion pull request trigger" "$completion_text" "pull_request_target:"
@@ -90,6 +94,7 @@ assert_contains "completion native signature gate" "$completion_text" "--require
 assert_contains "completion current main check" "$completion_text" "validate_current_main"
 assert_contains "completion trusted dispatch ref" "$completion_text" 'test "${GITHUB_REF}" = "refs/heads/main"'
 assert_contains "completion exact check publisher" "$completion_text" "publish-pr-check.py"
+assert_contains "completion pull request head publisher" "$completion_text" "github.event_name != 'merge_group'"
 assert_not_contains "completion label authority" "$completion_text" ".labels"
 assert_not_contains "completion label gate workflow" "$completion_text" "label-gate.yml"
 assert_not_contains "completion intent trailers" "$completion_text" "Release-Intent"
@@ -106,6 +111,15 @@ assert_contains "release identity receipt" "$release_text" "--state consumed"
 assert_contains "recovery artifact reuse job" "$release_text" "reuse_release_assets"
 assert_contains "recovery artifact source run" "$release_text" "run-id: \${{ needs.resolve.outputs.recovery_run_id }}"
 assert_contains "recovery fail-closed artifact" "$release_text" "same-identity recovery requires an unexpired prior release-assets artifact"
+assert_contains "recovery trusted branch" "$release_text" '"${candidate_branch}" == main'
+assert_contains "recovery trusted workflow event" "$release_text" '"${candidate_event}" == workflow_run || "${candidate_event}" == workflow_dispatch'
+assert_contains "recovery trusted workflow path" "$release_text" '"${candidate_workflow_path}" == .github/workflows/release.yml'
+assert_contains "recovery trusted repository" "$release_text" '"${candidate_head_repository}" == "${GITHUB_REPOSITORY}"'
+assert_contains "recovery trusted main ancestry" "$release_text" 'git merge-base --is-ancestor "${candidate_head_sha}" "${main_sha}"'
+assert_contains "recovery artifact archive digest" "$release_text" "Verify immutable release-assets archive digest"
+assert_contains "recovery packaging policy identity" "$release_text" "packaging_policy_sha"
+assert_contains "recovery execution policy identity" "$release_text" "execution_policy_commit_sha"
+assert_contains "recovery pre-artifact repair" "$release_text" "rebuilding pre-artifact output"
 assert_contains "recovery no rebuild" "$release_text" "reuse_artifacts != 'true'"
 assert_not_contains "release label authority" "$release_text" "labels_json"
 assert_not_contains "release label authority environment" "$release_text" "RELEASE_TYPE"

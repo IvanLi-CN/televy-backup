@@ -147,9 +147,13 @@ assert "preferred helper source manifest failed" not in release_workflow
 assert "Keep the trusted main checkout for release policy scripts" in release_workflow
 assert 'git checkout --detach "${TARGET_INPUT}"' not in release_workflow
 assert 'policy_sha: ${{ steps.release.outputs.policy_sha }}' in release_workflow
+assert 'execution_policy_sha: ${{ steps.release.outputs.execution_policy_sha }}' in release_workflow
+assert 'packaging_policy_sha: ${{ steps.release.outputs.packaging_policy_sha }}' in release_workflow
 assert 'policy_sha="$(git rev-parse HEAD)"' in release_workflow
 assert 'test "${policy_sha}" = "${main_sha}"' in release_workflow
 assert 'echo "policy_sha=${policy_sha}" >> "$GITHUB_OUTPUT"' in release_workflow
+assert 'echo "execution_policy_sha=${execution_policy_sha}"' in release_workflow
+assert 'echo "packaging_policy_sha=${packaging_policy_sha}"' in release_workflow
 assert 'git cat-file -e "${POLICY_SHA}^{commit}"' in release_workflow
 assert 'git worktree add --detach "${policy_checkout}" "${POLICY_SHA}"' in release_workflow
 assert 'cp "$GITHUB_WORKSPACE/VERSION" "${policy_checkout}/VERSION"' in release_workflow

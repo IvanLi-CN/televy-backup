@@ -99,8 +99,8 @@ jobs:
           git fetch --no-tags origin "${HEAD_SHA}" "${BASE_SHA}"
           python3 .github/scripts/release_target_gate.py --commit "${HEAD_SHA}" --base "${BASE_SHA}"
 
-      - name: Publish exact dispatched PR check
-        if: always() && github.event_name == 'workflow_dispatch' && steps.pr.outputs.head_sha != ''
+      - name: Publish exact pull request head check
+        if: always() && github.event_name != 'merge_group' && steps.pr.outputs.head_sha != ''
         env:
           GH_TOKEN: ${{ github.token }}
           CHECK_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}

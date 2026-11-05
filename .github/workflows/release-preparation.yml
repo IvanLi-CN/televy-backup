@@ -329,16 +329,39 @@ jobs:
           done
           test "${verified}" = true
 
-      - name: Dispatch prepared-head release gates
+      - name: Dispatch prepared-head release checks and gates
         if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
         env:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-          PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
+          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
+          BASE_SHA: ${{ steps.pr.outputs.base_sha }}
+          PREPARED_IDENTITY_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
         run: |
           set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/prepared-current-pr.json"
+          jq -e \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg head_ref "${HEAD_REF}" \
+            --arg base_sha "${BASE_SHA}" \
+            '.state == "open" and .base.ref == "main" and .base.sha == $base_sha and .head.repo.full_name == $repository and .head.ref == $head_ref' \
+            "${RUNNER_TEMP}/prepared-current-pr.json" >/dev/null
+          prepared_head_sha="$(jq -r '.head.sha' "${RUNNER_TEMP}/prepared-current-pr.json")"
+          [[ "${prepared_head_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+          git fetch --no-tags origin "${prepared_head_sha}"
+          if [[ "${{ steps.prepare.outputs.prepared }}" == created ]]; then
+            test "${prepared_head_sha}" = "${PREPARED_IDENTITY_SHA}"
+          else
+            git merge-base --is-ancestor "${PREPARED_IDENTITY_SHA}" "${prepared_head_sha}"
+          fi
+          gh workflow run ci-pr.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" \
+            --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run package-ci.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" \
+            --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run release-target-gate.yml \
             --repo "${GITHUB_REPOSITORY}" --ref main \
-            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${PREPARED_SHA}"
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${prepared_head_sha}"
           gh workflow run release-completion.yml \
             --repo "${GITHUB_REPOSITORY}" --ref main \
-            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${PREPARED_SHA}"
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${prepared_head_sha}"
