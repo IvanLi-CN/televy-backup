@@ -175,4 +175,60 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
   exit 1
 fi
 
+legacy_repo="$tmp_dir/legacy-repo"
+mkdir -p "$legacy_repo"
+git -C "$legacy_repo" init -q
+git -C "$legacy_repo" config user.name fixture
+git -C "$legacy_repo" config user.email fixture@example.com
+printf '0.9.8\n' > "$legacy_repo/VERSION"
+git -C "$legacy_repo" add VERSION
+git -C "$legacy_repo" commit -qm legacy-source
+legacy_source_sha="$(git -C "$legacy_repo" rev-parse HEAD)"
+legacy_claim_key="pr:125:target:0.9.9"
+legacy_reservation="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$legacy_repo" --source-sha "$legacy_source_sha" --version 0.9.9 --channel prod \
+  --release-target 0.9.9 --owner github-actions[bot] --claim-key "$legacy_claim_key")"
+legacy_reservation_id="$(printf '%s' "$legacy_reservation" | jq -r .reservationId)"
+legacy_boundary_token="$(printf '%s' "$legacy_reservation" | jq -r '."Reservation-Boundary-Token"')"
+python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
+  --local-root "$legacy_repo" --state released --version 0.9.9 --merge-sha "$legacy_source_sha" \
+  --reservation-id "$legacy_reservation_id" --owner github-actions[bot] \
+  --claim-key "$legacy_claim_key" --boundary-token "$legacy_boundary_token" \
+  --reservation-ref refs/tags/release-reservation/v0.9.9 --maintainer-confirmed >/dev/null
+legacy_reservation_sha="$(git -C "$legacy_repo" rev-parse refs/tags/release-reservation/v0.9.9^{commit})"
+legacy_decision_sha="$(git -C "$legacy_repo" rev-parse refs/tags/release-decision/v0.9.9^{commit})"
+legacy_released_sha="$(git -C "$legacy_repo" rev-parse "refs/tags/release-released/v0.9.9/${legacy_reservation_id}^{commit}")"
+git -C "$legacy_repo" update-ref "refs/tags/release-consumed/v0.9.9/$legacy_source_sha" "$legacy_source_sha"
+cat > "$tmp_dir/retirement-evidence.json" <<EOF
+{"schema_version":1,"version":"0.9.9","main_sha":"$legacy_source_sha","product_tag":{"ref":"v0.9.9","status":"absent"},"github_release":{"tag":"v0.9.9","status":"absent"},"consumed_refs":[],"artifact_refs":[],"release_runs":[{"id":"35336297939","status":"completed","conclusion":"success","head_sha":"$legacy_source_sha","workflow_path":".github/workflows/release.yml","artifacts":[]}]}
+EOF
+if python3 "$root_dir/.github/scripts/release_reservation.py" retire \
+  --local-root "$legacy_repo" --version 0.9.9 --reservation-id "$legacy_reservation_id" \
+  --evidence-json "$tmp_dir/retirement-evidence.json" >/dev/null 2>&1; then
+  echo "retirement accepted a stable consumed ref" >&2
+  exit 1
+fi
+git -C "$legacy_repo" update-ref -d "refs/tags/release-consumed/v0.9.9/$legacy_source_sha"
+retired="$(python3 "$root_dir/.github/scripts/release_reservation.py" retire \
+  --local-root "$legacy_repo" --version 0.9.9 --reservation-id "$legacy_reservation_id" \
+  --evidence-json "$tmp_dir/retirement-evidence.json")"
+[[ "$(printf '%s' "$retired" | jq -r .ref)" == "refs/tags/release-retired/v0.9.9/$legacy_reservation_id" ]]
+[[ "$(git -C "$legacy_repo" rev-parse refs/tags/release-reservation/v0.9.9^{commit})" == "$legacy_reservation_sha" ]]
+[[ "$(git -C "$legacy_repo" rev-parse refs/tags/release-decision/v0.9.9^{commit})" == "$legacy_decision_sha" ]]
+[[ "$(git -C "$legacy_repo" rev-parse "refs/tags/release-released/v0.9.9/${legacy_reservation_id}^{commit}")" == "$legacy_released_sha" ]]
+
+reclaimed_claim_key="pr:204:target:0.9.9"
+reclaimed="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$legacy_repo" --source-sha "$legacy_source_sha" --version 0.9.9 --channel prod \
+  --release-target 0.9.9 --owner github-actions[bot] --claim-key "$reclaimed_claim_key")"
+reclaimed_ref="$(printf '%s' "$reclaimed" | jq -r .ref)"
+reclaimed_id="$(printf '%s' "$reclaimed" | jq -r .reservationId)"
+[[ "$reclaimed_ref" == "refs/tags/release-reservation-reclaimed/v0.9.9/$reclaimed_id" ]]
+python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
+  --local-root "$legacy_repo" --state released --version 0.9.9 --merge-sha "$legacy_source_sha" \
+  --reservation-id "$reclaimed_id" --owner github-actions[bot] \
+  --claim-key "$reclaimed_claim_key" --boundary-token "$(printf '%s' "$reclaimed" | jq -r '."Reservation-Boundary-Token"')" \
+  --reservation-ref "$reclaimed_ref" --maintainer-confirmed >/dev/null
+[[ "$(git -C "$legacy_repo" rev-parse "refs/tags/release-decision-reclaimed/v0.9.9/$reclaimed_id^{commit}")" =~ ^[0-9a-f]{40}$ ]]
+
 echo "release reservation fixture tests passed"

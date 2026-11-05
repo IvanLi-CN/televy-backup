@@ -11,7 +11,7 @@
 
 - The former route used PR labels as the version and channel source and coupled label validation to PR completion.
 - The current route uses one owner-provided `release_target` and a checked-in Version Policy; labels are not parsed by release workflows.
-- The occupied `v0.9.9` reservation and decision refs are retained as an explicit migration fact. A future target collision fails closed and does not allocate a successor.
+- The occupied `v0.9.9` reservation, decision, and released refs remain immutable historical facts. Because remote evidence proves no product publication or consumed artifact, the controlled reconciliation route may append a `release-retired` receipt; a new claim then uses independent reclaimed reservation and decision namespaces without rewriting the old refs.
 
 ## Related Changes
 

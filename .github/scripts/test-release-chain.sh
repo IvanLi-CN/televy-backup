@@ -135,6 +135,57 @@ bound = chain.resolve_release_target(
 )
 assert bound["version"] == "0.9.4"
 
+# A verified unpublished legacy claim releases only its old source refs. The
+# next reservation must still use a new reclaimed identity path.
+legacy_claim = "pr:125:target:0.9.5"
+legacy_identity = reservation.deterministic_identity("github-actions[bot]", legacy_claim)
+legacy_reservation = reservation.expected_reservation(
+    source_sha=source,
+    version="0.9.5",
+    channel="prod",
+    release_target="0.9.5",
+    policy=chain.VERSION_POLICY_ID,
+    owner="github-actions[bot]",
+    claim_key=legacy_claim,
+    reservation_id=legacy_identity["reservationId"],
+    boundary_token=legacy_identity["boundaryToken"],
+)
+legacy_reservation["ref"] = reservation.reservation_ref("0.9.5")
+reservation.create_local_reservation(legacy_reservation, repo)
+reservation.create_local_receipt(
+    state="released", version="0.9.5", merge_sha=source,
+    reservation_id=legacy_identity["reservationId"], owner="github-actions[bot]",
+    claim_key=legacy_claim, boundary_token=legacy_identity["boundaryToken"],
+    reservation_ref_value=legacy_reservation["ref"], cwd=repo,
+)
+evidence = {
+    "schema_version": 1,
+    "version": "0.9.5",
+    "main_sha": source,
+    "product_tag": {"ref": "v0.9.5", "status": "absent"},
+    "github_release": {"tag": "v0.9.5", "status": "absent"},
+    "consumed_refs": [],
+    "artifact_refs": [],
+    "release_runs": [{"id": "1", "status": "completed", "artifacts": []}],
+}
+reservation.create_local_retirement(
+    version="0.9.5", reservation_id=legacy_identity["reservationId"], evidence=evidence, cwd=repo,
+)
+retired_occupied = chain.occupied_identity_versions()
+assert "0.9.5" not in retired_occupied
+reclaimed = chain.resolve_release_target("0.9.5", chain.product_tags(), retired_occupied)
+assert reclaimed["version"] == "0.9.5"
+reclaimed_identity = reservation.deterministic_identity("github-actions[bot]", "pr:204:target:0.9.5")
+active_reclaimed = dict(legacy_reservation)
+active_reclaimed.update({
+    "ref": reservation.reclaimed_reservation_ref("0.9.5", reclaimed_identity["reservationId"]),
+    "reservationId": reclaimed_identity["reservationId"],
+    "Reservation-Claim-Key": "pr:204:target:0.9.5",
+    "Reservation-Boundary-Token": reclaimed_identity["boundaryToken"],
+})
+reservation.create_local_reservation(active_reclaimed, repo)
+assert "0.9.5" in chain.occupied_identity_versions()
+
 product_tag("v0.9.4", source)
 assert chain.verify_release_sequence("0.9.4", source)["status"] == "matching"
 

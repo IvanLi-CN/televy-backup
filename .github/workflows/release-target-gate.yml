@@ -39,14 +39,13 @@ jobs:
         id: pr
         if: github.event_name != 'merge_group'
         env:
-          EVENT_PATH: ${{ github.event_path }}
           DISPATCH_PR: ${{ inputs.pr_number || '' }}
           EXPECTED_HEAD_SHA: ${{ inputs.head_sha || '' }}
         run: |
           set -euo pipefail
           pr_number="${DISPATCH_PR}"
           if [[ -z "${pr_number}" ]]; then
-            pr_number="$(jq -r '.pull_request.number // empty' "${EVENT_PATH}")"
+            pr_number="$(jq -r '.pull_request.number // empty' "${GITHUB_EVENT_PATH}")"
           fi
           test -n "${pr_number}"
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${pr_number}" > "${RUNNER_TEMP}/pull-request.json"

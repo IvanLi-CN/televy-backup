@@ -9,7 +9,8 @@ GitHub App, deploy key, or any other credential solely to write release identity
 Keep server-side protection on product tag refs (`refs/tags/v*`) so a published product tag cannot
 be deleted, force-updated, or created without the required annotated-tag provenance. Exclude the
 release identity namespaces from that product-tag ruleset: `release-reservation/*`,
-`release-decision/*`, `release-bound/*`, `release-consumed/*`, `release-released/*`,
+`release-reservation-reclaimed/*`, `release-decision/*`, `release-decision-reclaimed/*`,
+`release-bound/*`, `release-consumed/*`, `release-released/*`, `release-retired/*`,
 `release-artifact-pending/*`, `release-artifact-attempts/*`, and `release-artifacts/*`.
 The existing `release_reservation.py` writer is the application-level authority for those refs:
 it permits only append-only creation, identical-claim retries, and valid state transitions after
@@ -28,6 +29,7 @@ independent provenance checks.
 
 Product tags retain server-level protection, while identity refs rely on repository code, workflow
 permissions, and the append-only writer rather than server-level immutability. The remote ruleset
-must therefore cover the product tag namespace and exclude the eight identity namespaces before
+must therefore cover the product tag namespace and exclude the eleven identity namespaces before
 automated release can succeed. This code change does not mutate remote GitHub settings. Same-SHA
-recovery remains the only repair path; a failed receipt never allocates a successor version.
+recovery remains the only repair path for published identity failures; the separate retirement path
+is limited to proven unpublished legacy claims and never allocates a successor version implicitly.

@@ -29,9 +29,13 @@ class CompletionError(RuntimeError):
 
 IDENTITY_REF_PREFIXES = (
     "refs/tags/release-reservation",
+    "refs/tags/release-reservation-reclaimed",
+    "refs/tags/release-decision",
+    "refs/tags/release-decision-reclaimed",
     "refs/tags/release-bound",
     "refs/tags/release-consumed",
     "refs/tags/release-released",
+    "refs/tags/release-retired",
     "refs/tags/release-artifact-pending",
     "refs/tags/release-artifact-attempts",
     "refs/tags/release-artifacts",

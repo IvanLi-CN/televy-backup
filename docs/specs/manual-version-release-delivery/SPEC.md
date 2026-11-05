@@ -46,7 +46,7 @@ Version Policy MUST declare its policy id, target grammar, trusted baseline sour
 
 The normal numeric baseline MUST be the highest eligible final product tag reachable from `main` and carrying the repository's required protected automation provenance. When no eligible final tag exists, the policy MUST use the declared virtual baseline `0.0.0`. `VERSION`, Cargo metadata, workflow artifacts, labels, and merge order MUST NOT act as fallback baselines.
 
-A symbolic target MUST be resolved deterministically against that baseline. An explicit target MUST be validated against the same baseline and grammar. A new target at or below the trusted final baseline, or a target whose publication identity is already owned, MUST fail closed before preparation; it MUST NOT be converted into a successor target.
+A symbolic target MUST be resolved deterministically against that baseline. An explicit target MUST be validated against the same baseline and grammar. A new target at or below the trusted final baseline, or a target whose publication identity is already owned, MUST fail closed before preparation; it MUST NOT be converted into a successor target. The only exception is a separately authorized reconciliation that appends an immutable retirement receipt after proving that an old claim has no product Tag, GitHub Release, stable consumed receipt, or release artifact receipt.
 
 Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
@@ -60,9 +60,9 @@ Covers: [ADR 0004](../../adr/0004-pr-local-version-preparation.md), [ADR 0017](.
 
 ### REQ-MVR-004: Reservation precedes irreversible release work
 
-The controller MUST create or verify `refs/tags/release-reservation/v<version>` before creating the VERSION preparation commit, product tag, GitHub Release, uploading release artifacts, or deploying them. The reservation MUST be append-only and MUST prove its source parent, source tree, owner, claim key, raw target, canonical version, channel, policy id, reservation id, and claimed state.
+The controller MUST create or verify `refs/tags/release-reservation/v<version>` before creating the VERSION preparation commit, product tag, GitHub Release, uploading release artifacts, or deploying them. If that exact ref is an unpublished legacy claim with a valid retirement receipt, a new claim MUST use the independent `refs/tags/release-reservation-reclaimed/v<version>/<reservation-id>` namespace and its matching `release-decision-reclaimed` namespace. The reservation MUST be append-only and MUST prove its source parent, source tree, owner, claim key, raw target, canonical version, channel, policy id, reservation id, and claimed state.
 
-An identical claim MAY be retried idempotently. A foreign claim, different source, different raw target, different policy, different owner, invalid provenance, or occupied product identity MUST stop the run. Existing reservation, decision, bound, consumed, and released refs MUST never be updated, deleted, force-pushed, or silently replaced by a successor.
+An identical claim MAY be retried idempotently. A foreign claim, different source, different raw target, different policy, different owner, invalid provenance, or occupied product identity MUST stop the run. Existing reservation, decision, bound, consumed, released, and retirement refs MUST never be updated, deleted, force-pushed, or silently replaced by a successor.
 
 Covers: [ADR 0010](../../adr/0010-release-identity-reservation.md), [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
@@ -107,7 +107,7 @@ Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
 ## State Model
 
-The normal state path is `unclaimed -> target-validated -> reserved -> prepared -> pr-ready -> merged -> bound -> released -> consumed`. `target-validated` records only the owner input and policy result; it does not publish anything. `reserved` is the first durable version claim. `prepared` is a VERSION-only verified commit in the candidate PR. `pr-ready` means required checks and review are satisfied. `merged` creates the mainline boundary. `bound` proves the merge identity before packaging. `released` proves the explicit Release publication. `consumed` proves the publication receipt and artifact binding.
+The normal state path is `unclaimed -> target-validated -> reserved -> prepared -> pr-ready -> merged -> bound -> released -> consumed`. An unpublished legacy claim may take the separate path `legacy-occupied -> retirement-verified -> reclaimed-reserved` only through the trusted reconciliation workflow. `target-validated` records only the owner input and policy result; it does not publish anything. `reserved` is the first durable version claim. `prepared` is a VERSION-only verified commit in the candidate PR. `pr-ready` means required checks and review are satisfied. `merged` creates the mainline boundary. `bound` proves the merge identity before packaging. `released` proves the explicit Release publication. `consumed` proves the publication receipt and artifact binding.
 
 Retry is allowed only within the same state identity. A reservation collision, target mismatch, provenance mismatch, missing required check, changed PR base/head, or missing merge identity is a fail-closed state, not a reason to choose a successor.
 
@@ -128,7 +128,7 @@ The preparation commit MUST include `Release-Target`, `Release-Policy`, `Product
 
 ### Identity refs
 
-The existing append-only namespaces remain the durable identity surface: `release-reservation`, `release-decision`, `release-bound`, `release-consumed`, `release-released`, `release-artifact-pending`, `release-artifact-attempts`, and `release-artifacts`. Product tags remain `v<canonical-version>` and are never rewritten.
+The existing append-only namespaces remain the durable identity surface: `release-reservation`, `release-decision`, `release-reservation-reclaimed`, `release-decision-reclaimed`, `release-bound`, `release-consumed`, `release-released`, `release-retired`, `release-artifact-pending`, `release-artifact-attempts`, and `release-artifacts`. Product tags remain `v<canonical-version>` and are never rewritten.
 
 ## Failure Semantics
 
@@ -136,6 +136,7 @@ The existing append-only namespaces remain the durable identity surface: `releas
 - Invalid symbolic or explicit target: reject before reservation.
 - Missing or untrusted final baseline: reject unless the declared virtual-baseline bootstrap applies.
 - Occupied version, tag, reservation, or publication mapping: reject without successor allocation.
+- Legacy reservation reconciliation: require absent product Tag and GitHub Release, no stable consumed or artifact refs, checked Release Product runs with no artifacts, exact legacy reservation/decision/released provenance, and a new top-level reclaimed identity path; never delete or rewrite the legacy refs.
 - Same claim and same target: safe idempotent retry.
 - Same PR with descendant source: reuse the original reservation; never mutate it.
 - Different target, source branch identity, policy id, or owner: explicit conflict.

@@ -242,5 +242,117 @@ try:
 finally:
     FakeGitHubRefClient.refs[decision_ref] = saved_decision
 
+legacy_source = "9" * 40
+legacy_reservation_sha = "a" * 40
+legacy_decision_sha = "b" * 40
+legacy_merge = "c" * 40
+legacy_released_sha = "d" * 40
+reclaimed_reservation_sha = "e" * 40
+retirement_sha = "f" * 40
+legacy_claim = "pr:125:target:0.9.9"
+legacy_identity = module.deterministic_identity("github-actions[bot]", legacy_claim)
+
+
+class RetirementFakeGitHubRefClient(FakeGitHubRefClient):
+    repository = "fixture/repo"
+    refs = {
+        module.reservation_ref("0.9.9"): legacy_reservation_sha,
+        module.decision_ref("0.9.9"): legacy_decision_sha,
+        module.receipt_ref("released", "0.9.9", legacy_identity["reservationId"]): legacy_released_sha,
+    }
+    commits = {
+        legacy_source: {"sha": legacy_source, "tree": {"sha": tree}, "parents": [], "message": "legacy source\n"},
+        legacy_reservation_sha: {
+            "sha": legacy_reservation_sha, "tree": {"sha": tree}, "parents": [{"sha": legacy_source}],
+            "message": f"""release: reserve product identity
+
+Reservation-Id: {legacy_identity["reservationId"]}
+Reservation-Owner: github-actions[bot]
+Reservation-Claim-Key: {legacy_claim}
+Reservation-Boundary-Token: {legacy_identity["boundaryToken"]}
+Release-Version: 0.9.9
+Release-Channel: prod
+Reservation-State: claimed
+""",
+        },
+        legacy_decision_sha: {
+            "sha": legacy_decision_sha, "tree": {"sha": tree}, "parents": [{"sha": legacy_reservation_sha}],
+            "message": f"""release: immutable identity decision
+
+Decision-State: released
+Release-Version: 0.9.9
+Release-Merge-SHA: {legacy_merge}
+Release-Reservation-Id: {legacy_identity["reservationId"]}
+Release-Owner: github-actions[bot]
+Release-Claim-Key: {legacy_claim}
+Release-Boundary-Token: {legacy_identity["boundaryToken"]}
+Release-Reservation-Ref: {module.reservation_ref("0.9.9")}
+Decision-Provenance: immutable-decision
+""",
+        },
+        legacy_merge: {"sha": legacy_merge, "tree": {"sha": tree}, "parents": [{"sha": legacy_source}], "message": "legacy preparation\n"},
+        legacy_released_sha: {
+            "sha": legacy_released_sha, "tree": {"sha": tree}, "parents": [{"sha": legacy_merge}],
+            "message": f"""release: immutable identity receipt
+
+Receipt-State: released
+Release-Version: 0.9.9
+Release-Merge-SHA: {legacy_merge}
+Release-Reservation-Id: {legacy_identity["reservationId"]}
+Release-Owner: github-actions[bot]
+Release-Claim-Key: {legacy_claim}
+Release-Boundary-Token: {legacy_identity["boundaryToken"]}
+Release-Reservation-Ref: {module.reservation_ref("0.9.9")}
+Receipt-Provenance: immutable-receipt
+""",
+        },
+    }
+    next_commits = iter((retirement_sha, reclaimed_reservation_sha))
+
+    def request_json(self, method, path, payload=None):
+        if method == "GET" and (
+            path.endswith("/git/ref/tags/v0.9.9")
+            or path.endswith("/releases/tags/v0.9.9")
+            or "/git/matching-refs/tags/" in path
+        ):
+            return (404 if "/git/matching-refs/" not in path else 200), ([] if "/git/matching-refs/" in path else {})
+        raise AssertionError((method, path, payload))
+
+
+module.GitHubRefClient = RetirementFakeGitHubRefClient
+retirement_evidence = {
+    "schema_version": 1,
+    "version": "0.9.9",
+    "main_sha": legacy_source,
+    "product_tag": {"ref": "v0.9.9", "status": "absent"},
+    "github_release": {"tag": "v0.9.9", "status": "absent"},
+    "consumed_refs": [],
+    "artifact_refs": [],
+    "release_runs": [{"id": "35336297939", "status": "completed", "artifacts": []}],
+}
+retired = module.create_github_retirement(
+    version="0.9.9", reservation_id=legacy_identity["reservationId"], evidence=retirement_evidence,
+    repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert retired["ref"] == module.retirement_ref("0.9.9", legacy_identity["reservationId"])
+assert RetirementFakeGitHubRefClient.refs[module.reservation_ref("0.9.9")] == legacy_reservation_sha
+assert RetirementFakeGitHubRefClient.refs[module.decision_ref("0.9.9")] == legacy_decision_sha
+
+reclaimed_claim = "pr:204:target:0.9.9"
+reclaimed_identity = module.deterministic_identity("github-actions[bot]", reclaimed_claim)
+reclaimed = module.expected_reservation(
+    source_sha=legacy_source, version="0.9.9", channel="prod", release_target="0.9.9",
+    policy=module.RELEASE_POLICY_ID, owner="github-actions[bot]", claim_key=reclaimed_claim,
+    reservation_id=reclaimed_identity["reservationId"], boundary_token=reclaimed_identity["boundaryToken"],
+)
+reclaimed["ref"] = module.reclaimed_reservation_ref("0.9.9", reclaimed_identity["reservationId"])
+created_reclaimed = module.create_github_reservation(
+    reclaimed, repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert created_reclaimed["ref"] == reclaimed["ref"]
+assert module.decision_ref("0.9.9", reclaimed["ref"]).endswith(
+    f"release-decision-reclaimed/v0.9.9/{reclaimed_identity['reservationId']}"
+)
+
 print("release GitHub API mock tests passed")
 PY
