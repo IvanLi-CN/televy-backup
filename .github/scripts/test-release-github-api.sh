@@ -338,6 +338,13 @@ assert retired["ref"] == module.retirement_ref("0.9.9", legacy_identity["reserva
 assert RetirementFakeGitHubRefClient.refs[module.reservation_ref("0.9.9")] == legacy_reservation_sha
 assert RetirementFakeGitHubRefClient.refs[module.decision_ref("0.9.9")] == legacy_decision_sha
 
+later_evidence = dict(retirement_evidence, main_sha="8" * 40)
+rechecked = module.create_github_retirement(
+    version="0.9.9", reservation_id=legacy_identity["reservationId"], evidence=later_evidence,
+    repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert rechecked["target"] == retired["target"]
+
 reclaimed_claim = "pr:204:target:0.9.9"
 reclaimed_identity = module.deterministic_identity("github-actions[bot]", reclaimed_claim)
 reclaimed = module.expected_reservation(
