@@ -69,7 +69,9 @@ jobs:
           PY
 
           http_status() {
-            gh api "$1" --include 2>/dev/null | awk 'toupper($0) ~ /^HTTP/ { code=$2 } END { gsub("\r", "", code); print code }'
+            local response
+            response="$(gh api "$1" --include 2>/dev/null || true)"
+            awk 'toupper($0) ~ /^HTTP/ { code=$2 } END { gsub("\r", "", code); print code }' <<< "${response}"
           }
           tag_status="$(http_status "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}")"
           release_status="$(http_status "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}")"

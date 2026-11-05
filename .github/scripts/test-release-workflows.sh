@@ -120,6 +120,7 @@ assert_contains "reconciliation dispatch trigger" "$reconciliation_text" "workfl
 assert_contains "reconciliation contents write" "$reconciliation_text" "contents: write"
 assert_contains "reconciliation product tag absence" "$reconciliation_text" 'git/ref/tags/v${RELEASE_VERSION}'
 assert_contains "reconciliation release absence" "$reconciliation_text" 'releases/tags/v${RELEASE_VERSION}'
+assert_contains "reconciliation consumes absent status" "$reconciliation_text" 'gh api "$1" --include 2>/dev/null || true'
 assert_contains "reconciliation consumed refs absence" "$reconciliation_text" 'release-consumed/v${RELEASE_VERSION}'
 assert_contains "reconciliation artifact refs absence" "$reconciliation_text" 'release-artifact-attempts/v${RELEASE_VERSION}'
 assert_contains "reconciliation run artifact check" "$reconciliation_text" 'actions/runs/${run_id}/artifacts'
