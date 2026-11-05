@@ -88,6 +88,8 @@ assert_contains "target gate workflow name" "$target_gate_text" "name: Release t
 assert_contains "target gate pull request trigger" "$target_gate_text" "pull_request_target:"
 assert_contains "target gate trusted main resolution" "$target_gate_text" "git/ref/heads/main"
 assert_contains "target gate trusted policy checkout" "$target_gate_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
+assert_contains "target gate runner event path" "$target_gate_text" 'GITHUB_EVENT_PATH'
+assert_not_contains "target gate context event path" "$target_gate_text" 'github.event_path'
 assert_contains "target gate verifier" "$target_gate_text" "release_target_gate.py"
 assert_contains "target gate non-preemptive concurrency" "$target_gate_text" "cancel-in-progress: false"
 assert_contains "target gate current main check" "$target_gate_text" "current_main_sha"
@@ -102,6 +104,8 @@ assert_contains "completion reservation provenance" "$completion_text" "--reserv
 assert_contains "completion reservation target" "$completion_text" "releaseTarget:\$releaseTarget"
 assert_contains "completion reservation policy" "$completion_text" "policy:\$policy"
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
+assert_contains "completion runner event path" "$completion_text" 'GITHUB_EVENT_PATH'
+assert_not_contains "completion context event path" "$completion_text" 'github.event_path'
 assert_contains "completion current main check" "$completion_text" "validate_current_main"
 assert_contains "completion trusted dispatch ref" "$completion_text" 'test "${GITHUB_REF}" = "refs/heads/main"'
 assert_contains "completion exact check publisher" "$completion_text" "publish-pr-check.py"
