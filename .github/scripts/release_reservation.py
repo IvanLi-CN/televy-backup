@@ -25,12 +25,20 @@ RELEASE_TARGET_RE = re.compile(
 RELEASE_POLICY_ID = "televybackup-manual-semver-v1"
 CHANNELS = {"prod", "beta", "rc", "dev"}
 IDENTITY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+ARTIFACT_STATE_RE = re.compile(r"^(?:pending|attempt|finalized)$")
+POSITIVE_INTEGER_RE = re.compile(r"^[1-9][0-9]*$")
+ARTIFACT_DIGEST_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+ARTIFACT_NAME_RE = re.compile(r"^release-assets(?:-[1-9][0-9]*-[1-9][0-9]*)?$")
 IDENTITY_METADATA_CONTENT = "televy-backup release identity\n"
 IDENTITY_METADATA_TREE_SHA = "b1612a1f4eed800eeef62ae225399baf8d0ff6fb"
 
 
 class ReservationError(RuntimeError):
     """Raised when an immutable release claim cannot be proven."""
+
+
+class ArtifactReceiptMissing(ReservationError):
+    """Raised when a durable artifact receipt does not exist yet."""
 
 
 def normalize_sha(value: str, label: str = "SHA") -> str:
@@ -85,6 +93,32 @@ def receipt_ref(state: str, version: str, identity: str) -> str:
         return f"refs/tags/release-released/v{version}/{identity}"
     normalize_sha(identity, "merge SHA")
     return f"refs/tags/release-{state}/v{version}/{identity}"
+
+
+def normalize_artifact_digest(value: str) -> str:
+    digest = str(value).strip()
+    if digest.startswith("sha256:"):
+        digest = digest.removeprefix("sha256:")
+    if not ARTIFACT_DIGEST_HEX_RE.fullmatch(digest):
+        raise ReservationError("artifact receipt has an invalid digest")
+    return f"sha256:{digest.lower()}"
+
+
+def artifact_receipt_ref(
+    state: str, version: str, merge_sha: str, run_id: str = "", run_attempt: str = ""
+) -> str:
+    if not ARTIFACT_STATE_RE.fullmatch(state):
+        raise ReservationError(f"unsupported artifact receipt state: {state}")
+    validate_version(version)
+    merge = normalize_sha(merge_sha, "merge SHA")
+    if state == "attempt":
+        if not POSITIVE_INTEGER_RE.fullmatch(str(run_id)) or not POSITIVE_INTEGER_RE.fullmatch(str(run_attempt)):
+            raise ReservationError("artifact attempt receipt requires positive run identity")
+        return f"refs/tags/release-artifact-attempts/v{version}/{merge}/{run_id}/{run_attempt}"
+    if run_id or run_attempt:
+        raise ReservationError("only artifact attempt receipts accept a run identity in the ref")
+    namespace = "release-artifact-pending" if state == "pending" else "release-artifacts"
+    return f"refs/tags/{namespace}/v{version}/{merge}"
 
 
 def decision_ref(version: str) -> str:
@@ -876,6 +910,96 @@ def receipt_fields(
     return fields
 
 
+def artifact_receipt_fields(
+    *, state: str, version: str, merge_sha: str, run_id: str, run_attempt: str,
+    packaging_policy_sha: str, artifact_id: str = "", artifact_digest: str = "",
+    helper_mode: str = "pending", helper_tag: str = "", helper_commit: str = "",
+    artifact_name: str = "release-assets"
+) -> dict[str, str]:
+    if not ARTIFACT_STATE_RE.fullmatch(state):
+        raise ReservationError(f"unsupported artifact receipt state: {state}")
+    validate_version(version)
+    merge = normalize_sha(merge_sha, "merge SHA")
+    if not POSITIVE_INTEGER_RE.fullmatch(str(run_id)):
+        raise ReservationError("artifact receipt run id must be a positive integer")
+    if not POSITIVE_INTEGER_RE.fullmatch(str(run_attempt)):
+        raise ReservationError("artifact receipt run attempt must be a positive integer")
+    if not ARTIFACT_NAME_RE.fullmatch(str(artifact_name)):
+        raise ReservationError("artifact receipt has an invalid artifact name")
+    packaging = normalize_sha(packaging_policy_sha, "packaging policy SHA")
+    fields = {
+        "Artifact-State": state,
+        "Release-Version": version,
+        "Release-Merge-SHA": merge,
+        "Release-Run-Id": str(run_id),
+        "Release-Run-Attempt": str(run_attempt),
+        "Release-Packaging-Policy-SHA": packaging,
+        "Release-Artifact-Name": str(artifact_name),
+        "Artifact-Helper-Mode": helper_mode,
+        "Artifact-Provenance": "immutable-release-artifact",
+    }
+    if helper_tag:
+        fields["Artifact-Helper-Tag"] = helper_tag
+    if helper_commit:
+        fields["Artifact-Helper-Commit"] = helper_commit
+    if state in {"pending", "attempt"}:
+        if helper_mode != "pending" or artifact_id or artifact_digest:
+            raise ReservationError("pending or attempt artifact receipt cannot contain finalized artifact fields")
+    else:
+        if helper_mode not in {"reuse", "bootstrap"}:
+            raise ReservationError("finalized artifact receipt has an invalid helper mode")
+        if not POSITIVE_INTEGER_RE.fullmatch(str(artifact_id)):
+            raise ReservationError("finalized artifact receipt id must be a positive integer")
+        normalized_digest = normalize_artifact_digest(str(artifact_digest))
+        fields["Release-Artifact-Id"] = str(artifact_id)
+        fields["Release-Artifact-Digest"] = normalized_digest
+    return fields
+
+
+def artifact_receipt_message(fields: dict[str, str]) -> str:
+    lines = ["release: immutable release artifact receipt", ""]
+    lines.extend(f"{key}: {value}" for key, value in fields.items())
+    return "\n".join(lines) + "\n"
+
+
+def verify_artifact_receipt_commit(
+    ref_target: str, *, state: str, version: str, merge_sha: str, cwd: Path = ROOT
+) -> dict[str, Any]:
+    info = local_commit_info(ref_target, cwd)
+    merge = normalize_sha(merge_sha, "merge SHA")
+    merge_info = local_commit_info(merge, cwd)
+    if info["parents"] != [merge] or info["tree"] not in {merge_info["tree"], IDENTITY_METADATA_TREE_SHA}:
+        raise ReservationError("artifact receipt provenance does not match its merge SHA")
+    actual = trailers_from_message(info["message"])
+    expected = artifact_receipt_fields(
+        state=state,
+        version=version,
+        merge_sha=merge,
+        run_id=actual.get("Release-Run-Id", ""),
+        run_attempt=actual.get("Release-Run-Attempt", ""),
+        packaging_policy_sha=actual.get("Release-Packaging-Policy-SHA", ""),
+        artifact_id=actual.get("Release-Artifact-Id", ""),
+        artifact_digest=actual.get("Release-Artifact-Digest", ""),
+        helper_mode=actual.get("Artifact-Helper-Mode", ""),
+        helper_tag=actual.get("Artifact-Helper-Tag", ""),
+        helper_commit=actual.get("Artifact-Helper-Commit", ""),
+        artifact_name=actual.get("Release-Artifact-Name", ""),
+    )
+    if any(actual.get(key) != value for key, value in expected.items()):
+        raise ReservationError("artifact receipt does not match its declared identity")
+    return {
+        "ref": artifact_receipt_ref(
+            state,
+            version,
+            merge,
+            actual.get("Release-Run-Id", "") if state == "attempt" else "",
+            actual.get("Release-Run-Attempt", "") if state == "attempt" else "",
+        ),
+        "target": info["sha"],
+        **actual,
+    }
+
+
 def verify_receipt_commit(ref_target: str, fields: dict[str, str], cwd: Path = ROOT) -> dict[str, Any]:
     info = local_commit_info(ref_target, cwd)
     merge_sha = normalize_sha(fields["Release-Merge-SHA"], "merge SHA")
@@ -886,6 +1010,185 @@ def verify_receipt_commit(ref_target: str, fields: dict[str, str], cwd: Path = R
     if any(actual.get(key) != value for key, value in fields.items()):
         raise ReservationError("existing receipt does not match the requested identity")
     return {"target": info["sha"], **fields}
+
+
+def create_local_artifact_receipt(
+    *, state: str, version: str, merge_sha: str, run_id: str, run_attempt: str,
+    packaging_policy_sha: str, artifact_id: str = "", artifact_digest: str = "",
+    helper_mode: str = "pending", helper_tag: str = "", helper_commit: str = "",
+    artifact_name: str = "release-assets", cwd: Path = ROOT
+) -> dict[str, Any]:
+    merge = normalize_sha(merge_sha, "merge SHA")
+    ref = artifact_receipt_ref(
+        state,
+        version,
+        merge,
+        run_id if state == "attempt" else "",
+        run_attempt if state == "attempt" else "",
+    )
+    fields = artifact_receipt_fields(
+        state=state, version=version, merge_sha=merge, run_id=run_id, run_attempt=run_attempt,
+        packaging_policy_sha=packaging_policy_sha, artifact_id=artifact_id, artifact_digest=artifact_digest,
+        helper_mode=helper_mode, helper_tag=helper_tag, helper_commit=helper_commit,
+        artifact_name=artifact_name,
+    )
+    existing = local_ref_target(ref, cwd)
+    if existing:
+        verified = verify_artifact_receipt_commit(existing, state=state, version=version, merge_sha=merge, cwd=cwd)
+        if verified["ref"] != ref:
+            raise ReservationError("existing artifact receipt ref does not match its declared identity")
+        if any(verified.get(key) != value for key, value in fields.items()):
+            raise ReservationError("existing artifact receipt does not match the requested identity")
+        return verified
+    merge_info = local_commit_info(merge, cwd)
+    commit = _git(
+        "commit-tree", merge_info["tree"], "-p", merge, "-m", artifact_receipt_message(fields), cwd=cwd
+    )
+    update = subprocess.run(
+        ["git", "update-ref", ref, commit, "0" * 40], cwd=cwd, text=True, capture_output=True
+    )
+    if update.returncode != 0:
+        existing = local_ref_target(ref, cwd)
+        if existing:
+            verified = verify_artifact_receipt_commit(existing, state=state, version=version, merge_sha=merge, cwd=cwd)
+            if verified["ref"] != ref:
+                raise ReservationError("existing artifact receipt ref does not match its declared identity")
+            if any(verified.get(key) != value for key, value in fields.items()):
+                raise ReservationError("existing artifact receipt does not match the requested identity")
+            return verified
+        raise ReservationError(update.stderr.strip() or "artifact receipt ref creation failed")
+    verified = verify_artifact_receipt_commit(commit, state=state, version=version, merge_sha=merge, cwd=cwd)
+    if verified["ref"] != ref:
+        raise ReservationError("created artifact receipt ref does not match its declared identity")
+    return verified
+
+
+def create_github_artifact_receipt(
+    *, state: str, version: str, merge_sha: str, run_id: str, run_attempt: str,
+    packaging_policy_sha: str, repository: str, token: str, artifact_id: str = "",
+    artifact_digest: str = "", helper_mode: str = "pending", helper_tag: str = "",
+    helper_commit: str = "", artifact_name: str = "release-assets",
+    api_root: str = "https://api.github.com"
+) -> dict[str, Any]:
+    merge = normalize_sha(merge_sha, "merge SHA")
+    ref = artifact_receipt_ref(
+        state,
+        version,
+        merge,
+        run_id if state == "attempt" else "",
+        run_attempt if state == "attempt" else "",
+    )
+    fields = artifact_receipt_fields(
+        state=state, version=version, merge_sha=merge, run_id=run_id, run_attempt=run_attempt,
+        packaging_policy_sha=packaging_policy_sha, artifact_id=artifact_id, artifact_digest=artifact_digest,
+        helper_mode=helper_mode, helper_tag=helper_tag, helper_commit=helper_commit,
+        artifact_name=artifact_name,
+    )
+    client = GitHubRefClient(repository, token, api_root)
+    existing = client.ref_target(ref)
+    if existing:
+        info = client.commit_info(existing)
+        merge_info = client.commit_info(merge)
+        parents = [parent.get("sha") for parent in info.get("parents", [])]
+        allowed_trees = {merge_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA}
+        if parents != [merge] or info.get("tree", {}).get("sha") not in allowed_trees:
+            raise ReservationError("existing remote artifact receipt provenance does not match its merge SHA")
+        actual = trailers_from_message(str(info.get("message", "")))
+        if any(actual.get(key) != value for key, value in fields.items()):
+            raise ReservationError("existing remote artifact receipt does not match the requested identity")
+        actual_ref = artifact_receipt_ref(
+            state,
+            version,
+            merge,
+            actual.get("Release-Run-Id", "") if state == "attempt" else "",
+            actual.get("Release-Run-Attempt", "") if state == "attempt" else "",
+        )
+        if actual_ref != ref:
+            raise ReservationError("existing remote artifact receipt ref does not match its declared identity")
+        return {"ref": ref, "target": existing, **actual}
+    tree = client.create_tree()
+    commit = client.create_commit(tree=tree, parent=merge, message=artifact_receipt_message(fields))
+    try:
+        target = client.create_ref(ref, commit)
+    except ReservationError:
+        target = client.ref_target(ref)
+        if not target:
+            raise
+    if target != commit:
+        return create_github_artifact_receipt(
+            state=state, version=version, merge_sha=merge, run_id=run_id, run_attempt=run_attempt,
+            packaging_policy_sha=packaging_policy_sha, repository=repository, token=token,
+            artifact_id=artifact_id, artifact_digest=artifact_digest, helper_mode=helper_mode,
+            helper_tag=helper_tag, helper_commit=helper_commit, artifact_name=artifact_name, api_root=api_root,
+        )
+    actual_ref = artifact_receipt_ref(
+        state,
+        version,
+        merge,
+        fields.get("Release-Run-Id", "") if state == "attempt" else "",
+        fields.get("Release-Run-Attempt", "") if state == "attempt" else "",
+    )
+    if actual_ref != ref:
+        raise ReservationError("created remote artifact receipt ref does not match its declared identity")
+    return {"ref": ref, "target": target, **fields}
+
+
+def verify_local_artifact_receipt(
+    *, state: str, version: str, merge_sha: str, run_id: str = "", run_attempt: str = "", cwd: Path = ROOT
+) -> dict[str, Any]:
+    ref = artifact_receipt_ref(state, version, merge_sha, run_id, run_attempt)
+    target = local_ref_target(ref, cwd)
+    if not target:
+        raise ArtifactReceiptMissing(f"artifact receipt ref is missing: {ref}")
+    result = verify_artifact_receipt_commit(target, state=state, version=version, merge_sha=merge_sha, cwd=cwd)
+    if result["ref"] != ref:
+        raise ReservationError("local artifact receipt ref does not match its declared identity")
+    return result
+
+
+def verify_github_artifact_receipt(
+    *, state: str, version: str, merge_sha: str, repository: str, token: str,
+    api_root: str = "https://api.github.com", run_id: str = "", run_attempt: str = ""
+) -> dict[str, Any]:
+    merge = normalize_sha(merge_sha, "merge SHA")
+    ref = artifact_receipt_ref(state, version, merge, run_id, run_attempt)
+    client = GitHubRefClient(repository, token, api_root)
+    target = client.ref_target(ref)
+    if not target:
+        raise ArtifactReceiptMissing(f"artifact receipt ref is missing: {ref}")
+    info = client.commit_info(target)
+    merge_info = client.commit_info(merge)
+    parents = [parent.get("sha") for parent in info.get("parents", [])]
+    allowed_trees = {merge_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA}
+    if parents != [merge] or info.get("tree", {}).get("sha") not in allowed_trees:
+        raise ReservationError("remote artifact receipt provenance does not match its merge SHA")
+    actual = trailers_from_message(str(info.get("message", "")))
+    expected = artifact_receipt_fields(
+        state=state,
+        version=version,
+        merge_sha=merge,
+        run_id=actual.get("Release-Run-Id", ""),
+        run_attempt=actual.get("Release-Run-Attempt", ""),
+        packaging_policy_sha=actual.get("Release-Packaging-Policy-SHA", ""),
+        artifact_id=actual.get("Release-Artifact-Id", ""),
+        artifact_digest=actual.get("Release-Artifact-Digest", ""),
+        helper_mode=actual.get("Artifact-Helper-Mode", ""),
+        helper_tag=actual.get("Artifact-Helper-Tag", ""),
+        helper_commit=actual.get("Artifact-Helper-Commit", ""),
+        artifact_name=actual.get("Release-Artifact-Name", ""),
+    )
+    if any(actual.get(key) != value for key, value in expected.items()):
+        raise ReservationError("remote artifact receipt does not match its declared identity")
+    expected_ref = artifact_receipt_ref(
+        state,
+        version,
+        merge,
+        actual.get("Release-Run-Id", "") if state == "attempt" else "",
+        actual.get("Release-Run-Attempt", "") if state == "attempt" else "",
+    )
+    if expected_ref != ref:
+        raise ReservationError("remote artifact receipt ref does not match its declared identity")
+    return {"ref": expected_ref, "target": target, **actual}
 
 
 def verify_local_merge_identity(
@@ -1307,6 +1610,34 @@ def main(argv: list[str] | None = None) -> int:
     receipt.add_argument("--token")
     receipt.add_argument("--api-root", default="https://api.github.com")
     receipt.add_argument("--output", type=Path)
+    artifact = sub.add_parser("artifact-receipt")
+    artifact.add_argument("--state", choices=("pending", "attempt", "finalized"), required=True)
+    artifact.add_argument("--version", required=True)
+    artifact.add_argument("--merge-sha", required=True)
+    artifact.add_argument("--run-id", required=True)
+    artifact.add_argument("--run-attempt", required=True)
+    artifact.add_argument("--packaging-policy-sha", required=True)
+    artifact.add_argument("--artifact-id", default="")
+    artifact.add_argument("--artifact-digest", default="")
+    artifact.add_argument("--helper-mode", default="pending")
+    artifact.add_argument("--helper-tag", default="")
+    artifact.add_argument("--helper-commit", default="")
+    artifact.add_argument("--artifact-name", default="release-assets")
+    artifact.add_argument("--local-root", type=Path)
+    artifact.add_argument("--repository")
+    artifact.add_argument("--token")
+    artifact.add_argument("--api-root", default="https://api.github.com")
+    artifact.add_argument("--output", type=Path)
+    verify_artifact = sub.add_parser("verify-artifact-receipt")
+    verify_artifact.add_argument("--state", choices=("pending", "attempt", "finalized"), required=True)
+    verify_artifact.add_argument("--version", required=True)
+    verify_artifact.add_argument("--merge-sha", required=True)
+    verify_artifact.add_argument("--run-id")
+    verify_artifact.add_argument("--run-attempt")
+    verify_artifact.add_argument("--local-root", type=Path)
+    verify_artifact.add_argument("--repository")
+    verify_artifact.add_argument("--token")
+    verify_artifact.add_argument("--api-root", default="https://api.github.com")
     snapshot = sub.add_parser("snapshot")
     snapshot.add_argument("--input", type=Path, required=True)
     snapshot.add_argument("--output", type=Path, required=True)
@@ -1356,6 +1687,37 @@ def main(argv: list[str] | None = None) -> int:
                     owner=args.owner, claim_key=args.claim_key, boundary_token=args.boundary_token,
                     reservation_ref_value=args.reservation_ref, pr_head_sha=args.pr_head, cwd=args.local_root or ROOT
                 )
+        elif args.command == "artifact-receipt":
+            if args.repository and args.token:
+                result = create_github_artifact_receipt(
+                    state=args.state, version=args.version, merge_sha=args.merge_sha, run_id=args.run_id,
+                    run_attempt=args.run_attempt, packaging_policy_sha=args.packaging_policy_sha,
+                    repository=args.repository, token=args.token, artifact_id=args.artifact_id,
+                    artifact_digest=args.artifact_digest, helper_mode=args.helper_mode,
+                    helper_tag=args.helper_tag, helper_commit=args.helper_commit, artifact_name=args.artifact_name,
+                    api_root=args.api_root,
+                )
+            else:
+                result = create_local_artifact_receipt(
+                    state=args.state, version=args.version, merge_sha=args.merge_sha, run_id=args.run_id,
+                    run_attempt=args.run_attempt, packaging_policy_sha=args.packaging_policy_sha,
+                    artifact_id=args.artifact_id, artifact_digest=args.artifact_digest,
+                    helper_mode=args.helper_mode, helper_tag=args.helper_tag, helper_commit=args.helper_commit,
+                    artifact_name=args.artifact_name,
+                    cwd=args.local_root or ROOT,
+                )
+        elif args.command == "verify-artifact-receipt":
+            if args.repository and args.token:
+                result = verify_github_artifact_receipt(
+                    state=args.state, version=args.version, merge_sha=args.merge_sha,
+                    repository=args.repository, token=args.token, api_root=args.api_root,
+                    run_id=args.run_id or "", run_attempt=args.run_attempt or "",
+                )
+            else:
+                result = verify_local_artifact_receipt(
+                    state=args.state, version=args.version, merge_sha=args.merge_sha,
+                    run_id=args.run_id or "", run_attempt=args.run_attempt or "", cwd=args.local_root or ROOT,
+                )
         else:
             value = json.loads(args.input.read_text(encoding="utf-8"))
             write_json(args.output, intent_snapshot(**value))
@@ -1364,6 +1726,9 @@ def main(argv: list[str] | None = None) -> int:
             write_json(args.output, result)
         print(json.dumps(result, sort_keys=True))
         return 0
+    except ArtifactReceiptMissing as exc:
+        print(f"release_reservation.py: {exc}", file=sys.stderr)
+        return 2
     except (ReservationError, OSError, json.JSONDecodeError) as exc:
         print(f"release_reservation.py: {exc}", file=sys.stderr)
         return 1

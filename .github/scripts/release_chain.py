@@ -27,7 +27,7 @@ PRODUCT_TAG_RE = re.compile(
     r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
 )
 IDENTITY_REF_RE = re.compile(
-    r"^refs/tags/release-(?:reservation|decision|bound|consumed|released)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
+    r"^refs/tags/release-(?:reservation|decision|bound|consumed|released|artifact-pending|artifact-attempts|artifacts)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/|$)"
 )
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PRODUCT_TAG_OWNER = "protected-release-automation"
@@ -409,6 +409,9 @@ def occupied_identity_versions() -> list[str]:
         "refs/tags/release-bound",
         "refs/tags/release-consumed",
         "refs/tags/release-released",
+        "refs/tags/release-artifact-pending",
+        "refs/tags/release-artifact-attempts",
+        "refs/tags/release-artifacts",
     )
     refs = git("for-each-ref", "--format=%(refname)", *prefixes).splitlines()
     versions = []

@@ -76,9 +76,13 @@ assert contract["identity_refs"]["ruleset_excluded_identity_patterns"] == [
     "refs/tags/release-bound/*",
     "refs/tags/release-consumed/*",
     "refs/tags/release-released/*",
+    "refs/tags/release-artifact-pending/*",
+    "refs/tags/release-artifact-attempts/*",
+    "refs/tags/release-artifacts/*",
 ]
 assert contract["identity_refs"]["no_additional_ci_credentials"] is True
 assert contract["recovery"]["dispatch_requires_existing_bound"] is False
+assert contract["recovery"]["artifact_reuse"]["source_artifact_name"] == "release-assets-<run-id>-<run-attempt>"
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
 assert contract["recovery"]["artifact_reuse"]["same_identity_requires_original_release_assets"] is True
 assert contract["recovery"]["artifact_reuse"]["rebuild_on_recovery"] is False

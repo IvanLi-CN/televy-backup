@@ -61,7 +61,14 @@ assert_contains "preparation CI dispatch" "$preparation_text" "gh workflow run c
 assert_contains "preparation package dispatch" "$preparation_text" "gh workflow run package-ci.yml"
 assert_contains "preparation manual target gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
 assert_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation legacy label bridge dispatch" "$preparation_text" "gh workflow run legacy-label-gate-bridge.yml"
 assert_contains "preparation dispatch head binding" "$preparation_text" 'head_sha=${prepared_head_sha}'
+ci_pr_text="$(<"$root_dir/.github/workflows/ci-pr.yml")"
+assert_contains "ci dispatch head input" "$ci_pr_text" "head_sha:"
+assert_contains "ci dispatch exact SHA" "$ci_pr_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
+package_ci_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
+assert_contains "package dispatch head input" "$package_ci_text" "head_sha:"
+assert_contains "package dispatch exact SHA" "$package_ci_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
 assert_contains "preparation descendant head binding" "$preparation_text" "git merge-base --is-ancestor"
 assert_not_contains "preparation label input" "$preparation_text" "labels-json"
 assert_not_contains "preparation intent trailers" "$preparation_text" "Release-Intent"
@@ -70,6 +77,10 @@ legacy_label_bridge_text="$(<"$root_dir/.github/workflows/legacy-label-gate-brid
 assert_contains "legacy label bridge workflow" "$legacy_label_bridge_text" "name: Label Gate"
 assert_contains "legacy label bridge check" "$legacy_label_bridge_text" "name: Release intent label gate"
 assert_contains "legacy label bridge explanation" "$legacy_label_bridge_text" "release labels are not release authority"
+assert_contains "legacy label bridge exact head input" "$legacy_label_bridge_text" "EXPECTED_HEAD_SHA"
+assert_contains "legacy label bridge exact head predicate" "$legacy_label_bridge_text" '$expected_head_sha == "" or .head.sha == $expected_head_sha'
+assert_contains "legacy label bridge exact check publisher" "$legacy_label_bridge_text" "publish-pr-check.py"
+assert_contains "legacy label bridge checks permission" "$legacy_label_bridge_text" "checks: write"
 assert_not_contains "legacy label bridge label parsing" "$legacy_label_bridge_text" ".labels"
 
 target_gate_text="$(<"$root_dir/.github/workflows/release-target-gate.yml")"
@@ -109,21 +120,37 @@ assert_contains "release sequence gate" "$release_text" "verify-release-sequence
 assert_contains "release immutable product tag" "$release_text" "Create or verify immutable product tag"
 assert_contains "release identity receipt" "$release_text" "--state consumed"
 assert_contains "recovery artifact reuse job" "$release_text" "reuse_release_assets"
-assert_contains "recovery artifact source run" "$release_text" "run-id: \${{ needs.resolve.outputs.recovery_run_id }}"
+assert_contains "recovery artifact receipt" "$release_text" "verify-artifact-receipt"
+assert_contains "recovery artifact exact run" "$release_text" "actions/runs/\${candidate_run_id}/artifacts"
+assert_contains "recovery artifact source run" "$release_text" "actions/runs/\${recovery_run_id}"
 assert_contains "recovery fail-closed artifact" "$release_text" "same-identity recovery requires an unexpired prior release-assets artifact"
-assert_contains "recovery trusted branch" "$release_text" '"${candidate_branch}" == main'
-assert_contains "recovery trusted workflow event" "$release_text" '"${candidate_event}" == workflow_run || "${candidate_event}" == workflow_dispatch'
-assert_contains "recovery trusted workflow path" "$release_text" '"${candidate_workflow_path}" == .github/workflows/release.yml'
-assert_contains "recovery trusted repository" "$release_text" '"${candidate_head_repository}" == "${GITHUB_REPOSITORY}"'
-assert_contains "recovery trusted main ancestry" "$release_text" 'git merge-base --is-ancestor "${candidate_head_sha}" "${main_sha}"'
+assert_contains "recovery missing pending receipt" "$release_text" "same-identity recovery cannot prove whether release-assets was ever recorded"
+assert_contains "recovery trusted branch" "$release_text" '.head_branch == "main"'
+assert_contains "recovery trusted workflow event" "$release_text" '.event == "workflow_run" or .event == "workflow_dispatch"'
+assert_contains "recovery trusted workflow path" "$release_text" '.path == ".github/workflows/release.yml"'
+assert_contains "recovery trusted repository" "$release_text" '.repository.full_name == $repository'
+assert_contains "recovery trusted main ancestry" "$release_text" 'git merge-base --is-ancestor "${recovery_head_sha}" "${main_sha}"'
 assert_contains "recovery artifact archive digest" "$release_text" "Verify immutable release-assets archive digest"
 assert_contains "recovery packaging policy identity" "$release_text" "packaging_policy_sha"
 assert_contains "recovery execution policy identity" "$release_text" "execution_policy_commit_sha"
 assert_contains "recovery pre-artifact repair" "$release_text" "rebuilding pre-artifact output"
 assert_contains "recovery no rebuild" "$release_text" "reuse_artifacts != 'true'"
+assert_contains "recovery direct archive consumption" "$release_text" 'unzip -q "${archive}"'
+assert_contains "release artifact attempt naming" "$release_text" 'source_artifact_name="release-assets-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+assert_contains "release artifact receipt name binding" "$release_text" 'artifact_name "${candidate_artifact_name}"'
+assert_contains "release artifact rerun receipt reuse" "$release_text" "Check immutable release artifact receipt"
+assert_contains "release artifact rerun upload guard" "$release_text" "steps.release-artifact-name.outputs.reuse != 'true'"
+reuse_text="${release_text#*reuse_release_assets:}"
+reuse_text="${reuse_text%%  macos-acceptance:*}"
+assert_not_contains "recovery second artifact download" "$reuse_text" "actions/download-artifact"
+assert_not_contains "recovery global run history scan" "$release_text" "actions/workflows/release.yml/runs?per_page=100"
 assert_not_contains "release label authority" "$release_text" "labels_json"
 assert_not_contains "release label authority environment" "$release_text" "RELEASE_TYPE"
 assert_not_contains "release intent trailers" "$release_text" "Release-Intent"
+
+homebrew_update_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")"
+assert_contains "homebrew legacy label bridge dispatch" "$homebrew_update_text" "gh workflow run legacy-label-gate-bridge.yml"
+assert_contains "homebrew legacy bridge head binding" "$homebrew_update_text" 'head_sha=${HEAD_SHA}'
 
 notify_text="$(<"$root_dir/.github/workflows/notify-release-failure.yml")"
 assert_contains "notifier target output" "$notify_text" "release_target:"

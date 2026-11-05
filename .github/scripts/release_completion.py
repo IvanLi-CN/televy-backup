@@ -32,6 +32,9 @@ IDENTITY_REF_PREFIXES = (
     "refs/tags/release-bound",
     "refs/tags/release-consumed",
     "refs/tags/release-released",
+    "refs/tags/release-artifact-pending",
+    "refs/tags/release-artifact-attempts",
+    "refs/tags/release-artifacts",
 )
 RELEASE_IDENTITY_TRAILERS = {
     "Release-Source-SHA",

@@ -21,6 +21,8 @@ The release boundary remains staged: target validation and reservation, VERSION-
 
 Same-Identity Recovery accepts only an existing reservation and merged identity with matching version, channel, policy, source/merge SHA, and provenance. It retries missing receipts or publication using the same artifact identity. A historical merge without a verified identity requires a new explicit release target and release boundary; it cannot be relabeled as recovery.
 
+Release asset recovery uses three additional append-only refs: `release-artifact-pending` is written immediately before binding, `release-artifact-attempts` records every run/attempt authorized to produce assets, and `release-artifacts` is written after the immutable run/attempt-scoped source artifact upload and records the exact artifact name, id, digest, source run, attempt, and packaging policy SHA. Recovery must use those durable receipts and the exact artifact archive; an expired or otherwise unavailable recorded artifact fails closed, and a missing pending receipt cannot authorize a rebuild.
+
 The PR-label workflow and label policy are retired from active release authority. Historical labels and the old policy files may remain readable for audit until separately removed, but active workflows, required checks, contracts, scripts, and notifications do not parse them.
 
 ## Alternatives Considered

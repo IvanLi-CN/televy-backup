@@ -79,7 +79,7 @@ Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md).
 The publication mapping MUST derive the product tag `v<canonical-version>`, GitHub Release prerelease/latest flags, artifact names, provenance records, and receipt refs from the same Merged Release Identity. Every artifact digest MUST remain bound to the merge SHA and policy id. Existing product tags or Releases may be treated as terminal only when their target, provenance, channel mapping, and identity match exactly; mismatches MUST fail closed.
 
 Consumers and deployment stages MUST reuse the artifacts bound to that identity. A downstream retry MUST not rebuild a different source or select a newer tag as an implicit replacement.
-Same-identity recovery MUST locate a matching completed `Release Product` run from the trusted `main` history, then verify the `release-intent` and unexpired `release-assets` artifacts, their archive digest metadata, manifest, checksums, merge SHA, and original packaging policy SHA before reusing those assets byte-for-byte. Once a prior `release-assets` artifact is recorded but unavailable or expired, recovery MUST fail closed and MUST NOT rebuild native packages or reassemble a new release asset set. A bound repair that can prove no prior `release-assets` artifact was ever recorded MAY rebuild the pre-artifact stage once; it MUST preserve the same merge identity and record the current recovery execution policy separately from the packaging policy carried by the product assets.
+Same-identity recovery MUST verify the durable finalized artifact receipt, the exact trusted `Release Product` run and receipt-named artifact metadata, the unexpired run/attempt-scoped `release-assets-<run-id>-<run-attempt>` artifact, its archive digest, manifest, checksums, merge SHA, and original packaging policy SHA before reusing those bytes. A finalized or expired source artifact MUST make recovery fail closed; recovery MUST NOT rebuild native packages or reassemble a new release asset set. A bound repair MAY rebuild the pre-artifact stage only after appending a run/attempt receipt and proving that every recorded attempt has no source artifact; it MUST preserve the same merge identity and record the current recovery execution policy separately from the packaging policy carried by the product assets.
 
 Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md), [ADR 0014](../../adr/0014-protected-release-authority.md).
 
@@ -128,7 +128,7 @@ The preparation commit MUST include `Release-Target`, `Release-Policy`, `Product
 
 ### Identity refs
 
-The existing append-only namespaces remain the durable identity surface: `release-reservation`, `release-decision`, `release-bound`, `release-consumed`, and `release-released`. Product tags remain `v<canonical-version>` and are never rewritten.
+The existing append-only namespaces remain the durable identity surface: `release-reservation`, `release-decision`, `release-bound`, `release-consumed`, `release-released`, `release-artifact-pending`, `release-artifact-attempts`, and `release-artifacts`. Product tags remain `v<canonical-version>` and are never rewritten.
 
 ## Failure Semantics
 

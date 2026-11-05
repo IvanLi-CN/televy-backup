@@ -101,6 +101,40 @@ consumed="$(python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
 [[ "$(printf '%s' "$bound" | jq -r .ref)" == refs/tags/release-bound/* ]]
 [[ "$(printf '%s' "$consumed" | jq -r .ref)" == refs/tags/release-consumed/* ]]
 
+artifact_pending="$(python3 "$root_dir/.github/scripts/release_reservation.py" artifact-receipt \
+  --local-root "$repo_dir" --state pending --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --run-id 100 --run-attempt 1 --packaging-policy-sha "$source_sha")"
+artifact_attempt="$(python3 "$root_dir/.github/scripts/release_reservation.py" artifact-receipt \
+  --local-root "$repo_dir" --state attempt --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --run-id 100 --run-attempt 1 --packaging-policy-sha "$source_sha")"
+artifact_finalized="$(python3 "$root_dir/.github/scripts/release_reservation.py" artifact-receipt \
+  --local-root "$repo_dir" --state finalized --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --run-id 100 --run-attempt 1 --packaging-policy-sha "$source_sha" \
+  --artifact-id 101 --artifact-digest "$(printf '%064d' 1)" --helper-mode reuse)"
+artifact_finalized_again="$(python3 "$root_dir/.github/scripts/release_reservation.py" verify-artifact-receipt \
+  --local-root "$repo_dir" --state finalized --version 1.0.0-beta.1 --merge-sha "$merge_sha")"
+[[ "$(printf '%s' "$artifact_pending" | jq -r .ref)" == refs/tags/release-artifact-pending/* ]]
+[[ "$(printf '%s' "$artifact_attempt" | jq -r .ref)" == refs/tags/release-artifact-attempts/* ]]
+[[ "$(printf '%s' "$artifact_finalized" | jq -r .ref)" == refs/tags/release-artifacts/* ]]
+[[ "$(printf '%s' "$artifact_finalized" | jq -r '."Release-Artifact-Digest"')" == sha256:* ]]
+[[ "$(printf '%s' "$artifact_finalized_again" | jq -r '."Release-Artifact-Id"')" == 101 ]]
+artifact_attempt_again="$(python3 "$root_dir/.github/scripts/release_reservation.py" verify-artifact-receipt \
+  --local-root "$repo_dir" --state attempt --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --run-id 100 --run-attempt 1)"
+[[ "$(printf '%s' "$artifact_attempt_again" | jq -r .ref)" == "$(printf '%s' "$artifact_attempt" | jq -r .ref)" ]]
+artifact_named="$(python3 "$root_dir/.github/scripts/release_reservation.py" artifact-receipt \
+  --local-root "$repo_dir" --state attempt --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --run-id 101 --run-attempt 2 --packaging-policy-sha "$source_sha" \
+  --artifact-name release-assets-101-2)"
+[[ "$(printf '%s' "$artifact_named" | jq -r '."Release-Artifact-Name"')" == release-assets-101-2 ]]
+if python3 "$root_dir/.github/scripts/release_reservation.py" artifact-receipt \
+  --local-root "$repo_dir" --state finalized --version 1.0.0-beta.1 --merge-sha "$merge_sha" \
+  --run-id 100 --run-attempt 1 --packaging-policy-sha "$source_sha" \
+  --artifact-id 102 --artifact-digest "sha256:$(printf '%064d' 2)" --helper-mode reuse >/dev/null 2>&1; then
+  echo "artifact receipt ref was overwritten" >&2
+  exit 1
+fi
+
 decision_ref="refs/tags/release-decision/v1.0.0-beta.1"
 decision_target="$(git -C "$repo_dir" rev-parse "$decision_ref")"
 git -C "$repo_dir" update-ref -d "$decision_ref"

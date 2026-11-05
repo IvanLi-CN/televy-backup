@@ -82,6 +82,9 @@
     "bound": "refs/tags/release-bound/v<version>/<merge-sha>",
     "consumed": "refs/tags/release-consumed/v<version>/<merge-sha>",
     "released": "refs/tags/release-released/v<version>/<reservation-id>",
+    "artifact_pending": "refs/tags/release-artifact-pending/v<version>/<merge-sha>",
+    "artifact_attempts": "refs/tags/release-artifact-attempts/v<version>/<merge-sha>/<run-id>/<run-attempt>",
+    "artifacts": "refs/tags/release-artifacts/v<version>/<merge-sha>",
     "write_policy": "append-only-create",
     "state_order": "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound",
     "receipt_validation": "independently-verify-reservation-provenance",
@@ -93,9 +96,12 @@
       "refs/tags/release-decision/*",
       "refs/tags/release-bound/*",
       "refs/tags/release-consumed/*",
-      "refs/tags/release-released/*"
+      "refs/tags/release-released/*",
+      "refs/tags/release-artifact-pending/*",
+      "refs/tags/release-artifact-attempts/*",
+      "refs/tags/release-artifacts/*"
     ],
-    "application_enforcement": "release_reservation.py enforces append-only create semantics, same-claim idempotency, provenance, and state order; out-of-band deletion of excluded identity refs is outside application observability",
+    "application_enforcement": "release_reservation.py enforces append-only create semantics, same-claim idempotency, provenance, and state order for release and artifact receipts; out-of-band deletion of excluded identity refs is outside application observability",
     "no_additional_ci_credentials": true,
     "product_tag_provenance": "product annotated tags remain created by github-actions[bot]"
   },
@@ -106,17 +112,18 @@
     "dispatch_bound_repair": "append-only-after-same-sha-provenance",
     "artifact_reuse": {
       "same_identity_requires_original_release_assets": true,
-      "source": "matching release-intent and unexpired release-assets artifacts from a completed Release Product run on main history",
+      "source": "matching finalized artifact receipt and unexpired receipt-named release-assets artifact from one trusted Release Product run; pending receipts prove the pre-artifact repair boundary",
+      "source_artifact_name": "release-assets-<run-id>-<run-attempt>",
       "trusted_run": {
         "workflow": "release.yml",
         "events": ["workflow_run", "workflow_dispatch"],
         "branch": "main",
         "head_must_be_ancestor_of_current_main": true
       },
-      "missing_artifact": "fail-closed after an immutable artifact was recorded; a bound repair with no prior release-assets artifact may rebuild before artifact finalization",
+      "missing_artifact": "fail-closed after a finalized or expired receipt-named release-assets artifact is recorded; a verified pending receipt with no release-assets artifact may rebuild before artifact finalization",
       "pre_artifact_repair": "same identity, no prior release-assets artifact, rebuild native packages and assemble once",
       "rebuild_on_recovery": false,
-      "verification": "original artifact archive digest metadata plus release manifest, checksum, source SHA, and packaging policy SHA",
+      "verification": "durable artifact receipt, exact source run/artifact metadata, archive digest, release manifest, checksum, source SHA, and packaging policy SHA",
       "policy_identity": "preserve original packaging SHA and record current recovery execution SHA separately"
     },
     "version_only_release_pr": "new non-empty VERSION-only PR with new merge identity",
