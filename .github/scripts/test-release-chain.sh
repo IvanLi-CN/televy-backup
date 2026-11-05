@@ -184,6 +184,11 @@ active_reclaimed.update({
     "Reservation-Boundary-Token": reclaimed_identity["boundaryToken"],
 })
 reservation.create_local_reservation(active_reclaimed, repo)
+found_reclaimed = reservation.find_local_reservation_by_claim(
+    claim_key="pr:204:target:0.9.5", owner="github-actions[bot]", release_target="0.9.5", cwd=repo,
+)
+assert found_reclaimed["ref"] == active_reclaimed["ref"]
+assert found_reclaimed["sourceSha"] == active_reclaimed["sourceSha"]
 assert "0.9.5" in chain.occupied_identity_versions()
 
 product_tag("v0.9.4", source)
