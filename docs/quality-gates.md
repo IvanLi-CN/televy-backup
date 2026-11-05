@@ -14,6 +14,8 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 
 The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. Release preparation is an explicit `workflow_dispatch` operation whose single `release_target` input is checked from the trusted `main` checkout. `Release target gate` validates preparation trailers and canonical `VERSION`; `Release completion` validates the current PR head/base, source checks, reservation provenance, and the same target identity. Neither gate reads PR labels. Both use per-PR concurrency with `cancel-in-progress: false`; GitHub retains the latest pending evaluation for each group, and every new head is independently revalidated before completion.
 
+During migration, `legacy-label-gate-bridge.yml` may continue to emit the historical `Release intent label gate` check context for existing branch protection rules. The bridge always succeeds and never reads labels; it is compatibility plumbing only. `Release target gate` is the active release gate.
+
 ## APFS acceptance lane
 
 The hosted `quality` job checks the APFS validation workflow contract. The deterministic Snapshot Access, daemon, core, fixture timepoint, and mount-health regression tests run in the `manual-snapshot-regression` job in `.github/workflows/ci-pr.yml`, which is gated by `workflow_dispatch` and runs only when an owner explicitly starts PR validation; it never touches user data. The job runs the fixture tests against an isolated temporary tree and asserts strict snapshot behavior, mount identity loss handling, and `snapshot.access_failed` propagation.

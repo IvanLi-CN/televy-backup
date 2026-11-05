@@ -23,7 +23,7 @@ assert_not_contains() {
   fi
 }
 
-for workflow in ci-pr.yml ci-main.yml release-target-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml homebrew-cask.yml homebrew-cask-update.yml; do
+for workflow in ci-pr.yml ci-main.yml legacy-label-gate-bridge.yml release-target-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml homebrew-cask.yml homebrew-cask-update.yml; do
   ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$root_dir/.github/workflows/$workflow"
 done
 test ! -e "$root_dir/.github/workflows/label-gate.yml"
@@ -60,6 +60,12 @@ assert_not_contains "preparation manual gate dispatch" "$preparation_text" "gh w
 assert_not_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 assert_not_contains "preparation label input" "$preparation_text" "labels-json"
 assert_not_contains "preparation intent trailers" "$preparation_text" "Release-Intent"
+
+legacy_label_bridge_text="$(<"$root_dir/.github/workflows/legacy-label-gate-bridge.yml")"
+assert_contains "legacy label bridge workflow" "$legacy_label_bridge_text" "name: Label Gate"
+assert_contains "legacy label bridge check" "$legacy_label_bridge_text" "name: Release intent label gate"
+assert_contains "legacy label bridge explanation" "$legacy_label_bridge_text" "release labels are not release authority"
+assert_not_contains "legacy label bridge label parsing" "$legacy_label_bridge_text" ".labels"
 
 target_gate_text="$(<"$root_dir/.github/workflows/release-target-gate.yml")"
 assert_contains "target gate workflow name" "$target_gate_text" "name: Release target gate"
