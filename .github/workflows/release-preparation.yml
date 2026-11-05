@@ -293,13 +293,3 @@ jobs:
             sleep 2
           done
           test "${verified}" = true
-
-      - name: Dispatch independent PR gates
-        if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
-        env:
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
-          HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-        run: |
-          set -euo pipefail
-          gh workflow run release-target-gate.yml --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" --raw-field "pr_number=${PR_NUMBER}"
-          gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" --raw-field "pr_number=${PR_NUMBER}"

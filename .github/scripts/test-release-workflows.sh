@@ -52,18 +52,18 @@ assert_contains "reservation before preparation" "$preparation_text" "Reserve ta
 assert_contains "reservation target field" "$preparation_text" "releaseTarget:\$releaseTarget"
 assert_contains "signed preparation commit API" "$preparation_text" "createCommitOnBranch"
 assert_contains "signed preparation expected head" "$preparation_text" "expectedHeadOid"
-assert_contains "independent target gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
-assert_contains "independent completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 assert_contains "trusted main checkout" "$preparation_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
 assert_contains "preparation base lock" "$preparation_text" "PR base"
 assert_contains "preparation reservation race check" "$preparation_text" "current-pr-before-reservation.json"
 assert_contains "preparation version race check" "$preparation_text" "current-pr-before-version.json"
-assert_contains "preparation gate branch ref" "$preparation_text" '--ref "${HEAD_REF}"'
+assert_not_contains "preparation manual gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
+assert_not_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
 assert_not_contains "preparation label input" "$preparation_text" "labels-json"
 assert_not_contains "preparation intent trailers" "$preparation_text" "Release-Intent"
 
 target_gate_text="$(<"$root_dir/.github/workflows/release-target-gate.yml")"
 assert_contains "target gate workflow name" "$target_gate_text" "name: Release target gate"
+assert_contains "target gate pull request trigger" "$target_gate_text" "pull_request_target:"
 assert_contains "target gate trusted main resolution" "$target_gate_text" "git/ref/heads/main"
 assert_contains "target gate trusted policy checkout" "$target_gate_text" 'ref: ${{ steps.trusted-main.outputs.sha }}'
 assert_contains "target gate verifier" "$target_gate_text" "release_target_gate.py"
@@ -71,6 +71,7 @@ assert_contains "target gate non-preemptive concurrency" "$target_gate_text" "ca
 assert_contains "target gate current main check" "$target_gate_text" "current_main_sha"
 
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
+assert_contains "completion pull request trigger" "$completion_text" "pull_request_target:"
 assert_contains "completion target gate requirement" "$completion_text" "Release target gate"
 assert_contains "completion preparation lookup" "$completion_text" "find-prepared"
 assert_contains "completion reservation provenance" "$completion_text" "--reservation-json"
@@ -109,6 +110,8 @@ merge_group_text="$(<"$root_dir/.github/scripts/merge-group-release-gate.sh")"
 assert_contains "merge-group target gate requirement" "$merge_group_text" 'required=("Release target gate"'
 assert_contains "merge-group target fields" "$merge_group_text" "releaseTarget"
 assert_contains "merge-group completion verifier" "$merge_group_text" "release_completion.py"
+assert_contains "merge-group current main lock" "$merge_group_text" "ensure_current_main"
+assert_contains "merge-group base lock" "$merge_group_text" "merge_group_base_sha"
 assert_not_contains "merge-group label authority" "$merge_group_text" ".labels"
 assert_not_contains "merge-group label mode" "$merge_group_text" "labels"
 

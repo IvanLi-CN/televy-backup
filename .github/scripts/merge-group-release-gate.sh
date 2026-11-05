@@ -12,6 +12,16 @@ repository="${GITHUB_REPOSITORY:?}"
 token="${GITHUB_TOKEN:-${GH_TOKEN:?}}"
 api_root="${GITHUB_API_URL:-https://api.github.com}"
 head_sha="${MERGE_GROUP_HEAD_SHA:?}"
+merge_group_base_sha="$(jq -r '.merge_group.base_sha // empty' "${event_path}")"
+[[ "${merge_group_base_sha}" =~ ^[0-9a-fA-F]{40}$ ]]
+
+ensure_current_main() {
+  local current_main_sha
+  current_main_sha="$(gh api "repos/${repository}/git/ref/heads/main" --jq '.object.sha')"
+  test "${current_main_sha}" = "${merge_group_base_sha}"
+}
+
+ensure_current_main
 
 api_pr_numbers="$(gh api "repos/${repository}/commits/${head_sha}/pulls?per_page=100" --jq '.[].number')"
 pr_numbers="$(
@@ -61,11 +71,13 @@ else:
 }
 
 for pr_number in ${pr_numbers}; do
+  ensure_current_main
   pr_json="${RUNNER_TEMP:-/tmp}/merge-group-pr-${pr_number}.json"
   gh api "repos/${repository}/pulls/${pr_number}" > "${pr_json}"
   test "$(jq -r '.state' "${pr_json}")" = open
   test "$(jq -r '.base.ref' "${pr_json}")" = main
   test "$(jq -r '.head.repo.full_name // empty' "${pr_json}")" = "${repository}"
+  test "$(jq -r '.base.sha' "${pr_json}")" = "${merge_group_base_sha}"
   if [[ "${mode}" == target ]]; then
     pr_head_sha="$(jq -r '.head.sha' "${pr_json}")"
     base_sha="$(jq -r '.base.sha' "${pr_json}")"
@@ -157,12 +169,14 @@ for pr_number in ${pr_numbers}; do
       sleep 10
     done
     final_pr_json="${RUNNER_TEMP:-/tmp}/merge-group-final-pr-${pr_number}.json"
+    ensure_current_main
     gh api "repos/${repository}/pulls/${pr_number}" > "${final_pr_json}"
     test "$(jq -r '.state' "${final_pr_json}")" = open
     test "$(jq -r '.base.ref' "${final_pr_json}")" = main
     test "$(jq -r '.head.repo.full_name // empty' "${final_pr_json}")" = "${repository}"
     test "$(jq -r '.head.sha' "${final_pr_json}")" = "${pr_head_sha}"
     test "$(jq -r '.base.sha' "${final_pr_json}")" = "${base_sha}"
+    test "${base_sha}" = "${merge_group_base_sha}"
     gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100" > "${checks_json}"
     python3 .github/scripts/release_completion.py "${completion_args[@]}" \
       --allow-migration --migration-version 0.9.2
