@@ -128,6 +128,7 @@ assert_contains "reconciliation trusted release run" "$reconciliation_text" 'hea
 assert_contains "reconciliation trusted release workflow" "$reconciliation_text" 'path == ".github/workflows/release.yml"'
 assert_contains "reconciliation retirement writer" "$reconciliation_text" "release_reservation.py retire"
 assert_contains "reconciliation retirement namespace" "$reconciliation_text" "release-retired/v"
+assert_contains "reconciliation refreshes retirement ref" "$reconciliation_text" 'git fetch --force origin "${retirement_ref_value}:${retirement_ref_value}"'
 assert_not_contains "reconciliation no ref deletion" "$reconciliation_text" "git update-ref -d"
 assert_not_contains "reconciliation no git push" "$reconciliation_text" "git push"
 assert_not_contains "reconciliation no force push" "$reconciliation_text" "git push --force"

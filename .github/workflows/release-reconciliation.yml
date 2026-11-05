@@ -143,9 +143,12 @@ jobs:
           jq -e --arg version "${RELEASE_VERSION}" \
             '.ref == ("refs/tags/release-retired/v" + $version + "/" + ."Retirement-Reservation-Id") and ."Retirement-Provenance" == "immutable-retirement-reconciliation"' \
             "${RUNNER_TEMP}/retirement.json" >/dev/null
+          retirement_ref_value="$(jq -r .ref "${RUNNER_TEMP}/retirement.json")"
+          retirement_sha_value="$(jq -r .target "${RUNNER_TEMP}/retirement.json")"
+          git fetch --force origin "${retirement_ref_value}:${retirement_ref_value}"
           {
-            echo "retirement_ref=$(jq -r .ref "${RUNNER_TEMP}/retirement.json")"
-            echo "retirement_sha=$(jq -r .target "${RUNNER_TEMP}/retirement.json")"
+            echo "retirement_ref=${retirement_ref_value}"
+            echo "retirement_sha=${retirement_sha_value}"
             echo "evidence_digest=$(jq -r '."Retirement-Evidence-Digest"' "${RUNNER_TEMP}/retirement.json")"
           } >> "$GITHUB_OUTPUT"
 
