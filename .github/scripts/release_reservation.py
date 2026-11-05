@@ -1016,7 +1016,7 @@ def create_local_retirement(
     if existing:
         return verify_local_retirement(
             version=version, reservation_id=reservation_id, owner=owner, reason=reason,
-            evidence=evidence, cwd=cwd,
+            evidence=None, cwd=cwd,
         )
     fields = retirement_fields(
         version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
@@ -1059,7 +1059,7 @@ def create_github_retirement(
     if existing:
         return verify_github_retirement(
             version=version, reservation_id=reservation_id, repository=repository, token=token,
-            api_root=api_root, owner=owner, reason=reason, evidence=evidence,
+            api_root=api_root, owner=owner, reason=reason, evidence=None,
         )
     fields = retirement_fields(
         version=version, reservation_id=reservation_id, reservation_ref_value=source["reservationRef"],
