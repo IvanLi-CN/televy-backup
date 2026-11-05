@@ -23,6 +23,9 @@ second="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --release-target 1.0.0-beta.1 --owner fixture --claim-key "$claim_key")"
 [[ "$(printf '%s' "$first" | jq -r .target)" == "$(printf '%s' "$second" | jq -r .target)" ]]
 [[ "$(git -C "$repo_dir" for-each-ref --format='%(refname)' refs/tags/release-reservation)" == "refs/tags/release-reservation/v1.0.0-beta.1" ]]
+found="$(python3 "$root_dir/.github/scripts/release_reservation.py" find-claim \
+  --local-root "$repo_dir" --release-target 1.0.0-beta.1 --owner fixture --claim-key "$claim_key")"
+[[ "$(printf '%s' "$found" | jq -r .sourceSha)" == "$source_sha" ]]
 
 if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel beta \

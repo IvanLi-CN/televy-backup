@@ -10,7 +10,7 @@
 
 ## Implementation Coverage
 
-- Requirement coverage: Version Policy, manual preparation, target gate, completion gate, release contract, reservation provenance, and same-identity recovery are implemented.
+- Requirement coverage: Version Policy, manual preparation, target gate, completion gate, release contract, reservation provenance, and same-identity recovery with immutable release-asset reuse are implemented.
 - Verification commands: `test-release-chain.sh`, `test-release-preparation.sh`, `test-release-completion.sh`, `test-release-reservation.sh`, `test-release-github-api.sh`, `test-release-failure-context.py`, `test-release-workflows.sh`, `test-homebrew-cask.sh`, `test-release-scripts.sh`, and `scripts/test-product-version.py` pass locally.
 - Rollout facts: existing `v0.9.9` reservation and decision refs are immutable historical occupancy and are not rewritten or migrated by this topic.
 
@@ -27,7 +27,7 @@ The active route will accept one owner-provided `release_target` through trusted
 
 - Added the manual target Version Policy and target gate.
 - Retired the PR-label release workflow and label-derived target authority.
-- Bound reservation, preparation, completion, Release snapshots, and failure recovery to `release_target` and policy identity.
+- Bound reservation, preparation, completion, Release snapshots, and failure recovery to `release_target` and policy identity; same-identity recovery now reuses the original `release-assets` artifact and fails closed when it is unavailable.
 
 ## References
 

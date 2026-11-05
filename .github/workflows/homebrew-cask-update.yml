@@ -234,6 +234,10 @@ jobs:
           gh workflow run ci-pr.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run package-ci.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
           gh workflow run homebrew-cask.yml --repo "${GITHUB_REPOSITORY}" --ref "${UPDATE_BRANCH}" --raw-field "pr_number=${PR_NUMBER}"
+          gh workflow run release-target-gate.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
+          gh workflow run release-completion.yml --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${HEAD_SHA}"
 
       - name: Wait for exact Cask PR checks
         if: steps.release.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'

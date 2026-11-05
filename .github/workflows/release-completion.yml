@@ -11,13 +11,17 @@ on:
         description: Open in-repository product PR to validate
         required: true
         type: string
+      head_sha:
+        description: Expected pull request head SHA for a trusted dispatch
+        required: false
+        type: string
 
 concurrency:
   group: release-completion-${{ github.event.pull_request.number || inputs.pr_number || github.event.merge_group.head_sha || github.ref }}
   cancel-in-progress: false
 
 permissions:
-  checks: read
+  checks: write
   contents: read
   pull-requests: read
 
@@ -42,6 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_PATH: ${{ github.event_path }}
           INPUT_PR_NUMBER: ${{ inputs.pr_number || '' }}
+          EXPECTED_HEAD_SHA: ${{ inputs.head_sha || '' }}
         run: |
           set -euo pipefail
           pr_number="${INPUT_PR_NUMBER}"
@@ -53,6 +58,10 @@ jobs:
           test "$(jq -r '.state' "${RUNNER_TEMP}/pull-request.json")" = open
           test "$(jq -r '.base.ref' "${RUNNER_TEMP}/pull-request.json")" = main
           test "$(jq -r '.head.repo.full_name // empty' "${RUNNER_TEMP}/pull-request.json")" = "${GITHUB_REPOSITORY}"
+          if [[ -n "${EXPECTED_HEAD_SHA}" ]]; then
+            [[ "${EXPECTED_HEAD_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]
+            test "$(jq -r '.head.sha' "${RUNNER_TEMP}/pull-request.json")" = "${EXPECTED_HEAD_SHA}"
+          fi
           head_ref="$(jq -r '.head.ref' "${RUNNER_TEMP}/pull-request.json")"
           git check-ref-format --branch "${head_ref}" >/dev/null
           {
@@ -87,6 +96,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Verify VERSION and release completion
+        id: verify-completion
+        continue-on-error: ${{ github.event_name == 'workflow_dispatch' }}
         if: github.event_name != 'merge_group'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -277,6 +288,27 @@ jobs:
           release_completion.verify_reservation = verify_reservation_with_source_compat
           raise SystemExit(release_completion.main(sys.argv[1:]))
           PY
+
+      - name: Publish exact dispatched PR check
+        if: always() && github.event_name == 'workflow_dispatch' && steps.pr.outputs.head_sha != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
+          CHECK_CONCLUSION: ${{ steps.verify-completion.outcome == 'success' && 'success' || 'failure' }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/publish-pr-check.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --head-sha "${CHECK_HEAD_SHA}" \
+            --name "Release completion" \
+            --conclusion "${CHECK_CONCLUSION}" \
+            --title "Release completion" \
+            --summary "Trusted release-completion validation was evaluated for this exact pull request head." \
+            --details-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+      - name: Fail dispatched release completion gate
+        if: always() && github.event_name == 'workflow_dispatch' && steps.verify-completion.outcome != 'success'
+        run: exit 1
 
       - name: Validate merge-group release completion
         if: github.event_name == 'merge_group'

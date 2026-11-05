@@ -152,6 +152,28 @@ jobs:
             echo "ready=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          claim_key="$(python3 - "${PR_NUMBER}" "${RELEASE_TARGET}" <<'PY'
+          import sys
+          sys.path.insert(0, '.github/scripts')
+          import release_chain
+          print(release_chain.manual_claim_key(sys.argv[1], sys.argv[2]))
+          PY
+          )"
+          claim_json=""
+          claim_status=2
+          claim_error="${RUNNER_TEMP}/reservation-claim-error.txt"
+          if claim_json="$(python3 .github/scripts/release_reservation.py find-claim \
+              --claim-key "${claim_key}" --owner github-actions[bot] \
+              --release-target "${RELEASE_TARGET}" \
+              --release-policy televybackup-manual-semver-v1 2>"${claim_error}")"; then
+            claim_status=0
+          else
+            claim_status=$?
+          fi
+          if [[ "${claim_status}" != 0 && "${claim_status}" != 2 ]]; then
+            cat "${claim_error}" >&2
+            exit 1
+          fi
           if prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${SOURCE_SHA}" --base "${BASE_SHA}" 2>/dev/null)"; then
             reservation_source_sha="$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')"
             reservation_source_tree="$(git rev-parse "${reservation_source_sha}^{tree}")"
@@ -169,17 +191,30 @@ jobs:
               --arg boundary_token "$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)" \
               '{sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,channel:$channel,version:$version,releaseTarget:$releaseTarget,policy:$policy,reservationId:$reservation_id,ref:$ref,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claim_key,"Reservation-Boundary-Token":$boundary_token}' \
               > "${RUNNER_TEMP}/reservation.json"
+          elif [[ "${claim_status}" == 0 ]]; then
+            reservation_source_sha="$(printf '%s' "${claim_json}" | jq -r .sourceSha)"
+            if ! git merge-base --is-ancestor "${reservation_source_sha}" "${SOURCE_SHA}"; then
+              echo "existing reservation source is not an ancestor of the current PR head" >&2
+              exit 1
+            fi
+            jq -n \
+              --arg sourceSha "${reservation_source_sha}" \
+              --arg sourceTreeSha "$(printf '%s' "${claim_json}" | jq -r .sourceTreeSha)" \
+              --arg channel "$(printf '%s' "${claim_json}" | jq -r .channel)" \
+              --arg version "$(printf '%s' "${claim_json}" | jq -r .version)" \
+              --arg releaseTarget "$(printf '%s' "${claim_json}" | jq -r .releaseTarget)" \
+              --arg policy "$(printf '%s' "${claim_json}" | jq -r .policy)" \
+              --arg reservation_id "$(printf '%s' "${claim_json}" | jq -r .reservationId)" \
+              --arg ref "$(printf '%s' "${claim_json}" | jq -r .ref)" \
+              --arg owner "$(printf '%s' "${claim_json}" | jq -r '.Reservation-Owner')" \
+              --arg claim_key "$(printf '%s' "${claim_json}" | jq -r '.Reservation-Claim-Key')" \
+              --arg boundary_token "$(printf '%s' "${claim_json}" | jq -r '.Reservation-Boundary-Token')" \
+              '{sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,channel:$channel,version:$version,releaseTarget:$releaseTarget,policy:$policy,reservationId:$reservation_id,ref:$ref,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claim_key,"Reservation-Boundary-Token":$boundary_token}' \
+              > "${RUNNER_TEMP}/reservation.json"
           else
             resolved="$(python3 .github/scripts/release_chain.py resolve-target --release-target "${RELEASE_TARGET}")"
             version="$(printf '%s' "${resolved}" | jq -r .version)"
             channel="$(printf '%s' "${resolved}" | jq -r .channel)"
-            claim_key="$(python3 - "${PR_NUMBER}" "${RELEASE_TARGET}" <<'PY'
-          import sys
-          sys.path.insert(0, '.github/scripts')
-          import release_chain
-          print(release_chain.manual_claim_key(sys.argv[1], sys.argv[2]))
-          PY
-          )"
             python3 .github/scripts/release_reservation.py reserve \
               --source-sha "${SOURCE_SHA}" \
               --version "${version}" \
@@ -293,3 +328,17 @@ jobs:
             sleep 2
           done
           test "${verified}" = true
+
+      - name: Dispatch prepared-head release gates
+        if: steps.prepare.outputs.prepared == 'created' || steps.prepare.outputs.prepared == 'existing'
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PREPARED_SHA: ${{ steps.create-version.outputs.prepared_sha || steps.prepare.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          gh workflow run release-target-gate.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${PREPARED_SHA}"
+          gh workflow run release-completion.yml \
+            --repo "${GITHUB_REPOSITORY}" --ref main \
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${PREPARED_SHA}"

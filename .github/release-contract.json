@@ -104,6 +104,13 @@
     "same_sha_identity": "bound merge SHA + VERSION + channel + matching reservation",
     "dispatch_requires_existing_bound": false,
     "dispatch_bound_repair": "append-only-after-same-sha-provenance",
+    "artifact_reuse": {
+      "same_identity_requires_original_release_assets": true,
+      "source": "matching release-intent and unexpired release-assets artifacts from a prior Release Product run",
+      "missing_artifact": "fail-closed",
+      "rebuild_on_recovery": false,
+      "verification": "original artifact digest metadata plus release manifest, checksum, source SHA, and packaging policy SHA"
+    },
     "version_only_release_pr": "new non-empty VERSION-only PR with new merge identity",
     "historical_backfill": false,
     "queue": false,

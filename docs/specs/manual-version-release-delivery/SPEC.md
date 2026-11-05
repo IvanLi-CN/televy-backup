@@ -79,6 +79,7 @@ Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md).
 The publication mapping MUST derive the product tag `v<canonical-version>`, GitHub Release prerelease/latest flags, artifact names, provenance records, and receipt refs from the same Merged Release Identity. Every artifact digest MUST remain bound to the merge SHA and policy id. Existing product tags or Releases may be treated as terminal only when their target, provenance, channel mapping, and identity match exactly; mismatches MUST fail closed.
 
 Consumers and deployment stages MUST reuse the artifacts bound to that identity. A downstream retry MUST not rebuild a different source or select a newer tag as an implicit replacement.
+Same-identity recovery MUST locate the prior Release Product run's matching `release-intent` and unexpired `release-assets` artifacts, verify their identity, artifact metadata, manifest, checksums, merge SHA, and packaging policy SHA, and reuse those assets byte-for-byte. Missing or expired recovery artifacts MUST fail closed; recovery MUST NOT rebuild native packages or reassemble a new release asset set.
 
 Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md), [ADR 0014](../../adr/0014-protected-release-authority.md).
 

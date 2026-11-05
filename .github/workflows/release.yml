@@ -37,6 +37,7 @@ jobs:
     name: Resolve merged product identity
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: write
       pull-requests: read
     outputs:
@@ -69,6 +70,10 @@ jobs:
       helper_source_tag: ${{ steps.release.outputs.helper_source_tag }}
       helper_source_commit: ${{ steps.release.outputs.helper_source_commit }}
       helper_source_artifact_digest: ${{ steps.upload-helper-source.outputs.artifact-digest }}
+      reuse_artifacts: ${{ steps.release.outputs.reuse_artifacts }}
+      recovery_run_id: ${{ steps.release.outputs.recovery_run_id }}
+      recovery_artifact_digest: ${{ steps.release.outputs.recovery_artifact_digest }}
+      recovery_policy_sha: ${{ steps.release.outputs.recovery_policy_sha }}
     steps:
       - name: Resolve current trusted main SHA
         id: trusted-main
@@ -196,6 +201,7 @@ jobs:
           esac
 
           bound_state=missing
+          existing_bound_state=missing
           bound_ref="refs/tags/release-bound/v${version}/${merge_sha}"
           bound_ref_path="${bound_ref#refs/}"
           bound_output=""
@@ -218,6 +224,7 @@ jobs:
           )
           PY
             bound_state=present
+            existing_bound_state=present
           else
             if ! printf '%s' "${bound_output}" | grep -qiE '404|not found'; then
               printf '%s\n' "${bound_output}" >&2
@@ -313,6 +320,49 @@ jobs:
             fi
           fi
 
+          recovery_run_id=""
+          recovery_artifact_digest=""
+          recovery_policy_sha=""
+          recovery_intent_path=""
+          reuse_artifacts=false
+          if [[ "${consumed_state}" != present && "${release_state}" != published && ( "${EVENT_NAME}" == workflow_dispatch || "${existing_bound_state}" == present ) ]]; then
+            recovery_runs_json="${RUNNER_TEMP}/release-runs.json"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=100" > "${recovery_runs_json}"
+            while IFS=$'\t' read -r candidate_run_id _; do
+              [[ -n "${candidate_run_id}" && "${candidate_run_id}" != "${GITHUB_RUN_ID}" ]] || continue
+              artifacts_json="${RUNNER_TEMP}/recovery-artifacts-${candidate_run_id}.json"
+              gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${candidate_run_id}/artifacts?per_page=100" > "${artifacts_json}"
+              intent_row="$(jq -c '[.artifacts[]? | select(.name == "release-intent" and .expired == false)][0] // empty' "${artifacts_json}")"
+              assets_row="$(jq -c '[.artifacts[]? | select(.name == "release-assets" and .expired == false)][0] // empty' "${artifacts_json}")"
+              [[ -n "${intent_row}" && -n "${assets_row}" ]] || continue
+              intent_zip="${RUNNER_TEMP}/recovery-intent-${candidate_run_id}.zip"
+              intent_json="${RUNNER_TEMP}/recovery-intent-${candidate_run_id}.json"
+              gh api "$(printf '%s' "${intent_row}" | jq -r .archive_download_url)" > "${intent_zip}"
+              unzip -p "${intent_zip}" release-intent.json > "${intent_json}"
+              jq -e \
+                --arg merge_sha "${merge_sha}" \
+                --arg version "${version}" \
+                --arg tag "${tag}" \
+                --arg release_target "${release_target}" \
+                --arg policy "${policy}" \
+                --arg reservation_ref "${reservation_ref}" \
+                '(.merge_sha == $merge_sha) and (.version == $version) and (.tag == $tag) and (.release_target == $release_target) and (.policy == $policy) and (.reservation.ref == $reservation_ref) and (.policy_commit_sha | type == "string" and test("^[0-9a-fA-F]{40}$")) and ((.artifact_names // []) | index("release-assets"))' \
+                "${intent_json}" >/dev/null || continue
+              recovery_policy_sha="$(jq -r .policy_commit_sha "${intent_json}")"
+              git cat-file -e "${recovery_policy_sha}^{commit}"
+              recovery_run_id="${candidate_run_id}"
+              recovery_artifact_digest="$(printf '%s' "${assets_row}" | jq -r .digest)"
+              [[ "${recovery_artifact_digest}" =~ ^sha256:[0-9a-fA-F]{64}$ ]]
+              recovery_intent_path="${intent_json}"
+              reuse_artifacts=true
+              break
+            done < <(jq -r '.workflow_runs | sort_by(.created_at) | reverse[] | [.id, .head_sha] | @tsv' "${recovery_runs_json}")
+            if [[ "${reuse_artifacts}" != true ]]; then
+              echo "same-identity recovery requires an unexpired prior release-assets artifact" >&2
+              exit 1
+            fi
+          fi
+
           helper_source_tag=""
           helper_source_mode=""
           helper_source_commit=""
@@ -349,6 +399,13 @@ jobs:
                 --token "${GH_TOKEN}" --api-root "${GITHUB_API_URL}" --pr-head "${pull_request_head_sha}" >/dev/null
               enabled=false
               reason=already_published
+            elif [[ "${reuse_artifacts}" == true ]]; then
+              helper_source_mode="$(jq -r '.helper.mode // "reuse"' "${recovery_intent_path}")"
+              helper_source_tag="$(jq -r '.helper.source_tag // empty' "${recovery_intent_path}")"
+              helper_source_commit="$(jq -r '.helper.source_commit // empty' "${recovery_intent_path}")"
+              [[ "${helper_source_mode}" == reuse || "${helper_source_mode}" == bootstrap ]]
+              enabled=true
+              reason=product_identity_recovery
             else
               bootstrap_helper_tag="$(python3 -c 'import json; print(json.load(open("packaging/macos/snapshot-components.lock.json", encoding="utf-8"))["bootstrap_release_tag"])')"
               release_list_json="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName,isDraft,isPrerelease,publishedAt)"
@@ -464,11 +521,15 @@ jobs:
             echo "pull_request=${pull_request}"
             echo "helper_source_tag=${helper_source_tag}"
             echo "helper_source_commit=${helper_source_commit}"
+            echo "reuse_artifacts=${reuse_artifacts}"
+            echo "recovery_run_id=${recovery_run_id}"
+            echo "recovery_artifact_digest=${recovery_artifact_digest}"
+            echo "recovery_policy_sha=${recovery_policy_sha}"
           } >> "$GITHUB_OUTPUT"
           echo "RELEASE_IDENTITY status=resolved version=${version} channel=${channel} merge_sha=${merge_sha} tag=${tag} reservation_ref=${reservation_ref}"
 
       - name: Upload immutable helper source
-        if: steps.release.outputs.identity_status == 'resolved' && steps.release.outputs.helper_source_mode == 'reuse'
+        if: steps.release.outputs.identity_status == 'resolved' && steps.release.outputs.helper_source_mode == 'reuse' && steps.release.outputs.reuse_artifacts != 'true'
         id: upload-helper-source
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -485,6 +546,7 @@ jobs:
           HEAD_SHA: ${{ steps.release.outputs.head_sha }}
           RELEASE_TARGET: ${{ steps.release.outputs.release_target }}
           POLICY: ${{ steps.release.outputs.policy }}
+          POLICY_SHA: ${{ steps.release.outputs.policy_sha }}
           VERSION: ${{ steps.release.outputs.version }}
           CHANNEL: ${{ steps.release.outputs.channel }}
           RELEASE_MODE: ${{ steps.release.outputs.release_mode }}
@@ -498,6 +560,10 @@ jobs:
           HELPER_SOURCE_TAG: ${{ steps.release.outputs.helper_source_tag }}
           HELPER_SOURCE_COMMIT: ${{ steps.release.outputs.helper_source_commit }}
           HELPER_SOURCE_ARTIFACT_DIGEST: ${{ steps.upload-helper-source.outputs.artifact-digest }}
+          REUSE_ARTIFACTS: ${{ steps.release.outputs.reuse_artifacts }}
+          RECOVERY_RUN_ID: ${{ steps.release.outputs.recovery_run_id }}
+          RECOVERY_ARTIFACT_DIGEST: ${{ steps.release.outputs.recovery_artifact_digest }}
+          RECOVERY_POLICY_SHA: ${{ steps.release.outputs.recovery_policy_sha }}
           PULL_REQUEST: ${{ steps.release.outputs.pull_request }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -513,7 +579,10 @@ jobs:
             --arg tag_owner "protected-release-automation" \
             --arg helper_source_mode "${HELPER_SOURCE_MODE}" --arg helper_source_tag "${HELPER_SOURCE_TAG}" \
             --arg helper_source_commit "${HELPER_SOURCE_COMMIT}" --arg helper_source_artifact_digest "${HELPER_SOURCE_ARTIFACT_DIGEST}" \
-            '{schema_version:2,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,merge_commit_sha:$merge_sha,head_sha:$head_sha,branch_head:$merge_sha,release_mode:$mode,preparation_commit_sha:$preparation_sha,covered_merge_sha:$covered_merge_sha,release_target:$release_target,policy:$policy,channel:$channel,version:$version,tag:("v"+$version),tag_target_sha:$merge_sha,tag_owner:$tag_owner,helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound",merge_commit_sha:$merge_sha},provenance:{signature:"github-native-verified",signature_verified:true,provenance_verified:true,tag_owner:$tag_owner,identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),run_id:$run_id,run_attempt:$run_attempt,run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
+            --arg policy_commit_sha "${POLICY_SHA}" --arg reuse_artifacts "${REUSE_ARTIFACTS}" \
+            --arg recovery_run_id "${RECOVERY_RUN_ID}" --arg recovery_artifact_digest "${RECOVERY_ARTIFACT_DIGEST}" \
+            --arg recovery_policy_sha "${RECOVERY_POLICY_SHA}" \
+            '{schema_version:2,pull_request:$pull_request,source_sha:$source_sha,merge_sha:$merge_sha,merge_commit_sha:$merge_sha,head_sha:$head_sha,branch_head:$merge_sha,release_mode:$mode,preparation_commit_sha:$preparation_sha,covered_merge_sha:$covered_merge_sha,release_target:$release_target,policy:$policy,policy_commit_sha:$policy_commit_sha,channel:$channel,version:$version,tag:("v"+$version),tag_target_sha:$merge_sha,tag_owner:$tag_owner,helper:{mode:$helper_source_mode,source_tag:$helper_source_tag,source_commit:$helper_source_commit,artifact_digest:$helper_source_artifact_digest},reservation:{id:$reservation_id,ref:$reservation_ref,owner:$owner,claim_key:$claim_key,boundary_token:$boundary_token,state:"bound",merge_commit_sha:$merge_sha},provenance:{signature:"github-native-verified",signature_verified:true,provenance_verified:true,tag_owner:$tag_owner,identity:"release_chain_and_reservation_refs"},artifact_names:(if $helper_source_mode == "reuse" then ["snapshot-helper-source","release-package-arm64","release-package-x86_64","release-assets"] else ["release-package-arm64","release-package-x86_64","release-assets"] end),recovery:{reuse_artifacts:($reuse_artifacts == "true"),source_run_id:$recovery_run_id,release_assets_artifact_digest:$recovery_artifact_digest,source_policy_sha:$recovery_policy_sha},run_id:$run_id,run_attempt:$run_attempt,run_url:$run_url,recovery_instruction:("workflow_dispatch operation=recover commit_sha="+$merge_sha+" helper_mode=bootstrap only when no-approved-helper-release")}' \
             > release-intent.json
 
       - name: Upload locked release intent
@@ -527,7 +596,7 @@ jobs:
   build-arm64:
     name: Build arm64 package
     needs: resolve
-    if: needs.resolve.outputs.enabled == 'true'
+    if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.reuse_artifacts != 'true'
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -620,7 +689,7 @@ jobs:
   build-x86_64:
     name: Build x86_64 package
     needs: resolve
-    if: needs.resolve.outputs.enabled == 'true'
+    if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.reuse_artifacts != 'true'
     runs-on: macos-15-intel
     # Intel package builds can use the full compile budget before artifact upload.
     timeout-minutes: 30
@@ -714,7 +783,7 @@ jobs:
   assemble:
     name: Assemble Universal 2 package
     needs: [resolve, build-arm64, build-x86_64]
-    if: needs.resolve.outputs.enabled == 'true'
+    if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.reuse_artifacts != 'true'
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -840,10 +909,54 @@ jobs:
           path: ${{ runner.temp }}/dmg-release-events.jsonl
           if-no-files-found: error
 
+  reuse_release_assets:
+    name: Reuse immutable release assets
+    needs: resolve
+    if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.reuse_artifacts == 'true'
+    runs-on: macos-15
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ needs.resolve.outputs.recovery_policy_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-assets
+          path: release-assets
+          run-id: ${{ needs.resolve.outputs.recovery_run_id }}
+          repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+      - name: Verify reused release assets
+        env:
+          MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
+          POLICY_SHA: ${{ needs.resolve.outputs.recovery_policy_sha }}
+        run: |
+          set -euo pipefail
+          git show "${MERGE_SHA}:VERSION" > VERSION
+          DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
+            bash scripts/macos/verify-release-assets.sh \
+              --mode release --asset-dir release-assets \
+              --expected-source-commit "${MERGE_SHA}" \
+              --expected-packaging-commit "${POLICY_SHA}"
+          python3 .github/scripts/verify-dmg-evidence.py \
+            --evidence "${RUNNER_TEMP}/dmg-release-events.jsonl" \
+            --asset-dir release-assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-assets
+          path: release-assets
+
   macos-acceptance:
     name: Require macOS RC acceptance for stable
-    needs: [resolve, assemble]
-    if: needs.resolve.outputs.enabled == 'true' && needs.resolve.outputs.channel == 'prod'
+    needs: [resolve, assemble, reuse_release_assets]
+    if: >-
+      always() && needs.resolve.outputs.enabled == 'true' &&
+      needs.resolve.outputs.channel == 'prod' &&
+      (needs.assemble.result == 'success' || needs.reuse_release_assets.result == 'success')
     runs-on: macos-15
     permissions:
       contents: write
@@ -1039,10 +1152,10 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [resolve, assemble, macos-acceptance]
+    needs: [resolve, assemble, reuse_release_assets, macos-acceptance]
     if: >-
       always() && needs.resolve.outputs.enabled == 'true' &&
-      needs.assemble.result == 'success' &&
+      (needs.assemble.result == 'success' || needs.reuse_release_assets.result == 'success') &&
       (needs.resolve.outputs.channel != 'prod' || needs.macos-acceptance.result == 'success')
     runs-on: ubuntu-latest
     permissions:
@@ -1231,7 +1344,7 @@ jobs:
               fi
               gh release create "${PRODUCT_TAG}" "${flags[@]}" >/dev/null
               runtime_state=draft
-              for attempt in 1 2 3; do
+              for _ in 1 2 3; do
                 draft_release="$(find_draft_release)"
                 if [[ -n "${draft_release}" ]]; then
                   release_output="${draft_release}"

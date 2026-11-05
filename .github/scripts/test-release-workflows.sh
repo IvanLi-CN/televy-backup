@@ -56,8 +56,10 @@ assert_contains "trusted main checkout" "$preparation_text" 'ref: ${{ steps.trus
 assert_contains "preparation base lock" "$preparation_text" "PR base"
 assert_contains "preparation reservation race check" "$preparation_text" "current-pr-before-reservation.json"
 assert_contains "preparation version race check" "$preparation_text" "current-pr-before-version.json"
-assert_not_contains "preparation manual gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
-assert_not_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation claim recovery" "$preparation_text" "release_reservation.py find-claim"
+assert_contains "preparation manual target gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
+assert_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation dispatch head binding" "$preparation_text" 'head_sha=${PREPARED_SHA}'
 assert_not_contains "preparation label input" "$preparation_text" "labels-json"
 assert_not_contains "preparation intent trailers" "$preparation_text" "Release-Intent"
 
@@ -75,6 +77,7 @@ assert_contains "target gate trusted policy checkout" "$target_gate_text" 'ref: 
 assert_contains "target gate verifier" "$target_gate_text" "release_target_gate.py"
 assert_contains "target gate non-preemptive concurrency" "$target_gate_text" "cancel-in-progress: false"
 assert_contains "target gate current main check" "$target_gate_text" "current_main_sha"
+assert_contains "target gate exact check publisher" "$target_gate_text" "publish-pr-check.py"
 
 completion_text="$(<"$root_dir/.github/workflows/release-completion.yml")"
 assert_contains "completion pull request trigger" "$completion_text" "pull_request_target:"
@@ -86,6 +89,7 @@ assert_contains "completion reservation policy" "$completion_text" "policy:\$pol
 assert_contains "completion native signature gate" "$completion_text" "--require-github-verification"
 assert_contains "completion current main check" "$completion_text" "validate_current_main"
 assert_contains "completion trusted dispatch ref" "$completion_text" 'test "${GITHUB_REF}" = "refs/heads/main"'
+assert_contains "completion exact check publisher" "$completion_text" "publish-pr-check.py"
 assert_not_contains "completion label authority" "$completion_text" ".labels"
 assert_not_contains "completion label gate workflow" "$completion_text" "label-gate.yml"
 assert_not_contains "completion intent trailers" "$completion_text" "Release-Intent"
@@ -99,6 +103,10 @@ assert_contains "release reservation verification" "$release_text" "verify_githu
 assert_contains "release sequence gate" "$release_text" "verify-release-sequence"
 assert_contains "release immutable product tag" "$release_text" "Create or verify immutable product tag"
 assert_contains "release identity receipt" "$release_text" "--state consumed"
+assert_contains "recovery artifact reuse job" "$release_text" "reuse_release_assets"
+assert_contains "recovery artifact source run" "$release_text" "run-id: \${{ needs.resolve.outputs.recovery_run_id }}"
+assert_contains "recovery fail-closed artifact" "$release_text" "same-identity recovery requires an unexpired prior release-assets artifact"
+assert_contains "recovery no rebuild" "$release_text" "reuse_artifacts != 'true'"
 assert_not_contains "release label authority" "$release_text" "labels_json"
 assert_not_contains "release label authority environment" "$release_text" "RELEASE_TYPE"
 assert_not_contains "release intent trailers" "$release_text" "Release-Intent"

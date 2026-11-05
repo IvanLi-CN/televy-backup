@@ -11,6 +11,7 @@ python3 -m py_compile \
   "$root_dir/.github/scripts/release_completion.py" \
   "$root_dir/.github/scripts/release_target_gate.py" \
   "$root_dir/.github/scripts/release_helper.py" \
+  "$root_dir/.github/scripts/publish-pr-check.py" \
   "$root_dir/.github/scripts/verify-macos-rc-acceptance.py"
 
 python3 "$root_dir/scripts/test-product-version.py"
@@ -79,7 +80,10 @@ assert contract["identity_refs"]["ruleset_excluded_identity_patterns"] == [
 assert contract["identity_refs"]["no_additional_ci_credentials"] is True
 assert contract["recovery"]["dispatch_requires_existing_bound"] is False
 assert contract["recovery"]["dispatch_bound_repair"] == "append-only-after-same-sha-provenance"
+assert contract["recovery"]["artifact_reuse"]["same_identity_requires_original_release_assets"] is True
+assert contract["recovery"]["artifact_reuse"]["rebuild_on_recovery"] is False
 reservation_text = (root / ".github/scripts/release_reservation.py").read_text(encoding="utf-8")
+assert "find_local_reservation_by_claim" in reservation_text
 assert "GIT_CONFIG_KEY_0" in reservation_text
 assert 'self._git("push", "origin", f"{sha}:{ref}")' in reservation_text
 assert "/git/tags" in reservation_text

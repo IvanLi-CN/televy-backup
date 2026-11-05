@@ -284,6 +284,55 @@ def create_local_reservation(expected: dict[str, Any], cwd: Path = ROOT) -> dict
     return verify_reservation_commit(commit, expected, cwd)
 
 
+def find_local_reservation_by_claim(
+    *, claim_key: str, owner: str, release_target: str, policy: str = RELEASE_POLICY_ID, cwd: Path = ROOT
+) -> dict[str, Any] | None:
+    """Find and verify an immutable reservation before resolving a new target."""
+    if not claim_key.strip() or not owner.strip():
+        raise ReservationError("reservation owner and claim key are required")
+    validate_release_target(release_target, policy)
+    refs = _git("for-each-ref", "--format=%(refname)", "refs/tags/release-reservation", cwd=cwd).splitlines()
+    matches: list[dict[str, Any]] = []
+    for ref in refs:
+        if not ref.startswith("refs/tags/release-reservation/v"):
+            continue
+        target = local_ref_target(ref, cwd)
+        if not target:
+            continue
+        info = local_commit_info(target, cwd)
+        trailers = trailers_from_message(info["message"])
+        if trailers.get("Reservation-Claim-Key") != claim_key:
+            continue
+        if trailers.get("Reservation-Owner") != owner:
+            raise ReservationError("existing reservation owner does not match the claim")
+        if trailers.get("Release-Target") != release_target:
+            raise ReservationError("existing reservation target does not match the claim")
+        if trailers.get("Release-Policy") != policy:
+            raise ReservationError("existing reservation policy does not match the claim")
+        parents = info["parents"]
+        if len(parents) != 1:
+            raise ReservationError("existing reservation must have one source parent")
+        source_info = local_commit_info(parents[0], cwd)
+        expected = {
+            "ref": ref,
+            "sourceSha": parents[0],
+            "sourceTreeSha": source_info["tree"],
+            "version": trailers.get("Release-Version", ""),
+            "channel": trailers.get("Release-Channel", ""),
+            "releaseTarget": release_target,
+            "policy": policy,
+            "reservationId": trailers.get("Reservation-Id", ""),
+            "Reservation-Owner": owner,
+            "Reservation-Claim-Key": claim_key,
+            "Reservation-Boundary-Token": trailers.get("Reservation-Boundary-Token", ""),
+        }
+        verified = verify_reservation_commit(target, expected, cwd)
+        matches.append({**verified, "sourceTreeSha": source_info["tree"]})
+    if len(matches) > 1:
+        raise ReservationError("multiple reservations match the same claim")
+    return matches[0] if matches else None
+
+
 class GitHubRefClient:
     """Small GitHub Git Database client used only for append-only ref creation."""
 
@@ -1242,6 +1291,12 @@ def main(argv: list[str] | None = None) -> int:
     reserve.add_argument("--api-root", default="https://api.github.com")
     reserve.add_argument("--local-root", type=Path)
     reserve.add_argument("--output", type=Path)
+    find_claim = sub.add_parser("find-claim")
+    find_claim.add_argument("--claim-key", required=True)
+    find_claim.add_argument("--owner", required=True)
+    find_claim.add_argument("--release-target", required=True)
+    find_claim.add_argument("--release-policy", default=RELEASE_POLICY_ID)
+    find_claim.add_argument("--local-root", type=Path)
     receipt = sub.add_parser("receipt")
     for option in ("state", "version", "merge-sha", "reservation-id", "owner", "claim-key", "boundary-token", "reservation-ref"):
         receipt.add_argument(f"--{option}", required=True)
@@ -1275,6 +1330,16 @@ def main(argv: list[str] | None = None) -> int:
                 result = create_github_reservation(expected, repository=args.repository, token=args.token, api_root=args.api_root)
             else:
                 result = create_local_reservation(expected, args.local_root or ROOT)
+        elif args.command == "find-claim":
+            result = find_local_reservation_by_claim(
+                claim_key=args.claim_key,
+                owner=args.owner,
+                release_target=args.release_target,
+                policy=args.release_policy,
+                cwd=args.local_root or ROOT,
+            )
+            if result is None:
+                return 2
         elif args.command == "receipt":
             if args.state == "released" and not args.maintainer_confirmed:
                 raise ReservationError("released receipt requires explicit maintainer confirmation")
