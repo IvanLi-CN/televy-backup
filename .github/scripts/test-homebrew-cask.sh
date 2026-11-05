@@ -150,7 +150,7 @@ update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")
 [[ "$update_workflow_text" == *'gh pr create'* ]]
 [[ "$update_workflow_text" == *'gh workflow run ci-pr.yml'* ]]
 [[ "$update_workflow_text" == *'gh workflow run package-ci.yml'* ]]
-[[ "$update_workflow_text" == *'gh workflow run label-gate.yml'* ]]
+[[ "$update_workflow_text" == *'gh workflow run release-target-gate.yml'* ]]
 [[ "$update_workflow_text" == *'gh workflow run release-completion.yml'* ]]
 [[ "$update_workflow_text" == *'gh workflow run homebrew-cask.yml'* ]]
 [[ "$update_workflow_text" == *'gh pr merge'* ]]

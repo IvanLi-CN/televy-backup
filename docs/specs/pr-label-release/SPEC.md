@@ -1,7 +1,10 @@
 # PR + Label 发布能力
 
-> Canonical topic retained as the canonical source for current product behavior.
-> This historical topic is superseded by [`product-version-release-chain`](../product-version-release-chain/SPEC.md). Its frozen-intent and backfill design is retained only for historical context; the VERSION-only contract is authoritative.
+> Superseded historical specification. The active contract is [`manual-version-release-delivery`](../manual-version-release-delivery/SPEC.md); PR labels are not release authority, version input, channel input, or eligibility evidence. This file is retained only to explain the retired route.
+
+## Related ADRs
+
+- [Manual release target authority](../../adr/0017-manual-version-release-target.md)
 
 ## 背景 / 问题陈述
 

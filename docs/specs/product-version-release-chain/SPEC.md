@@ -1,5 +1,7 @@
 # TelevyBackup Product Version and Release Chain
 
+> Superseded historical specification. The active target-only contract is [`manual-version-release-delivery`](../manual-version-release-delivery/SPEC.md). Identity refs, reservation, packaging, and recovery mechanics remain useful only where the successor explicitly retains them.
+
 ## Related ADRs
 
 - [PR-local VERSION preparation](../../adr/0004-pr-local-version-preparation.md)

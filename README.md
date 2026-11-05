@@ -303,10 +303,8 @@ Homebrew verifies the DMG checksum and preserves quarantine. Since releases are 
 - `docs/plan/README.md` (retained legacy Plan and design-resource index)
 - `docs/quality-gates.md`
 
-## VERSION-only release flow
+## Manual version release flow
 
-The root `VERSION` file is the only product version source. It contains a stable `X.Y.Z` or RC `X.Y.Z-rc.N` value; Cargo package metadata is not a release fallback. The migration baseline is `0.9.2`, matching the existing `v0.9.2` identity.
+The root `VERSION` file is the only product version source. Release preparation requires one owner-provided `release_target`: `patch`, `minor`, `major`, or an explicit final/prerelease SemVer. Version Policy resolves that target against the highest eligible final product tag reachable from `main`, rejects occupied identities without selecting a successor, and records the target, policy, canonical version, channel, source SHA, and reservation in immutable trailers.
 
-Every PR targeting `main` must carry exactly one `type:*` label and one `channel:*` label. Patch plus stable prepares the next patch automatically. Major, minor, and every RC use a controlled exact VERSION dispatch. Docs and skip labels do not publish.
-
-After source checks pass, the trusted preparation workflow adds only `VERSION` to the PR branch through GitHub-native `createCommitOnBranch` with `expectedHeadOid`; GitHub commit verification is required. Normal merge release consumes the merge SHA and committed VERSION. Successful publication is reported directly to the owner by the release-owning agent, not written to the source PR. Manual recovery is limited to the same merge SHA and VERSION. See [`docs/specs/product-version-release-chain/SPEC.md`](docs/specs/product-version-release-chain/SPEC.md) and [`docs/quality-gates.md`](docs/quality-gates.md).
+After source checks pass, the trusted preparation workflow creates the append-only reservation before adding only `VERSION` to the PR branch through GitHub-native `createCommitOnBranch` with `expectedHeadOid`; GitHub commit verification is required. `Release target gate`, review, source checks, merge, and the explicit post-merge `Release Product` publication are separate boundaries. Manual recovery reuses the exact merge SHA, canonical version, channel, policy, reservation, and artifacts. PR labels remain historical metadata and are not release input. See [`docs/specs/manual-version-release-delivery/SPEC.md`](docs/specs/manual-version-release-delivery/SPEC.md) and [`docs/quality-gates.md`](docs/quality-gates.md).

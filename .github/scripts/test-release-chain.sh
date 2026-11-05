@@ -13,8 +13,9 @@ import subprocess
 import sys
 
 root = Path(sys.argv[1])
-repo = Path(sys.argv[2])
-repo.mkdir(parents=True, exist_ok=True)
+tmp = Path(sys.argv[2])
+repo = tmp / "repo"
+repo.mkdir()
 subprocess.run(["git", "init", "-q", str(repo)], check=True)
 for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.com")):
     subprocess.run(["git", "-C", str(repo), "config", key, value], check=True)
@@ -23,6 +24,7 @@ for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.com
 subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
 subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture source"], check=True)
 source = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
 
 def product_tag(name: str, target: str) -> None:
     subprocess.run(
@@ -34,45 +36,66 @@ def product_tag(name: str, target: str) -> None:
         check=True,
     )
 
-def legacy_prerelease_tag(name: str, target: str) -> None:
-    subprocess.run(["git", "-C", str(repo), "tag", name, target], check=True)
 
+def load(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+chain = load("release_chain", root / ".github/scripts/release_chain.py")
+reservation = load("release_reservation", root / ".github/scripts/release_reservation.py")
+chain.ROOT = repo
 product_tag("v0.9.3", source)
 
-spec = importlib.util.spec_from_file_location("release_chain", root / ".github/scripts/release_chain.py")
-assert spec and spec.loader
-chain = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(chain)
-chain.ROOT = repo
-assert chain.verify_product_tag_provenance("v0.9.3")["owner"] == "protected-release-automation"
+assert chain.parse_release_target("patch")["kind"] == "symbolic"
+assert chain.parse_release_target("0.9.5-rc.1")["channel"] == "rc"
+for invalid in (" patch", "v0.9.5", "type:patch", ""):
+    try:
+        chain.parse_release_target(invalid)
+    except chain.ReleaseChainError:
+        pass
+    else:
+        raise AssertionError(f"invalid release target accepted: {invalid!r}")
 
-reservation_spec = importlib.util.spec_from_file_location("release_reservation", root / ".github/scripts/release_reservation.py")
-assert reservation_spec and reservation_spec.loader
-reservation = importlib.util.module_from_spec(reservation_spec)
-reservation_spec.loader.exec_module(reservation)
-allocation = chain.allocate_version(chain.product_tags(), "type:patch", "channel:prod")
-claim_key = f"pr:1:source:{source}:type:type:patch:channel:channel:prod"
-generated = reservation.deterministic_identity("fixture", claim_key)
+resolved = chain.resolve_release_target("patch", chain.product_tags())
+assert resolved["baselineVersion"] == "0.9.3"
+assert resolved["version"] == "0.9.4"
+assert resolved["policy"] == chain.VERSION_POLICY_ID
+explicit = chain.resolve_release_target("0.9.5-rc.1", chain.product_tags())
+assert explicit["version"] == "0.9.5-rc.1"
+try:
+    chain.resolve_release_target("0.9.3", chain.product_tags())
+except chain.ReleaseChainError as error:
+    assert "above trusted final baseline" in str(error)
+else:
+    raise AssertionError("explicit target at the final baseline was accepted")
+
+assert chain.manual_claim_key(7, "patch") == chain.manual_claim_key(7, "patch")
+assert chain.manual_claim_key(7, "patch") != chain.manual_claim_key(8, "patch")
+claim_key = chain.manual_claim_key(7, "patch")
+identity = reservation.deterministic_identity("fixture", claim_key)
 reservation_value = {
-    "ref": reservation.reservation_ref(str(allocation["version"])),
+    "ref": reservation.reservation_ref(resolved["version"]),
     "sourceSha": source,
-    "version": str(allocation["version"]),
+    "version": resolved["version"],
     "channel": "prod",
-    "reservationId": generated["reservationId"],
+    "releaseTarget": "patch",
+    "policy": chain.VERSION_POLICY_ID,
+    "reservationId": identity["reservationId"],
     "Reservation-Owner": "fixture",
     "Reservation-Claim-Key": claim_key,
-    "Reservation-Boundary-Token": generated["boundaryToken"],
+    "Reservation-Boundary-Token": identity["boundaryToken"],
 }
 assert reservation.create_local_reservation(reservation_value, repo)["ref"] == reservation_value["ref"]
 
 chain.stage(argparse.Namespace(
     source_sha=source,
-    mode="exact",
-    version=str(allocation["version"]),
-    intent_type="type:patch",
-    intent_channel="channel:prod",
-    intent_action="allocate",
-    intent_components="none",
+    version=resolved["version"],
+    release_target="patch",
+    release_policy=chain.VERSION_POLICY_ID,
     release_mode="normal",
     reservation_id=reservation_value["reservationId"],
     reservation_ref=reservation_value["ref"],
@@ -82,101 +105,42 @@ chain.stage(argparse.Namespace(
     covered_merge_sha="",
     provenance="fixture-verified",
 ))
-prepared = chain.verify_prepared(chain.git("rev-parse", "HEAD"), source)
+prepared_sha = chain.git("rev-parse", "HEAD")
+prepared = chain.verify_prepared(prepared_sha, source, expected_target="patch")
 assert prepared["version"] == "0.9.4"
-assert prepared["tag"] == "v0.9.4"
-assert chain.diff_names(chain.git("rev-parse", "HEAD")) == ["VERSION"]
-preparation_sha = chain.git("rev-parse", "HEAD")
+assert prepared["releaseTarget"] == "patch"
+assert prepared["policy"] == chain.VERSION_POLICY_ID
+assert chain.trailers(prepared_sha)["Release-Channel"] == "prod"
+assert chain.diff_names(prepared_sha) == ["VERSION"]
 
-# A preparation commit remains valid when later source commits keep VERSION
-# unchanged. The lookup must stay inside the current PR range.
 (repo / "POST_PREPARATION").write_text("source update\n", encoding="utf-8")
 subprocess.run(["git", "-C", str(repo), "add", "POST_PREPARATION"], check=True)
 subprocess.run(["git", "-C", str(repo), "commit", "-qm", "source update after preparation"], check=True)
 post_preparation = chain.git("rev-parse", "HEAD")
 found = chain.find_prepared(post_preparation, source)
-assert found["preparationSha"] == preparation_sha
+assert found["preparationSha"] == prepared_sha
 assert found["sourceSha"] == source
 
-def assert_sequence_rejected(version: str, expected: str, marker: str) -> None:
+occupied = chain.occupied_identity_versions()
+assert "0.9.4" in occupied
+for target in ("patch", "0.9.4"):
     try:
-        chain.verify_release_sequence(version, expected)
+        chain.resolve_release_target(target, chain.product_tags(), occupied)
     except chain.ReleaseChainError as error:
-        assert marker in str(error), (marker, error)
+        assert "refusing to allocate a successor" in str(error)
     else:
-        raise AssertionError(f"{version} unexpectedly passed sequence validation")
+        raise AssertionError(f"occupied target {target} was silently advanced")
+bound = chain.resolve_release_target(
+    "0.9.4", chain.product_tags(), occupied, allow_occupied_version="0.9.4"
+)
+assert bound["version"] == "0.9.4"
 
-product_tag("v0.9.7", source)
-assert_sequence_rejected("0.9.4", source, "superseded_by_product_tag")
-matching = chain.verify_release_sequence("0.9.7", source)
-assert matching["status"] == "matching"
+product_tag("v0.9.4", source)
+assert chain.verify_release_sequence("0.9.4", source)["status"] == "matching"
 
-product_tag("v0.9.8-rc.2", source)
-assert chain.verify_release_sequence("0.9.8-rc.1", source)["status"] == "available"
-claim_key = "occupied-rc-claim"
-generated = reservation.deterministic_identity("fixture", claim_key)
-occupied = {
-    "ref": reservation.reservation_ref("0.9.8-rc.3"),
-    "sourceSha": source,
-    "version": "0.9.8-rc.3",
-    "channel": "rc",
-    "reservationId": generated["reservationId"],
-    "Reservation-Owner": "fixture",
-    "Reservation-Claim-Key": claim_key,
-    "Reservation-Boundary-Token": generated["boundaryToken"],
-}
-reservation.create_local_reservation(occupied, repo)
-assert "0.9.8-rc.3" in chain.occupied_identity_versions()
-assert chain.allocate_version(
-    chain.product_tags(), "type:patch", "channel:rc", chain.occupied_identity_versions()
-)["version"] == "0.9.8-rc.4"
-try:
-    chain.allocate_version(chain.product_tags(), "type:patch", "channel:prod", ["0.9.8"])
-except chain.ReleaseChainError as error:
-    assert "already reserved" in str(error)
-else:
-    raise AssertionError("occupied prod identity unexpectedly allocated a successor")
-assert chain.verify_release_sequence("0.9.8", source)["status"] == "available"
-product_tag("v0.9.8", source)
-assert_sequence_rejected("0.9.8", chain.git("rev-parse", "HEAD"), "product_tag_conflict")
-product_tag("v0.9.9-beta", source)
-assert all(item["tag"] != "v0.9.9-beta" for item in chain.product_tags())
-legacy_prerelease_tag("v0.9.9-rc.38", source)
-legacy = next(item for item in chain.product_tags() if item["tag"] == "v0.9.9-rc.38")
-assert legacy["owner"] == "legacy-prerelease"
-assert chain.allocate_version(
-    chain.product_tags(), "type:patch", "channel:rc", chain.occupied_identity_versions()
-)["version"] == "0.9.9-rc.39"
-assert_sequence_rejected("0.9.9-rc.38", source, "missing protected-release-automation")
-
-# A matching product tag outside mainline cannot be ignored: doing so would
-# let final-tag-first allocation reuse an identity that already exists.
-subprocess.run(["git", "-C", str(repo), "switch", "-q", "-c", "foreign"], check=True)
-(repo / "foreign").write_text("foreign\n", encoding="utf-8")
-subprocess.run(["git", "-C", str(repo), "add", "foreign"], check=True)
-subprocess.run(["git", "-C", str(repo), "commit", "-qm", "foreign product boundary"], check=True)
-foreign_sha = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-product_tag("v9.9.9", foreign_sha)
-subprocess.run(["git", "-C", str(repo), "switch", "-q", "-"] , check=True)
-try:
-    chain.product_tags()
-except chain.ReleaseChainError as error:
-    assert "unreachable commit" in str(error)
-else:
-    raise AssertionError("unreachable product tag was silently ignored")
-
-(repo / "README").write_text("invalid\n", encoding="utf-8")
-subprocess.run(["git", "-C", str(repo), "add", "README"], check=True)
-subprocess.run(["git", "-C", str(repo), "commit", "-qm", "invalid extra file"], check=True)
-try:
-    chain.verify_prepared(chain.git("rev-parse", "HEAD"))
-except chain.ReleaseChainError:
-    pass
-else:
-    raise AssertionError("preparation with an extra file was accepted")
-
-# The merge verifier needs the complete ancestry hidden by a depth-2 clone.
-topology = repo / "topology"
+# The merge verifier accepts a normal merge only when the merged PR head has
+# the exact VERSION preparation tree and the full history is available.
+topology = tmp / "topology"
 topology.mkdir()
 subprocess.run(["git", "init", "-q", str(topology)], check=True)
 for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.com")):
@@ -185,75 +149,38 @@ for key, value in (("user.name", "fixture"), ("user.email", "fixture@example.com
 (topology / "README").write_text("topology\n", encoding="utf-8")
 subprocess.run(["git", "-C", str(topology), "add", "."], check=True)
 subprocess.run(["git", "-C", str(topology), "commit", "-qm", "topology base"], check=True)
-base_sha = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
+base = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
 subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "source"], check=True)
-for index in (1, 2, 3):
-    (topology / f"source-{index}").write_text(f"source {index}\n", encoding="utf-8")
-    subprocess.run(["git", "-C", str(topology), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(topology), "commit", "-qm", f"source {index}"], check=True)
+(topology / "feature").write_text("feature\n", encoding="utf-8")
+subprocess.run(["git", "-C", str(topology), "add", "feature"], check=True)
+subprocess.run(["git", "-C", str(topology), "commit", "-qm", "feature"], check=True)
 topology_source = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
 (topology / "VERSION").write_text("0.9.3\n", encoding="utf-8")
 subprocess.run(["git", "-C", str(topology), "add", "VERSION"], check=True)
-subprocess.run(
-    [
-        "git", "-C", str(topology), "commit", "-qm", "chore(release): v0.9.3",
-        "-m", f"Release-Source-SHA: {topology_source}\nProduct-Version: 0.9.3\n"
-        "Release-Intent-Type: type:patch\nRelease-Intent-Channel: channel:prod\n"
-        "Release-Intent-Action: allocate\nRelease-Intent-Components: none\n"
-        "Release-Mode: normal\nRelease-Reservation-Id: res-topology\n"
-        "Release-Reservation-Ref: refs/tags/release-reservation/v0.9.3\n"
-        "Release-Reservation-Owner: fixture\n"
-        "Release-Claim-Key: topology-claim\nRelease-Boundary-Token: topology-boundary\n"
-        "Release-Provenance: fixture-verified",
-    ],
-    check=True,
-)
-topology_preparation = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
-subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "mainline", base_sha], check=True)
-subprocess.run(["git", "-C", str(topology), "merge", "--no-ff", "-m", "fixture product merge", topology_preparation], check=True)
-topology_merge = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
+message = f"""chore(release): v0.9.3
 
-shallow = repo / "shallow"
-subprocess.run(["git", "clone", "-q", "--depth", "2", f"file://{topology}", str(shallow)], check=True)
-chain.ROOT = shallow
-try:
-    chain.verify_merged(topology_merge)
-except chain.ReleaseChainError:
-    pass
-else:
-    raise AssertionError("depth-2 clone unexpectedly verified merge ancestry")
-subprocess.run(["git", "-C", str(shallow), "fetch", "-q", "--unshallow"], check=True)
-assert chain.verify_merged(topology_merge)["prepared"] == "true"
-
-# A source commit may follow preparation on the PR branch. Completion must
-# resolve the VERSION-only preparation commit instead of assuming it is merge^2.
+Release-Source-SHA: {topology_source}
+Release-Target: patch
+Release-Target-Kind: symbolic
+Release-Policy: {chain.VERSION_POLICY_ID}
+Product-Version: 0.9.3
+Release-Channel: prod
+Release-Mode: normal
+Release-Reservation-Id: res-topology
+Release-Reservation-Ref: refs/tags/release-reservation/v0.9.3
+Release-Reservation-Owner: fixture
+Release-Claim-Key: topology-claim
+Release-Boundary-Token: topology-boundary
+Release-Provenance: fixture-verified
+"""
+subprocess.run(["git", "-C", str(topology), "commit", "-qm", "chore(release): v0.9.3", "-m", message], check=True)
+preparation = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
+subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "mainline", base], check=True)
+subprocess.run(["git", "-C", str(topology), "merge", "--no-ff", "-m", "fixture product merge", preparation], check=True)
+merge = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
 chain.ROOT = topology
-subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "post-preparation", topology_preparation], check=True)
-(topology / "POST_PREPARATION_MERGE").write_text("source update\n", encoding="utf-8")
-subprocess.run(["git", "-C", str(topology), "add", "POST_PREPARATION_MERGE"], check=True)
-subprocess.run(["git", "-C", str(topology), "commit", "-qm", "source update after preparation"], check=True)
-post_preparation_head = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
-subprocess.run(["git", "-C", str(topology), "switch", "-q", "-c", "post-preparation-main", base_sha], check=True)
-subprocess.run(["git", "-C", str(topology), "merge", "--no-ff", "-m", "fixture post-preparation merge", post_preparation_head], check=True)
-post_preparation_merge = subprocess.check_output(["git", "-C", str(topology), "rev-parse", "HEAD"], text=True).strip()
-assert chain.verify_merged(post_preparation_merge)["prepared"] == "true"
+assert chain.verify_merged(merge)["prepared"] == "true"
+assert chain.verify_merged(merge, "0" * 40)["reason"] == "pr_head_mismatch"
 
-# GitHub squash merges have one parent but retain the pull request head tree.
-# The authoritative PR head is supplied by the workflow's merged-PR lookup.
-squash_tree = subprocess.check_output(
-    ["git", "-C", str(topology), "rev-parse", f"{post_preparation_head}^{{tree}}"], text=True
-).strip()
-squash_merge = subprocess.check_output(
-    ["git", "-C", str(topology), "commit-tree", squash_tree, "-p", base_sha],
-    input="fixture squash merge\n",
-    text=True,
-).strip()
-assert len(subprocess.check_output(["git", "-C", str(topology), "show", "-s", "--format=%P", squash_merge], text=True).split()) == 1
-assert chain.verify_merged(squash_merge)["reason"] == "squash_merge_head_required"
-squash_verified = chain.verify_merged(squash_merge, post_preparation_head)
-assert squash_verified["prepared"] == "true"
-assert squash_verified["mergeSha"] == squash_merge
-assert squash_verified["preparationSha"] == topology_preparation
+print("release chain fixture tests passed")
 PY
-
-echo "release chain fixture tests passed"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate and allocate the TelevyBackup release identity chain."""
+"""Validate the TelevyBackup manual version release identity chain."""
 
 from __future__ import annotations
 
@@ -21,10 +21,8 @@ if SPEC is None or SPEC.loader is None:
 PRODUCT_VERSION = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(PRODUCT_VERSION)
 
-VALID_TYPES = {"type:patch", "type:minor", "type:major", "type:docs", "type:skip"}
-PRODUCT_TYPES = VALID_TYPES - {"type:docs", "type:skip"}
-VALID_CHANNELS = {"channel:prod", "channel:beta", "channel:rc", "channel:dev"}
-LEGACY_LABELS = {"channel:stable", "channel:canary", "type:none"}
+VERSION_POLICY_ID = "televybackup-manual-semver-v1"
+SYMBOLIC_RELEASE_TARGETS = {"patch", "minor", "major"}
 PRODUCT_TAG_RE = re.compile(
     r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
 )
@@ -68,56 +66,39 @@ def tree_path_exists(commit: str, path: str) -> bool:
     return result.returncode == 0
 
 
-def normalize_label(value: str, prefix: str) -> str:
-    return value if value.startswith(prefix) else f"{prefix}{value}"
-
-
-def release_action(type_label: str, channel: str | None = None) -> str:
-    if type_label not in VALID_TYPES:
-        raise ReleaseChainError(f"unsupported release intent type: {type_label}")
-    if type_label in {"type:docs", "type:skip"}:
-        if channel:
-            raise ReleaseChainError("docs/skip release intents must not have a channel")
-        return "skip"
-    if not channel:
-        raise ReleaseChainError("product release intent requires a channel")
-    normalized = normalize_label(channel, "channel:")
-    if normalized not in VALID_CHANNELS:
-        raise ReleaseChainError(f"unsupported release intent channel: {channel}")
-    return "allocate"
-
-
-def intent_from_labels(labels: object) -> dict[str, str]:
-    if not isinstance(labels, list):
-        raise ReleaseChainError("PR labels must be an array")
-    names = sorted({row.get("name", "") for row in labels if isinstance(row, dict)})
-    types = [name for name in names if name.startswith("type:")]
-    channels = [name for name in names if name.startswith("channel:")]
-    unknown_types = sorted(set(types) - VALID_TYPES)
-    unknown_channels = sorted(set(channels) - VALID_CHANNELS)
-    legacy = sorted(set(types + channels) & LEGACY_LABELS)
-    if unknown_types or unknown_channels or legacy:
+def parse_release_target(value: str) -> dict[str, str]:
+    """Parse the one owner-supplied release target without resolving it."""
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ReleaseChainError("release_target must be one non-empty, trimmed value")
+    if value in SYMBOLIC_RELEASE_TARGETS:
+        return {
+            "raw": value,
+            "kind": "symbolic",
+            "operation": value,
+            "channel": "prod",
+        }
+    try:
+        parsed = PRODUCT_VERSION.parse_version(value)
+    except PRODUCT_VERSION.VersionError as error:
         raise ReleaseChainError(
-            f"unknown or legacy release labels: {unknown_types + unknown_channels + legacy}"
-        )
-    if len(types) != 1:
-        raise ReleaseChainError("PR must have exactly one type:* label")
-    type_label = types[0]
-    if type_label in {"type:docs", "type:skip"}:
-        if channels:
-            raise ReleaseChainError("docs/skip release intents must not have a channel")
-        channel = ""
-    else:
-        if len(channels) != 1:
-            raise ReleaseChainError("product PR must have exactly one channel:* label")
-        channel = channels[0]
-    components = sorted(name for name in names if name.startswith("component:"))
+            "release_target must be patch, minor, major, or a canonical product SemVer"
+        ) from error
     return {
-        "type": type_label,
-        "channel": channel,
-        "components": ",".join(components) if components else "none",
-        "action": release_action(type_label, channel or None),
+        "raw": value,
+        "kind": "explicit",
+        "operation": "exact",
+        "version": value,
+        "channel": str(parsed["channel"]),
     }
+
+
+def manual_claim_key(pr_number: str | int, release_target: str) -> str:
+    """Return the stable claim key shared by descendant-source retries."""
+    number = str(pr_number)
+    if not re.fullmatch(r"[1-9][0-9]*", number):
+        raise ReleaseChainError(f"invalid pull request number: {pr_number!r}")
+    target = parse_release_target(release_target)["raw"]
+    return f"pr:{number}:target:{target}"
 
 
 def commit_parent(commit: str) -> str:
@@ -150,23 +131,37 @@ def commit_version(commit: str) -> str:
         raise ReleaseChainError(str(error)) from error
 
 
-def prepared_intent(commit: str) -> dict[str, str]:
+def prepared_target(commit: str) -> dict[str, str]:
     values = trailers(commit)
-    type_label = values.get("Release-Intent-Type", "")
-    channel = values.get("Release-Intent-Channel", "")
-    action = values.get("Release-Intent-Action", "")
-    components = values.get("Release-Intent-Components", "none")
-    normalized_channel = normalize_label(channel, "channel:") if channel else ""
-    expected_action = release_action(type_label, normalized_channel or None)
-    if type_label not in PRODUCT_TYPES or normalized_channel not in VALID_CHANNELS:
-        raise ReleaseChainError("preparation commit is missing a valid product release intent")
-    if action != expected_action:
-        raise ReleaseChainError("preparation commit has an invalid Release-Intent-Action")
+    raw = values.get("Release-Target", "")
+    policy = values.get("Release-Policy", "")
+    if policy != VERSION_POLICY_ID:
+        raise ReleaseChainError("preparation commit has an unsupported Release-Policy")
+    target = parse_release_target(raw)
+    recorded_kind = values.get("Release-Target-Kind", "")
+    if recorded_kind and recorded_kind != target["kind"]:
+        raise ReleaseChainError("Release-Target-Kind does not match Release-Target")
+    version = values.get("Product-Version", "")
+    if not version:
+        raise ReleaseChainError("preparation commit is missing Product-Version")
+    try:
+        parsed = PRODUCT_VERSION.parse_version(version)
+    except PRODUCT_VERSION.VersionError as error:
+        raise ReleaseChainError("preparation commit has an invalid Product-Version") from error
+    if target["kind"] == "explicit" and target.get("version") != version:
+        raise ReleaseChainError("explicit Release-Target does not match Product-Version")
+    if target["kind"] == "symbolic" and parsed["kind"] is not None:
+        raise ReleaseChainError("symbolic Release-Target must resolve to a final product version")
+    channel = str(parsed["channel"])
+    if channel != target["channel"]:
+        raise ReleaseChainError("Product-Version channel does not match Release-Target")
     return {
-        "type": type_label,
-        "channel": normalized_channel,
-        "action": action,
-        "components": components,
+        "releaseTarget": target["raw"],
+        "targetKind": target["kind"],
+        "targetOperation": target["operation"],
+        "policy": policy,
+        "channel": channel,
+        "action": "prepare",
     }
 
 
@@ -176,6 +171,10 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
         raise ReleaseChainError("Release-Source-SHA must match the preparation parent")
     if values.get("Product-Version") != version:
         raise ReleaseChainError("Product-Version must match VERSION")
+    if not values.get("Release-Target"):
+        raise ReleaseChainError("preparation provenance is missing release target")
+    if values.get("Release-Policy") != VERSION_POLICY_ID:
+        raise ReleaseChainError("preparation provenance has an unsupported release policy")
     mode = values.get("Release-Mode", "normal")
     if mode not in {"normal", "version-only-release-pr"}:
         raise ReleaseChainError(f"unsupported release mode: {mode}")
@@ -198,6 +197,8 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
     if mode == "version-only-release-pr" and not values.get("Release-Covered-Merge-SHA"):
         raise ReleaseChainError("version-only-release-pr must record one covered merge SHA")
     return {
+        "releaseTarget": values["Release-Target"],
+        "policy": values["Release-Policy"],
         "mode": mode,
         "reservationId": values["Release-Reservation-Id"],
         "reservationRef": values["Release-Reservation-Ref"],
@@ -211,7 +212,10 @@ def verify_provenance(commit: str, version: str, parent: str) -> dict[str, str]:
 
 
 def verify_prepared(
-    commit: str, source_sha: str | None = None, expected_version: str | None = None
+    commit: str,
+    source_sha: str | None = None,
+    expected_version: str | None = None,
+    expected_target: str | None = None,
 ) -> dict[str, str]:
     release_sha = git("rev-parse", f"{commit}^{{commit}}")
     parent = commit_parent(release_sha)
@@ -222,18 +226,17 @@ def verify_prepared(
     version = commit_version(release_sha)
     if expected_version and version != expected_version:
         raise ReleaseChainError(f"preparation VERSION is {version}, expected {expected_version}")
-    intent = prepared_intent(release_sha)
+    target = prepared_target(release_sha)
+    if expected_target and target["releaseTarget"] != parse_release_target(expected_target)["raw"]:
+        raise ReleaseChainError("preparation Release-Target does not match the requested target")
     provenance = verify_provenance(release_sha, version, parent)
-    parsed = PRODUCT_VERSION.parse_version(version)
-    if parsed["channel"] != intent["channel"].removeprefix("channel:"):
-        raise ReleaseChainError("VERSION prerelease channel does not match release intent")
     values = {
         "releaseSha": release_sha,
         "sourceSha": parent,
         "version": version,
         "tag": f"v{version}",
     }
-    values.update(intent)
+    values.update(target)
     values.update(provenance)
     return values
 
@@ -421,46 +424,50 @@ def final_tag_baseline(tags: list[dict[str, str]]) -> str:
     return max(finals, key=functools.cmp_to_key(compare_versions), default="0.0.0")
 
 
-def allocate_version(
-    tags: list[dict[str, str]], type_label: str, channel_label: str, occupied_versions: list[str] | None = None,
+def resolve_release_target(
+    release_target: str,
+    tags: list[dict[str, str]] | None = None,
+    occupied_versions: list[str] | None = None,
     allow_occupied_version: str | None = None,
-) -> dict[str, str | int]:
-    type_name = type_label.removeprefix("type:")
-    channel = channel_label.removeprefix("channel:")
-    release_action(type_label, channel_label)
-    baseline = final_tag_baseline(tags)
-    base = PRODUCT_VERSION.next_base(baseline, type_name)
-    if channel == "prod":
-        version = base
-        ordinal: int | None = None
-        occupied = set(occupied_versions or []) | {row["version"] for row in tags}
-        if allow_occupied_version:
-            occupied.discard(allow_occupied_version)
-        if version in occupied:
-            raise ReleaseChainError(
-                f"final release identity v{version} is already reserved or tagged; refusing to allocate a successor"
-            )
+) -> dict[str, str]:
+    """Resolve and validate one manual target against the trusted final baseline.
+
+    ``allow_occupied_version`` exists only for verification of an already-bound
+    identity. New preparation calls must leave it unset, so a collision can
+    never be converted into an implicit successor.
+    """
+    target = parse_release_target(release_target)
+    trusted_tags = tags if tags is not None else product_tags()
+    baseline = final_tag_baseline(trusted_tags)
+    if target["kind"] == "symbolic":
+        version = PRODUCT_VERSION.next_base(baseline, target["operation"])
     else:
-        occupied = list(occupied_versions or []) + [row["version"] for row in tags]
-        if allow_occupied_version:
-            occupied = [value for value in occupied if value != allow_occupied_version]
-        ordinals = []
-        for value in occupied:
-            try:
-                parsed = PRODUCT_VERSION.parse_version(value)
-            except PRODUCT_VERSION.VersionError:
-                continue
-            if parsed["kind"] == channel and ".".join(str(parsed[key]) for key in ("major", "minor", "patch")) == base:
-                ordinals.append(int(parsed["ordinal"]))
-        ordinal = max(ordinals, default=0) + 1
-        version = PRODUCT_VERSION.format_release_version(base, channel, ordinal)
+        version = target["version"]
+        if compare_versions(version, baseline) <= 0:
+            raise ReleaseChainError(
+                f"release target v{version} is not above trusted final baseline v{baseline}"
+            )
+    parsed = PRODUCT_VERSION.parse_version(version)
+    channel = str(parsed["channel"])
+    if channel != target["channel"]:
+        raise ReleaseChainError("release target channel does not match the canonical version")
+    occupied = set(occupied_versions or []) | {row["version"] for row in trusted_tags}
+    if allow_occupied_version:
+        occupied.discard(allow_occupied_version)
+    if version in occupied:
+        raise ReleaseChainError(
+            f"release identity v{version} is already reserved or published; refusing to allocate a successor"
+        )
     return {
-        "version": version,
-        "baseVersion": base,
+        "releaseTarget": target["raw"],
+        "targetKind": target["kind"],
+        "targetOperation": target["operation"],
+        "policy": VERSION_POLICY_ID,
         "baselineVersion": baseline,
+        "baseVersion": version if target["kind"] == "explicit" else version,
+        "version": version,
         "channel": channel,
-        "type": type_name,
-        "ordinal": ordinal or 0,
+        "tag": f"v{version}",
     }
 
 
@@ -497,34 +504,23 @@ def verify_release_sequence(version: str, expected_sha: str) -> dict[str, str]:
     }
 
 
-def _stage_version(args: argparse.Namespace) -> str:
-    if getattr(args, "version", None):
-        version = args.version
-        allocation = allocate_version(
-            product_tags(), args.intent_type, args.intent_channel, occupied_identity_versions(),
-            allow_occupied_version=version,
-        )
-        if version != allocation["version"]:
-            raise ReleaseChainError(
-                f"requested version {version} does not match final-tag-first allocation {allocation['version']}"
-            )
-        return version
-    if args.mode in {"automatic", "allocate"}:
-        return str(
-            allocate_version(
-                product_tags(), args.intent_type, args.intent_channel, occupied_identity_versions()
-            )["version"]
-        )
-    raise ReleaseChainError("allocation mode requires a final-tag-first version")
-
-
 def stage(args: argparse.Namespace) -> None:
     source_sha = git("rev-parse", "HEAD")
     if source_sha != args.source_sha:
         raise ReleaseChainError(f"checked out source is {source_sha}, expected {args.source_sha}")
     if git("status", "--porcelain"):
         raise ReleaseChainError("source checkout must be clean before preparation")
-    version = _stage_version(args)
+    target = parse_release_target(args.release_target)
+    version = str(args.version)
+    parsed = PRODUCT_VERSION.parse_version(version)
+    if target["kind"] == "explicit" and target["version"] != version:
+        raise ReleaseChainError("explicit release target does not match staged version")
+    if target["kind"] == "symbolic" and parsed["kind"] is not None:
+        raise ReleaseChainError("symbolic release target must stage a final version")
+    if str(parsed["channel"]) != target["channel"]:
+        raise ReleaseChainError("staged version channel does not match release target")
+    if args.release_policy != VERSION_POLICY_ID:
+        raise ReleaseChainError("unsupported release policy")
     verify_tag(version)
     (ROOT / "VERSION").write_text(version + "\n", encoding="utf-8")
     if git("diff", "--name-only") != "VERSION":
@@ -533,11 +529,11 @@ def stage(args: argparse.Namespace) -> None:
     reservation_source_sha = getattr(args, "reservation_source_sha", source_sha)
     metadata = [
         f"Release-Source-SHA: {source_sha}",
+        f"Release-Target: {target['raw']}",
+        f"Release-Target-Kind: {target['kind']}",
+        f"Release-Policy: {args.release_policy}",
         f"Product-Version: {version}",
-        f"Release-Intent-Type: {args.intent_type}",
-        f"Release-Intent-Channel: {args.intent_channel}",
-        f"Release-Intent-Action: {args.intent_action}",
-        f"Release-Intent-Components: {args.intent_components or 'none'}",
+        f"Release-Channel: {parsed['channel']}",
         f"Release-Mode: {getattr(args, 'release_mode', 'normal')}",
         f"Release-Reservation-Id: {args.reservation_id}",
         f"Release-Reservation-Ref: {args.reservation_ref}",
@@ -568,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
     prepared.add_argument("--commit", default="HEAD")
     prepared.add_argument("--source-sha")
     prepared.add_argument("--version")
+    prepared.add_argument("--target")
     found = sub.add_parser("find-prepared")
     found.add_argument("--commit", default="HEAD")
     found.add_argument("--base")
@@ -583,17 +580,13 @@ def main(argv: list[str] | None = None) -> int:
     sequence.add_argument("--expected-sha", required=True)
     provenance = sub.add_parser("verify-tag-provenance")
     provenance.add_argument("--tag", required=True)
-    allocation = sub.add_parser("allocate-version")
-    allocation.add_argument("--type", dest="intent_type", required=True)
-    allocation.add_argument("--channel", dest="intent_channel", required=True)
+    target = sub.add_parser("resolve-target")
+    target.add_argument("--release-target", required=True)
     stage_parser = sub.add_parser("stage")
     stage_parser.add_argument("--source-sha", required=True)
-    stage_parser.add_argument("--mode", choices=("automatic", "allocate", "exact"), required=True)
-    stage_parser.add_argument("--version")
-    stage_parser.add_argument("--intent-type", required=True)
-    stage_parser.add_argument("--intent-channel", required=True)
-    stage_parser.add_argument("--intent-action", required=True)
-    stage_parser.add_argument("--intent-components", default="none")
+    stage_parser.add_argument("--release-target", required=True)
+    stage_parser.add_argument("--release-policy", default=VERSION_POLICY_ID)
+    stage_parser.add_argument("--version", required=True)
     stage_parser.add_argument("--release-mode", default="normal")
     stage_parser.add_argument("--reservation-id", required=True)
     stage_parser.add_argument("--reservation-ref", required=True)
@@ -604,7 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         if args.command == "verify-prepared":
-            print(json.dumps(verify_prepared(args.commit, args.source_sha, args.version), sort_keys=True))
+            print(json.dumps(verify_prepared(args.commit, args.source_sha, args.version, args.target), sort_keys=True))
         elif args.command == "find-prepared":
             print(json.dumps(find_prepared(args.commit, args.base), sort_keys=True))
         elif args.command == "verify-merged":
@@ -615,15 +608,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(verify_release_sequence(args.version, args.expected_sha), sort_keys=True))
         elif args.command == "verify-tag-provenance":
             print(json.dumps(verify_product_tag_provenance(args.tag), sort_keys=True))
-        elif args.command == "allocate-version":
-            print(
-                json.dumps(
-                    allocate_version(
-                        product_tags(), args.intent_type, args.intent_channel, occupied_identity_versions()
-                    ),
-                    sort_keys=True,
-                )
-            )
+        elif args.command == "resolve-target":
+            print(json.dumps(resolve_release_target(args.release_target), sort_keys=True))
         else:
             stage(args)
         return 0

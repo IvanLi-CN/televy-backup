@@ -3,13 +3,13 @@ set -euo pipefail
 
 root_dir="$(git rev-parse --show-toplevel)"
 
-bash -n "$root_dir/.github/scripts/label-gate.sh"
 bash -n "$root_dir/.github/scripts/merge-group-release-gate.sh"
 python3 -m py_compile \
   "$root_dir/.github/scripts/release_chain.py" \
   "$root_dir/.github/scripts/release_reservation.py" \
   "$root_dir/.github/scripts/release_preparation.py" \
   "$root_dir/.github/scripts/release_completion.py" \
+  "$root_dir/.github/scripts/release_target_gate.py" \
   "$root_dir/.github/scripts/release_helper.py" \
   "$root_dir/.github/scripts/verify-macos-rc-acceptance.py"
 
@@ -18,18 +18,26 @@ bash "$root_dir/.github/scripts/test-release-helper.sh"
 bash "$root_dir/.github/scripts/test-release-failure-context.sh"
 bash "$root_dir/.github/scripts/test-release-github-api.sh"
 
-out="$(LABELS_JSON='[{"name":"type:patch"},{"name":"channel:prod"}]' \
-  "$root_dir/.github/scripts/label-gate.sh")"
-[[ "$out" == *"Intent label OK: type:patch"* ]]
-[[ "$out" == *"release_channel=prod"* ]]
-if LABELS_JSON='[{"name":"type:patch"}]' "$root_dir/.github/scripts/label-gate.sh" >/dev/null 2>&1; then
-  echo "label gate accepted a missing channel" >&2
-  exit 1
-fi
-if LABELS_JSON='[{"name":"type:patch"},{"name":"channel:prod"},{"name":"channel:rc"}]' "$root_dir/.github/scripts/label-gate.sh" >/dev/null 2>&1; then
-  echo "label gate accepted duplicate channels" >&2
-  exit 1
-fi
+python3 - "$root_dir" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("release_chain", root / ".github/scripts/release_chain.py")
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.parse_release_target("patch")["kind"] == "symbolic"
+assert module.parse_release_target("1.0.0-rc.1")["channel"] == "rc"
+for invalid in (" v1.0.0", "v1.0.0", "type:patch"):
+    try:
+        module.parse_release_target(invalid)
+    except module.ReleaseChainError:
+        pass
+    else:
+        raise AssertionError(invalid)
+PY
 
 python3 - "$root_dir" <<'PY'
 from pathlib import Path
@@ -80,7 +88,7 @@ assert "IDENTITY_METADATA_TREE_SHA" in reservation_text
 assert "IDENTITY_METADATA_CONTENT" in reservation_text
 assert "/git/trees" in reservation_text
 assert "existing remote ref does not match the requested identity" in reservation_text
-for gate in ("label_gate", "completion"):
+for gate in ("target_gate", "completion"):
     scheduling = contract["required_gate_scheduling"][gate]
     assert scheduling["cancel_in_progress"] is False
     assert scheduling["pending_policy"] == "latest-per-group"
@@ -177,7 +185,7 @@ assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
-assert "reusing descendant-compatible reservation" in (root / ".github/workflows/release-preparation.yml").read_text(encoding="utf-8")
+assert "reservation source must be an ancestor" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in release_workflow
 assert "reservationSourceSha // .sourceSha" in (root / ".github/scripts/merge-group-release-gate.sh").read_text(encoding="utf-8")
@@ -877,7 +885,7 @@ PY
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path) }' \
   "$root_dir/.github/workflows/ci-pr.yml" \
   "$root_dir/.github/workflows/ci-main.yml" \
-  "$root_dir/.github/workflows/label-gate.yml" \
+  "$root_dir/.github/workflows/release-target-gate.yml" \
   "$root_dir/.github/workflows/package-ci.yml" \
   "$root_dir/.github/workflows/release-preparation.yml" \
   "$root_dir/.github/workflows/release-completion.yml" \

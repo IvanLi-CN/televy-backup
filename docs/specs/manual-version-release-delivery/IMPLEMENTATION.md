@@ -4,14 +4,14 @@
 
 ## Current Status
 
-- Implementation: contract approved; implementation pending
+- Implementation: implemented on the manual target route; merge and publication remain owner-controlled
 - Lifecycle: active
 - Catalog note: target-only manual release replaces PR-label version selection
 
 ## Implementation Coverage
 
-- Requirement coverage: pending implementation of Version Policy, manual preparation, target gate, completion gate, release contract, and recovery validation.
-- Verification commands: pending implementation; the final record will include script fixtures, workflow contract tests, quality-gate validation, and Spec contract validation.
+- Requirement coverage: Version Policy, manual preparation, target gate, completion gate, release contract, reservation provenance, and same-identity recovery are implemented.
+- Verification commands: `test-release-chain.sh`, `test-release-preparation.sh`, `test-release-completion.sh`, `test-release-reservation.sh`, `test-release-github-api.sh`, `test-release-failure-context.py`, `test-release-workflows.sh`, `test-homebrew-cask.sh`, `test-release-scripts.sh`, and `scripts/test-product-version.py` pass locally.
 - Rollout facts: existing `v0.9.9` reservation and decision refs are immutable historical occupancy and are not rewritten or migrated by this topic.
 
 ## Coverage / rollout summary
@@ -20,14 +20,14 @@ The active route will accept one owner-provided `release_target` through trusted
 
 ## Remaining Gaps
 
-- Replace label-derived target resolution with the checked-in Version Policy.
-- Remove the label workflow from active required checks and add manual target validation.
-- Update release scripts, tests, workflows, quality-gate declaration, README, and domain terminology.
-- Re-run live candidate and CI evidence after implementation on a new direct PR; PR #203 is historical evidence only.
+- Run the active route against a new direct PR and collect CI evidence; PR #203 is historical evidence only.
+- Apply the checked-in quality-gate declaration to the repository's remote branch protection when the owner authorizes that external change.
 
 ## Related Changes
 
-- None.
+- Added the manual target Version Policy and target gate.
+- Retired the PR-label release workflow and label-derived target authority.
+- Bound reservation, preparation, completion, Release snapshots, and failure recovery to `release_target` and policy identity.
 
 ## References
 

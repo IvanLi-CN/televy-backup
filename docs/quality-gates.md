@@ -9,10 +9,10 @@ TelevyBackup treats pull request checks as an explicit merge contract. The canon
 - `arm64 native package`
 - `x86_64 native package`
 - `Universal 2 assembly`
-- `Release intent label gate`
+- `Release target gate`
 - `Release completion`
 
-The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. The preparation classifier jobs are intentionally informational helpers and are not required checks. `Release intent label gate` and `Release completion` use per-PR concurrency with `cancel-in-progress: false`; GitHub retains the latest pending evaluation for each group, and every new head is independently revalidated before completion.
+The exact workflow mapping is declared in `.github/quality-gates.json` and is validated by the style-topic quality-gates checker. Release preparation is an explicit `workflow_dispatch` operation whose single `release_target` input is checked from the trusted `main` checkout. `Release target gate` validates preparation trailers and canonical `VERSION`; `Release completion` validates the current PR head/base, source checks, reservation provenance, and the same target identity. Neither gate reads PR labels. Both use per-PR concurrency with `cancel-in-progress: false`; GitHub retains the latest pending evaluation for each group, and every new head is independently revalidated before completion.
 
 ## APFS acceptance lane
 

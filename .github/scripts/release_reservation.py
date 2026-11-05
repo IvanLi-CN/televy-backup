@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 REF_RE = re.compile(r"^refs/tags/[A-Za-z0-9._/-]+$")
 VERSION_RE = re.compile(r"^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?$")
+RELEASE_TARGET_RE = re.compile(
+    r"^(?:patch|minor|major|(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
+)
+RELEASE_POLICY_ID = "televybackup-manual-semver-v1"
 CHANNELS = {"prod", "beta", "rc", "dev"}
 IDENTITY_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 IDENTITY_METADATA_CONTENT = "televy-backup release identity\n"
@@ -47,6 +51,23 @@ def validate_identity(version: str, channel: str) -> None:
     version_channel = version.rsplit("-", 1)[-1].split(".", 1)[0] if "-" in version else "prod"
     if version_channel != channel:
         raise ReservationError(f"release version {version!r} does not match channel {channel!r}")
+
+
+def validate_release_target(release_target: str, policy: str) -> None:
+    if not RELEASE_TARGET_RE.fullmatch(release_target):
+        raise ReservationError(f"invalid release target: {release_target!r}")
+    if policy != RELEASE_POLICY_ID:
+        raise ReservationError(f"unsupported release policy: {policy!r}")
+
+
+def validate_target_identity(release_target: str, version: str, channel: str) -> None:
+    """Ensure the durable target maps to the exact reserved version/channel."""
+    validate_release_target(release_target, RELEASE_POLICY_ID)
+    if release_target in {"patch", "minor", "major"}:
+        if channel != "prod" or "-" in version:
+            raise ReservationError("symbolic release targets must reserve a final product version")
+    elif release_target != version:
+        raise ReservationError("explicit release target must match the reserved version")
 
 
 def reservation_ref(version: str) -> str:
@@ -83,10 +104,12 @@ def deterministic_identity(owner: str, claim_key: str) -> dict[str, str]:
 
 
 def reservation_metadata(
-    *, reservation_id: str, owner: str, claim_key: str, boundary_token: str, version: str, channel: str, state: str
+    *, reservation_id: str, owner: str, claim_key: str, boundary_token: str, version: str,
+    channel: str, release_target: str, policy: str, state: str
 ) -> dict[str, str]:
     if state != "claimed":
         raise ReservationError("new reservations must start in claimed state")
+    validate_release_target(release_target, policy)
     return {
         "Reservation-Id": reservation_id,
         "Reservation-Owner": owner,
@@ -94,6 +117,8 @@ def reservation_metadata(
         "Reservation-Boundary-Token": boundary_token,
         "Release-Version": version,
         "Release-Channel": channel,
+        "Release-Target": release_target,
+        "Release-Policy": policy,
         "Reservation-State": state,
     }
 
@@ -133,10 +158,12 @@ def local_commit_info(commit: str, cwd: Path = ROOT) -> dict[str, Any]:
 
 
 def expected_reservation(
-    *, source_sha: str, version: str, channel: str, owner: str, claim_key: str, reservation_id: str, boundary_token: str
+    *, source_sha: str, version: str, channel: str, release_target: str, policy: str,
+    owner: str, claim_key: str, reservation_id: str, boundary_token: str
 ) -> dict[str, Any]:
     source = normalize_sha(source_sha, "source SHA")
     validate_identity(version, channel)
+    validate_target_identity(release_target, version, channel)
     metadata = reservation_metadata(
         reservation_id=reservation_id,
         owner=owner,
@@ -144,12 +171,16 @@ def expected_reservation(
         boundary_token=boundary_token,
         version=version,
         channel=channel,
+        release_target=release_target,
+        policy=policy,
         state="claimed",
     )
     return {
         "sourceSha": source,
         "version": version,
         "channel": channel,
+        "releaseTarget": release_target,
+        "policy": policy,
         "reservationId": reservation_id,
         **metadata,
     }
@@ -158,7 +189,12 @@ def expected_reservation(
 def validate_expected_reservation(expected: dict[str, Any]) -> None:
     version = str(expected["version"])
     channel = str(expected["channel"])
+    release_target = str(expected.get("releaseTarget", ""))
+    policy = str(expected.get("policy", ""))
     validate_identity(version, channel)
+    validate_release_target(release_target, policy)
+    if policy == RELEASE_POLICY_ID:
+        validate_target_identity(release_target, version, channel)
     if str(expected["ref"]) != reservation_ref(version):
         raise ReservationError("reservation ref does not match the release version")
     normalize_sha(str(expected["sourceSha"]), "source SHA")
@@ -191,6 +227,8 @@ def verify_reservation_commit(ref_target: str, expected: dict[str, Any], cwd: Pa
         "Reservation-Boundary-Token": expected["Reservation-Boundary-Token"],
         "Release-Version": expected["version"],
         "Release-Channel": expected["channel"],
+        "Release-Target": expected["releaseTarget"],
+        "Release-Policy": expected["policy"],
         "Reservation-State": "claimed",
     }
     for key, value in expected_trailers.items():
@@ -228,6 +266,8 @@ def create_local_reservation(expected: dict[str, Any], cwd: Path = ROOT) -> dict
         boundary_token=str(expected["Reservation-Boundary-Token"]),
         version=str(expected["version"]),
         channel=str(expected["channel"]),
+        release_target=str(expected["releaseTarget"]),
+        policy=str(expected["policy"]),
         state="claimed",
     )
     commit = _git(
@@ -496,6 +536,8 @@ def create_github_reservation(
             "Reservation-Boundary-Token": expected["Reservation-Boundary-Token"],
             "Release-Version": expected["version"],
             "Release-Channel": expected["channel"],
+            "Release-Target": expected["releaseTarget"],
+            "Release-Policy": expected["policy"],
             "Reservation-State": "claimed",
         }.items():
             if trailers.get(key) != value:
@@ -512,6 +554,8 @@ def create_github_reservation(
         boundary_token=str(expected["Reservation-Boundary-Token"]),
         version=str(expected["version"]),
         channel=str(expected["channel"]),
+        release_target=str(expected["releaseTarget"]),
+        policy=str(expected["policy"]),
         state="claimed",
     )
     commit = client.create_commit(tree=tree, parent=str(expected["sourceSha"]), message=_reservation_message(metadata))
@@ -560,6 +604,8 @@ def verify_github_reservation(expected: dict[str, Any], *, repository: str, toke
         "Reservation-Boundary-Token": expected["Reservation-Boundary-Token"],
         "Release-Version": expected["version"],
         "Release-Channel": expected["channel"],
+        "Release-Target": expected["releaseTarget"],
+        "Release-Policy": expected["policy"],
         "Reservation-State": "claimed",
     }.items():
         if trailers.get(key) != value:
@@ -569,7 +615,8 @@ def verify_github_reservation(expected: dict[str, Any], *, repository: str, toke
 
 def verify_local_reservation_claim(
     *, reservation_ref_value: str, version: str, reservation_id: str, owner: str, claim_key: str,
-    boundary_token: str, cwd: Path = ROOT
+    boundary_token: str, release_target: str | None = None, policy: str | None = None,
+    cwd: Path = ROOT
 ) -> dict[str, Any]:
     validate_version(version)
     if reservation_ref_value != reservation_ref(version):
@@ -582,22 +629,31 @@ def verify_local_reservation_claim(
         raise ReservationError("reservation must have one source parent")
     trailers = trailers_from_message(info["message"])
     channel = trailers.get("Release-Channel", "")
+    recorded_target = trailers.get("Release-Target", "")
+    recorded_policy = trailers.get("Release-Policy", "")
     expected = {
         "ref": reservation_ref_value,
         "sourceSha": info["parents"][0],
         "version": version,
         "channel": channel,
+        "releaseTarget": release_target or recorded_target,
+        "policy": policy or recorded_policy,
         "reservationId": reservation_id,
         "Reservation-Owner": owner,
         "Reservation-Claim-Key": claim_key,
         "Reservation-Boundary-Token": boundary_token,
     }
+    if release_target and recorded_target != release_target:
+        raise ReservationError("reservation release target does not match the claim")
+    if policy and recorded_policy != policy:
+        raise ReservationError("reservation release policy does not match the claim")
     return verify_reservation_commit(target, expected, cwd)
 
 
 def verify_github_reservation_claim(
     *, reservation_ref_value: str, version: str, reservation_id: str, owner: str, claim_key: str,
-    boundary_token: str, repository: str, token: str, api_root: str = "https://api.github.com"
+    boundary_token: str, release_target: str | None = None, policy: str | None = None,
+    repository: str, token: str, api_root: str = "https://api.github.com"
 ) -> dict[str, Any]:
     client = GitHubRefClient(repository, token, api_root)
     validate_version(version)
@@ -616,17 +672,26 @@ def verify_github_reservation_claim(
         raise ReservationError("remote reservation tree does not match its source")
     trailers = trailers_from_message(str(info.get("message", "")))
     channel = trailers.get("Release-Channel", "")
+    recorded_target = trailers.get("Release-Target", "")
+    recorded_policy = trailers.get("Release-Policy", "")
     expected = {
         "ref": reservation_ref_value,
         "sourceSha": source,
         "version": version,
         "channel": channel,
+        "releaseTarget": release_target or recorded_target,
+        "policy": policy or recorded_policy,
         "reservationId": reservation_id,
         "Reservation-Owner": owner,
         "Reservation-Claim-Key": claim_key,
         "Reservation-Boundary-Token": boundary_token,
     }
+    if release_target and recorded_target != release_target:
+        raise ReservationError("remote reservation release target does not match the claim")
+    if policy and recorded_policy != policy:
+        raise ReservationError("remote reservation release policy does not match the claim")
     validate_identity(version, channel)
+    validate_target_identity(expected["releaseTarget"], version, channel)
     for key, value in {
         "Reservation-Id": reservation_id,
         "Reservation-Owner": owner,
@@ -634,6 +699,8 @@ def verify_github_reservation_claim(
         "Reservation-Boundary-Token": boundary_token,
         "Release-Version": version,
         "Release-Channel": channel,
+        "Release-Target": expected["releaseTarget"],
+        "Release-Policy": expected["policy"],
         "Reservation-State": "claimed",
     }.items():
         if trailers.get(key) != value:
@@ -653,6 +720,8 @@ def decision_fields(*, state: str, version: str, merge_sha: str, reservation: di
     return {
         "Decision-State": state,
         "Release-Version": version,
+        "Release-Target": reservation["releaseTarget"],
+        "Release-Policy": reservation["policy"],
         "Release-Merge-SHA": normalize_sha(merge_sha, "decision merge SHA"),
         "Release-Reservation-Id": reservation["reservationId"],
         "Release-Owner": reservation["Reservation-Owner"],
@@ -732,12 +801,13 @@ def create_local_decision(
 
 def receipt_fields(
     *, state: str, version: str, merge_sha: str, reservation_id: str, owner: str, claim_key: str,
-    boundary_token: str, reservation_ref_value: str
+    boundary_token: str, reservation_ref_value: str, release_target: str | None = None,
+    policy: str | None = None
 ) -> dict[str, str]:
     if state not in {"bound", "consumed", "released"}:
         raise ReservationError(f"unsupported receipt state: {state}")
     validate_version(version)
-    return {
+    fields = {
         "Receipt-State": state,
         "Release-Version": version,
         "Release-Merge-SHA": normalize_sha(merge_sha, "merge SHA"),
@@ -748,6 +818,13 @@ def receipt_fields(
         "Release-Reservation-Ref": reservation_ref_value,
         "Receipt-Provenance": "immutable-receipt",
     }
+    if (release_target is None) != (policy is None):
+        raise ReservationError("receipt release target and policy must be supplied together")
+    if release_target is not None and policy is not None:
+        validate_release_target(release_target, policy)
+        fields["Release-Target"] = release_target
+        fields["Release-Policy"] = policy
+    return fields
 
 
 def verify_receipt_commit(ref_target: str, fields: dict[str, str], cwd: Path = ROOT) -> dict[str, Any]:
@@ -780,7 +857,9 @@ def verify_local_merge_identity(
         raise ReservationError("bound receipt merge SHA requires two parents or an associated PR head")
     expected = {
         "Product-Version": version,
-        "Release-Intent-Channel": f"channel:{channel}",
+        "Release-Channel": channel,
+        "Release-Target": reservation["releaseTarget"],
+        "Release-Policy": reservation["policy"],
         "Release-Reservation-Id": reservation["reservationId"],
         "Release-Reservation-Ref": reservation["ref"],
         "Release-Reservation-Owner": reservation["Reservation-Owner"],
@@ -832,7 +911,9 @@ def verify_github_merge_identity(
         raise ReservationError("bound receipt merge SHA requires two parents or an associated PR head")
     expected = {
         "Product-Version": version,
-        "Release-Intent-Channel": f"channel:{channel}",
+        "Release-Channel": channel,
+        "Release-Target": reservation["releaseTarget"],
+        "Release-Policy": reservation["policy"],
         "Release-Reservation-Id": reservation["reservationId"],
         "Release-Reservation-Ref": reservation["ref"],
         "Release-Reservation-Owner": reservation["Reservation-Owner"],
@@ -871,13 +952,14 @@ def create_local_receipt(
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
-    fields = receipt_fields(
-        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
-        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-    )
     reservation = verify_local_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, cwd=cwd,
+    )
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+        release_target=reservation["releaseTarget"], policy=reservation["policy"],
     )
     bound_ref = receipt_ref("bound", version, merge)
     consumed_ref = receipt_ref("consumed", version, merge)
@@ -933,15 +1015,16 @@ def create_github_receipt(
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
-    fields = receipt_fields(
-        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
-        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-    )
     client = GitHubRefClient(repository, token, api_root)
     reservation = verify_github_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, repository=repository,
         token=token, api_root=api_root,
+    )
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+        release_target=reservation["releaseTarget"], policy=reservation["policy"],
     )
     bound_ref = receipt_ref("bound", version, merge)
     consumed_ref = receipt_ref("consumed", version, merge)
@@ -1012,13 +1095,14 @@ def verify_local_receipt(
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
-    fields = receipt_fields(
-        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
-        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-    )
     reservation = verify_local_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, cwd=cwd,
+    )
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+        release_target=reservation["releaseTarget"], policy=reservation["policy"],
     )
     target = local_ref_target(ref, cwd)
     if not target:
@@ -1053,14 +1137,15 @@ def verify_github_receipt(
 ) -> dict[str, str]:
     merge = normalize_sha(merge_sha, "merge SHA")
     ref = receipt_ref(state, version, reservation_id if state == "released" else merge)
-    fields = receipt_fields(
-        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
-        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
-    )
     reservation = verify_github_reservation_claim(
         reservation_ref_value=reservation_ref_value, version=version, reservation_id=reservation_id,
         owner=owner, claim_key=claim_key, boundary_token=boundary_token, repository=repository,
         token=token, api_root=api_root,
+    )
+    fields = receipt_fields(
+        state=state, version=version, merge_sha=merge, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, boundary_token=boundary_token, reservation_ref_value=reservation_ref_value,
+        release_target=reservation["releaseTarget"], policy=reservation["policy"],
     )
     client = GitHubRefClient(repository, token, api_root)
     target = client.ref_target(ref)
@@ -1103,21 +1188,22 @@ def verify_github_receipt(
 
 
 def intent_snapshot(**values: Any) -> dict[str, Any]:
-    required = {"version", "channel", "merge_sha", "source_sha", "release_mode", "reservation"}
+    required = {"version", "channel", "release_target", "policy", "merge_sha", "source_sha", "release_mode", "reservation"}
     missing = sorted(required - values.keys())
     if missing:
-        raise ReservationError(f"release intent is missing fields: {', '.join(missing)}")
+        raise ReservationError(f"release snapshot is missing fields: {', '.join(missing)}")
     normalize_sha(str(values["source_sha"]), "source SHA")
     normalize_sha(str(values["merge_sha"]), "merge SHA")
     version = str(values["version"])
     snapshot = {
-        "schema_version": 1,
+        "schema_version": 2,
         "pull_request": values.get("pull_request"),
         "source_sha": values["source_sha"],
         "merge_sha": values["merge_sha"],
         "release_mode": values["release_mode"],
         "covered_merge_sha": values.get("covered_merge_sha", ""),
-        "type": values.get("type", ""),
+        "release_target": values["release_target"],
+        "policy": values["policy"],
         "channel": values["channel"],
         "version": version,
         "tag": f"v{version}",
@@ -1145,6 +1231,8 @@ def main(argv: list[str] | None = None) -> int:
     reserve.add_argument("--source-sha", required=True)
     reserve.add_argument("--version", required=True)
     reserve.add_argument("--channel", required=True)
+    reserve.add_argument("--release-target", required=True)
+    reserve.add_argument("--release-policy", default=RELEASE_POLICY_ID)
     reserve.add_argument("--owner", required=True)
     reserve.add_argument("--claim-key", required=True)
     reserve.add_argument("--reservation-id")
@@ -1176,6 +1264,8 @@ def main(argv: list[str] | None = None) -> int:
                 "sourceSha": normalize_sha(args.source_sha, "source SHA"),
                 "version": args.version,
                 "channel": args.channel,
+                "releaseTarget": args.release_target,
+                "policy": args.release_policy,
                 "reservationId": args.reservation_id or generated["reservationId"],
                 "Reservation-Owner": args.owner,
                 "Reservation-Claim-Key": args.claim_key,

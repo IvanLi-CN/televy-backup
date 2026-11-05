@@ -1,14 +1,16 @@
 # Implementation
 
+> Historical implementation record. The active implementation is documented in [`manual-version-release-delivery/IMPLEMENTATION.md`](../manual-version-release-delivery/IMPLEMENTATION.md); the PR-label route and final-tag successor allocation described below are retired.
+
 ## Components
 
 | Component | Location |
 | --- | --- |
 | Formal and local version grammar | `scripts/product-version.py` |
-| Final-tag-first allocation and product-tag provenance | `.github/scripts/release_chain.py`, `.github/workflows/release.yml` |
+| Manual target resolution and product-tag provenance | `.github/scripts/release_chain.py`, `.github/workflows/release.yml` |
 | Append-only reservation, receipt and intent snapshot | `.github/scripts/release_reservation.py` |
 | Independent Snapshot Access helper source resolution | `.github/scripts/release_helper.py`, `.github/workflows/release.yml` |
-| Label policy | `.github/scripts/label-gate.sh`, `.github/release-contract.json` |
+| Retired label policy | `.github/pr-label-release.json` (retired tombstone) |
 | Trusted preparation | `.github/workflows/release-preparation.yml` |
 | Completion gate | `.github/workflows/release-completion.yml`, `.github/scripts/release_completion.py` |
 | Mainline bind, build and publish | `.github/workflows/release.yml` |
@@ -25,19 +27,14 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
 
 ## Identity flow
 
-1. Label Gate validates one product type and one new channel, or channel-free docs/skip.
-   Label Gate and Release completion are required per-PR gates with non-preemptive `queue: max`
-   scheduling; after preparation, their manual runs target the prepared PR head so the required
-   check-runs stay attached to that candidate. Dispatch mode checks out trusted `main`, verifies
-   the selected branch/SHA against the current in-repository PR, and completion re-reads the
-   current PR labels after verifying the queued head/base.
+1. The trusted target gate validates one owner-provided `release_target` and the preparation
+   trailers. Target resolution uses the highest eligible final tag reachable from `main`; occupied
+   identities fail closed and no successor is allocated. The target gate and Release completion are
+   required per-PR gates with non-preemptive scheduling; neither reads PR labels.
 2. Preparation enumerates fetched product tags, requires annotated GitHub Actions provenance for
-   final tags, retains reachable pre-policy lightweight prerelease tags only for ordinal occupancy,
-   calculates the candidate from the highest final tag, and uses the default `GITHUB_TOKEN` to
-   create the reservation before writing VERSION. A retry after the source head advances scans only
-   immutable reservation refs whose claim key identifies the same PR and intent, requires the
-   reservation parent to be an ancestor of the current source, and reuses the exact claim without
-   creating a successor identity.
+   final tags, resolves the explicit target with the checked-in Version Policy, and uses the default
+   `GITHUB_TOKEN` to create the reservation before writing VERSION. A retry after the source head
+   advances reuses only the same target/policy/claim and never creates a successor identity.
 3. The same PR branch receives one GitHub verified VERSION-only commit guarded by
    `expectedHeadOid`. Later source commits may follow it; `release_chain.py find-prepared` resolves
    the first-parent preparation commit within the current `base..head` range and rejects a changed
@@ -49,7 +46,7 @@ blocks with a local Git/API fixture. Release state is read through the GitHub RE
    single-parent covered commit must be an authoritatively merged main PR result, and product tags
    plus append-only identity refs must not already target it. The merge-group gate waits for all
    required check-runs on the current candidate head, while the merge-group gate waits for the
-   merge-group head, refreshes the current PR identity/labels, and passes that immutable check
+   merge-group head, refreshes the current PR identity, and passes that immutable check
    snapshot to the same completion validator. The PR and merge-group gates allow up to 30 minutes
    for source required checks, covering the existing native package and Swift test matrix without
    weakening the fail-closed timeout.

@@ -3,8 +3,8 @@ set -euo pipefail
 
 mode="${1:-}"
 case "${mode}" in
-  labels|completion) ;;
-  *) echo "usage: $0 labels|completion" >&2; exit 2 ;;
+  target|completion) ;;
+  *) echo "usage: $0 target|completion" >&2; exit 2 ;;
 esac
 
 event_path="${GITHUB_EVENT_PATH:?}"
@@ -66,10 +66,14 @@ for pr_number in ${pr_numbers}; do
   test "$(jq -r '.state' "${pr_json}")" = open
   test "$(jq -r '.base.ref' "${pr_json}")" = main
   test "$(jq -r '.head.repo.full_name // empty' "${pr_json}")" = "${repository}"
-  labels_json="$(jq -c '.labels' "${pr_json}")"
-  PR_NUMBER="${pr_number}" LABELS_JSON="${labels_json}" GITHUB_TOKEN="${token}" GITHUB_API_URL="${api_root}" \
-    GITHUB_REPOSITORY="${repository}" bash ./.github/scripts/label-gate.sh
-
+  if [[ "${mode}" == target ]]; then
+    pr_head_sha="$(jq -r '.head.sha' "${pr_json}")"
+    base_sha="$(jq -r '.base.sha' "${pr_json}")"
+    git fetch --no-tags origin "${pr_head_sha}" "${base_sha}"
+    python3 .github/scripts/release_target_gate.py \
+      --repo-root . --commit "${pr_head_sha}" --base "${base_sha}"
+    continue
+  fi
   if [[ "${mode}" == completion ]]; then
     pr_head_sha="$(jq -r '.head.sha' "${pr_json}")"
     base_sha="$(jq -r '.base.sha' "${pr_json}")"
@@ -83,13 +87,10 @@ for pr_number in ${pr_numbers}; do
       fi
     fi
     checks_json="${RUNNER_TEMP:-/tmp}/merge-group-checks-${pr_number}.json"
-    labels_file="${RUNNER_TEMP:-/tmp}/merge-group-labels-${pr_number}.json"
-    printf '%s' "${labels_json}" > "${labels_file}"
     completion_args=(
       --repo-root .
       --commit "${pr_head_sha}"
       --base "${base_sha}"
-      --labels-json "${labels_file}"
       --checks-json "${checks_json}"
       --repository "${repository}"
       --token "${token}"
@@ -102,12 +103,14 @@ for pr_number in ${pr_numbers}; do
         --arg ref "$(printf '%s' "${prepared_json}" | jq -r .reservationRef)" \
         --arg sourceSha "$(printf '%s' "${prepared_json}" | jq -r '.reservationSourceSha // .sourceSha')" \
         --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
+        --arg releaseTarget "$(printf '%s' "${prepared_json}" | jq -r .releaseTarget)" \
+        --arg policy "$(printf '%s' "${prepared_json}" | jq -r .policy)" \
         --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
         --arg reservationId "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
         --arg owner "$(printf '%s' "${prepared_json}" | jq -r .reservationOwner)" \
         --arg claimKey "$(printf '%s' "${prepared_json}" | jq -r .claimKey)" \
         --arg boundaryToken "$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)" \
-        '{ref:$ref,sourceSha:$sourceSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
+        '{ref:$ref,sourceSha:$sourceSha,version:$version,channel:$channel,releaseTarget:$releaseTarget,policy:$policy,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
         > "${reservation_json}"
       completion_args+=(--reservation-json "${reservation_json}")
       release_mode="$(printf '%s' "${prepared_json}" | jq -r .mode)"
@@ -131,7 +134,7 @@ for pr_number in ${pr_numbers}; do
         )
       fi
     fi
-    required=("Release intent label gate" "quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
+    required=("Release target gate" "quality" "macOS Swift tests" "arm64 native package" "x86_64 native package" "Universal 2 assembly")
     deadline=$((SECONDS + 1800))
     while :; do
       pending=()
@@ -160,8 +163,6 @@ for pr_number in ${pr_numbers}; do
     test "$(jq -r '.head.repo.full_name // empty' "${final_pr_json}")" = "${repository}"
     test "$(jq -r '.head.sha' "${final_pr_json}")" = "${pr_head_sha}"
     test "$(jq -r '.base.sha' "${final_pr_json}")" = "${base_sha}"
-    labels_json="$(jq -c '.labels' "${final_pr_json}")"
-    printf '%s' "${labels_json}" > "${labels_file}"
     gh api "repos/${repository}/commits/${head_sha}/check-runs?filter=latest&per_page=100" > "${checks_json}"
     python3 .github/scripts/release_completion.py "${completion_args[@]}" \
       --allow-migration --migration-version 0.9.2

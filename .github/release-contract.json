@@ -1,6 +1,6 @@
 {
-  "schema_version": 2,
-  "source_of_truth": "append-only repository identity refs plus trusted preparation provenance",
+  "schema_version": 3,
+  "source_of_truth": "one owner-supplied release_target plus append-only repository identity refs and trusted preparation provenance",
   "version_file": "VERSION",
   "numeric_baseline": "highest eligible final remote product tag vX.Y.Z",
   "eligible_final_tag_provenance": {
@@ -16,32 +16,28 @@
     "dev": "X.Y.Z-dev.N",
     "local_development": "next final patch-dev.<short-sha>"
   },
-  "label_groups": {
-    "type": [
-      "type:major",
-      "type:minor",
-      "type:patch",
-      "type:docs",
-      "type:skip"
-    ],
-    "channel": [
-      "channel:prod",
-      "channel:beta",
-      "channel:rc",
-      "channel:dev"
-    ]
-  },
-  "legacy_migration_map": {
-    "channel:stable": "channel:prod",
-    "channel:canary": "channel:dev",
-    "type:none": "type:skip"
-  },
-  "release_actions": {
-    "product": "type:major|minor|patch plus exactly one channel",
-    "skip": "type:docs or type:skip without channel"
+  "version_policy": {
+    "id": "televybackup-manual-semver-v1",
+    "input": "release_target",
+    "symbolic_targets": ["patch", "minor", "major"],
+    "explicit_target": "canonical final or prerelease SemVer",
+    "trusted_baseline": "highest eligible final product tag reachable from main",
+    "virtual_baseline": "0.0.0",
+    "ordering": "repository compare_versions with final above prerelease",
+    "collision": "reject product tag or identity-ref ownership before preparation",
+    "successor_on_collision": false,
+    "reservation_key": "pull_request_number+release_target",
+    "identity_fields": ["merge_sha", "version", "channel", "policy", "reservation_id"],
+    "publication_mapping": {
+      "version_file": "VERSION",
+      "product_tag": "v<version>",
+      "release_channel": "version-derived-channel",
+      "github_release": "explicit-post-merge-release-stage"
+    },
+    "recovery": "same merge SHA, canonical version, channel, policy, reservation, and artifact digests"
   },
   "workflows": {
-    "label_gate": "Release intent label gate",
+    "target_gate": "Release target gate",
     "preparation": "Prepare product version",
     "completion": "Release completion",
     "release": "Release Product",
@@ -53,17 +49,18 @@
     "write_capable_product_checkout": false
   },
   "required_gate_scheduling": {
-    "label_gate": {
+    "target_gate": {
       "group": "per-pull-request",
       "cancel_in_progress": false,
       "pending_policy": "latest-per-group",
-      "labels_source": "current GitHub pull request API snapshot"
+      "source": "trusted main checkout plus preparation trailers",
+      "target_source": "workflow_dispatch release_target only"
     },
     "completion": {
       "group": "per-pull-request",
       "cancel_in_progress": false,
       "pending_policy": "latest-per-group",
-      "labels_source": "current GitHub pull request API snapshot after head/base match"
+      "source": "current PR head/base plus preparation trailers after exact match"
     }
   },
   "preparation": {
@@ -74,7 +71,8 @@
     "completion_requires_native_verification": true,
     "only_path": "VERSION",
     "no_gpg_secrets": true,
-    "allocation": "final-tag-first",
+    "allocation": "manual-release-target-only; no successor allocation",
+    "target_input": "one non-empty release_target from workflow_dispatch",
     "reservation_before_version": true,
     "descendant_retry": "reuse exact same-PR claim when reservation source is an ancestor of the current source"
   },
@@ -116,9 +114,10 @@
   "release_sequence": {
     "source": "remote product tags and existing reservation/receipt refs",
     "final_baseline": "highest final vX.Y.Z only",
-    "prerelease_ordinal": "max existing same-base channel ordinal plus one",
+    "prerelease_ordinal": "explicit owner-provided ordinal; never allocated by recovery",
     "lower_candidate": "reject-before-build",
     "equal_candidate": "require tag target equals merge SHA",
+    "successor_on_collision": false,
     "successor_on_recovery": false
   },
   "release_states": {
@@ -129,7 +128,8 @@
   "intent_snapshot": {
     "artifact_policy": "snapshot-only; immutable refs and trailers remain authoritative",
     "run_binding": ["run_id", "run_attempt"],
-    "notifier_acceptance": "artifact run_id and run_attempt must match the failed Release Product workflow run"
+    "notifier_acceptance": "artifact run_id and run_attempt must match the failed Release Product workflow run",
+    "release_fields": ["release_target", "policy", "version", "channel", "merge_sha", "reservation"]
   },
   "helper_bootstrap": {
     "resolver": "published-prerelease-release-plus-verified-build-manifest",

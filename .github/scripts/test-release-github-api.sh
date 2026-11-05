@@ -57,12 +57,14 @@ class FakeGitHubRefClient:
 
 
 module.GitHubRefClient = FakeGitHubRefClient
-claim_key = "pr:7:source:" + source
+claim_key = "pr:7:target:1.0.0-beta.1"
 identity = module.deterministic_identity("fixture", claim_key)
 expected = module.expected_reservation(
     source_sha=source,
     version="1.0.0-beta.1",
     channel="beta",
+    release_target="1.0.0-beta.1",
+    policy=module.RELEASE_POLICY_ID,
     owner="fixture",
     claim_key=claim_key,
     reservation_id=identity["reservationId"],
@@ -78,8 +80,9 @@ FakeGitHubRefClient.commits[preparation] = {
 
 Release-Source-SHA: {source}
 Product-Version: 1.0.0-beta.1
-Release-Intent-Type: type:patch
-Release-Intent-Channel: channel:beta
+Release-Target: 1.0.0-beta.1
+Release-Policy: {module.RELEASE_POLICY_ID}
+Release-Channel: beta
 Release-Reservation-Id: {identity["reservationId"]}
 Release-Reservation-Ref: {expected["ref"]}
 Release-Reservation-Owner: fixture
@@ -143,13 +146,15 @@ else:
 retry_reservation_source = "9" * 40
 retry_preparation = "a" * 40
 retry_merge = "b" * 40
-retry_claim = "pr:8:source:" + retry_reservation_source
+retry_claim = "pr:8:target:1.0.0-beta.2"
 retry_identity = module.deterministic_identity("fixture", retry_claim)
 retry_ref = module.reservation_ref("1.0.0-beta.2")
 retry_reservation = module.expected_reservation(
     source_sha=retry_reservation_source,
     version="1.0.0-beta.2",
     channel="beta",
+    release_target="1.0.0-beta.2",
+    policy=module.RELEASE_POLICY_ID,
     owner="fixture",
     claim_key=retry_claim,
     reservation_id=retry_identity["reservationId"],
@@ -165,7 +170,9 @@ FakeGitHubRefClient.commits[retry_preparation] = {
 Release-Source-SHA: {source}
 Release-Reservation-Source-SHA: {retry_reservation_source}
 Product-Version: 1.0.0-beta.2
-Release-Intent-Channel: channel:beta
+Release-Target: 1.0.0-beta.2
+Release-Policy: {module.RELEASE_POLICY_ID}
+Release-Channel: beta
 Release-Reservation-Id: {retry_identity["reservationId"]}
 Release-Reservation-Ref: {retry_ref}
 Release-Reservation-Owner: fixture

@@ -14,7 +14,7 @@ import release_reservation as RESERVATION  # noqa: E402
 
 
 REQUIRED_SOURCE_CHECKS = {
-    "Release intent label gate",
+    "Release target gate",
     "quality",
     "macOS Swift tests",
     "arm64 native package",
@@ -35,6 +35,9 @@ IDENTITY_REF_PREFIXES = (
 )
 RELEASE_IDENTITY_TRAILERS = {
     "Release-Source-SHA",
+    "Release-Target",
+    "Release-Policy",
+    "Release-Channel",
     "Product-Version",
     "Release-Reservation-Id",
     "Release-Reservation-Ref",
@@ -43,13 +46,6 @@ RELEASE_IDENTITY_TRAILERS = {
     "Release-Boundary-Token",
     "Release-Provenance",
 }
-
-
-def labels(path: Path) -> dict[str, str]:
-    try:
-        return CHAIN.intent_from_labels(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, json.JSONDecodeError) as error:
-        raise CompletionError(f"cannot read labels: {error}") from error
 
 
 def checks_ready(path: Path) -> bool:
@@ -176,6 +172,8 @@ def verify_reservation(
         "sourceSha": reservation_source,
         "version": prepared["version"],
         "channel": prepared["channel"].removeprefix("channel:"),
+        "releaseTarget": prepared["releaseTarget"],
+        "policy": prepared["policy"],
         "reservationId": prepared["reservationId"],
         "ref": prepared["reservationRef"],
         "Reservation-Owner": prepared["reservationOwner"],
@@ -194,7 +192,8 @@ def verify_reservation(
                 reservation_ref_value=expected["ref"], version=expected["version"],
                 reservation_id=expected["reservationId"], owner=expected["Reservation-Owner"],
                 claim_key=expected["Reservation-Claim-Key"],
-                boundary_token=expected["Reservation-Boundary-Token"], cwd=CHAIN.ROOT,
+                boundary_token=expected["Reservation-Boundary-Token"],
+                release_target=expected["releaseTarget"], policy=expected["policy"], cwd=CHAIN.ROOT,
             )
     except RESERVATION.ReservationError as error:
         raise CompletionError(f"reservation provenance is not verified: {error}") from error
@@ -217,7 +216,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo-root", type=Path)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--base", required=True)
-    parser.add_argument("--labels-json", type=Path, required=True)
     parser.add_argument("--checks-json", type=Path, required=True)
     parser.add_argument("--release-mode", choices=("normal", "version-only-release-pr"), default="normal")
     parser.add_argument("--covered-merge-sha", default="")
@@ -235,24 +233,26 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.repo_root:
             CHAIN.ROOT = args.repo_root.resolve()
-        intent = labels(args.labels_json)
         changed = CHAIN.git("diff", "--name-only", f"{args.base}...{args.commit}").splitlines()
-        if intent["action"] == "skip":
-            if "VERSION" in changed:
-                if args.allow_baseline_restore:
-                    verify_baseline_restore(args.commit, args.base)
-                    print(json.dumps({"status": "baseline-restore"}, sort_keys=True))
-                    return 0
-                if args.allow_migration and args.migration_version:
-                    verify_migration(args.commit, args.base, args.migration_version)
-                    print(json.dumps({"status": "migration"}, sort_keys=True))
-                    return 0
-                raise CompletionError("non-migration skip PR must not modify VERSION")
-            print(json.dumps({"status": "skip"}, sort_keys=True))
-            return 0
+        try:
+            prepared = CHAIN.find_prepared(args.commit, args.base)
+        except CHAIN.ReleaseChainError:
+            prepared = None
+        if prepared is None:
+            if "VERSION" not in changed:
+                print(json.dumps({"status": "not-release"}, sort_keys=True))
+                return 0
+            if args.allow_baseline_restore:
+                verify_baseline_restore(args.commit, args.base)
+                print(json.dumps({"status": "baseline-restore"}, sort_keys=True))
+                return 0
+            if args.allow_migration and args.migration_version:
+                verify_migration(args.commit, args.base, args.migration_version)
+                print(json.dumps({"status": "migration"}, sort_keys=True))
+                return 0
+            raise CompletionError("VERSION change requires a manual release_target preparation")
         if not checks_ready(args.checks_json):
             raise CompletionError("source PR checks are not all successful")
-        prepared = CHAIN.find_prepared(args.commit, args.base)
         if args.require_github_verification:
             if not args.github_verification_json:
                 raise CompletionError("production completion requires GitHub commit verification evidence")
@@ -264,8 +264,6 @@ def main(argv: list[str] | None = None) -> int:
         verify_reservation(
             args.reservation_json, prepared, repository=args.repository, token=args.token, api_root=args.api_root
         )
-        if prepared["type"] != intent["type"] or prepared["channel"] != intent["channel"]:
-            raise CompletionError("preparation intent does not match current PR labels")
         if prepared["mode"] != args.release_mode:
             raise CompletionError("release mode does not match preparation provenance")
         if CHAIN.git("merge-base", args.base, prepared["sourceSha"]) != CHAIN.git("rev-parse", args.base):

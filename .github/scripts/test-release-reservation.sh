@@ -13,28 +13,42 @@ printf '0.9.2\n' > "$repo_dir/VERSION"
 git -C "$repo_dir" add VERSION
 git -C "$repo_dir" commit -qm source
 source_sha="$(git -C "$repo_dir" rev-parse HEAD)"
-claim_key="pr:7:source:${source_sha}:type:type:patch:channel:channel:beta"
+claim_key="pr:7:target:1.0.0-beta.1"
 
 first="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel beta \
-  --owner fixture --claim-key "$claim_key")"
+  --release-target 1.0.0-beta.1 --owner fixture --claim-key "$claim_key")"
 second="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel beta \
-  --owner fixture --claim-key "$claim_key")"
+  --release-target 1.0.0-beta.1 --owner fixture --claim-key "$claim_key")"
 [[ "$(printf '%s' "$first" | jq -r .target)" == "$(printf '%s' "$second" | jq -r .target)" ]]
 [[ "$(git -C "$repo_dir" for-each-ref --format='%(refname)' refs/tags/release-reservation)" == "refs/tags/release-reservation/v1.0.0-beta.1" ]]
 
 if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel beta \
-  --owner foreign --claim-key "$claim_key" >/dev/null 2>&1; then
+  --release-target 1.0.0-beta.1 --owner foreign --claim-key "$claim_key" >/dev/null 2>&1; then
   echo "foreign reservation claim was accepted" >&2
   exit 1
 fi
 
 if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
   --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel rc \
-  --owner fixture --claim-key "$claim_key" >/dev/null 2>&1; then
+  --release-target 1.0.0-beta.1 --owner fixture --claim-key "$claim_key" >/dev/null 2>&1; then
   echo "version/channel mismatch was accepted" >&2
+  exit 1
+fi
+
+if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel beta \
+  --release-target patch --owner fixture --claim-key "$claim_key" >/dev/null 2>&1; then
+  echo "symbolic target was bound to a prerelease version" >&2
+  exit 1
+fi
+
+if python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$repo_dir" --source-sha "$source_sha" --version 1.0.0-beta.1 --channel beta \
+  --release-target 1.0.0-beta.2 --owner fixture --claim-key "$claim_key" >/dev/null 2>&1; then
+  echo "explicit target/version mismatch was accepted" >&2
   exit 1
 fi
 
@@ -52,8 +66,9 @@ printf '1.0.0-beta.1\n' > "$repo_dir/VERSION"
 git -C "$repo_dir" add VERSION
 git -C "$repo_dir" commit -qm "chore(release): v1.0.0-beta.1" -m "Release-Source-SHA: ${source_sha}
 Product-Version: 1.0.0-beta.1
-Release-Intent-Type: type:patch
-Release-Intent-Channel: channel:beta
+Release-Target: 1.0.0-beta.1
+Release-Policy: televybackup-manual-semver-v1
+Release-Channel: beta
 Release-Mode: normal
 Release-Reservation-Id: $(printf '%s' "$first" | jq -r .reservationId)
 Release-Reservation-Ref: refs/tags/release-reservation/v1.0.0-beta.1

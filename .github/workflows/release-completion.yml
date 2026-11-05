@@ -3,7 +3,7 @@ name: Release completion
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled, edited, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   workflow_dispatch:
     inputs:
@@ -61,7 +61,6 @@ jobs:
             echo "base_sha=$(jq -r '.base.sha' "${RUNNER_TEMP}/pull-request.json")"
             echo "head_ref=${head_ref}"
           } >> "$GITHUB_OUTPUT"
-          jq '.labels' "${RUNNER_TEMP}/pull-request.json" > "${RUNNER_TEMP}/labels.json"
 
       - name: Fetch pull request head
         if: github.event_name != 'merge_group'
@@ -82,13 +81,9 @@ jobs:
 
       - name: Verify dispatched workflow uses trusted main checkout
         if: github.event_name == 'workflow_dispatch'
-        env:
-          EXPECTED_HEAD_REF: ${{ steps.pr.outputs.head_ref }}
-          EXPECTED_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
-          test "${GITHUB_REF}" = "refs/heads/${EXPECTED_HEAD_REF}"
-          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+          test "${GITHUB_REF}" = "refs/heads/main"
           test "$(git rev-parse HEAD)" = "$(git rev-parse refs/remotes/origin/main)"
 
       - name: Verify VERSION and release completion
@@ -118,7 +113,6 @@ jobs:
           PY
           }
           validate_current_pr "${RUNNER_TEMP}/current-pr.json"
-          jq '.labels' "${RUNNER_TEMP}/current-pr.json" > "${RUNNER_TEMP}/labels.json"
           deadline=$((SECONDS + 1800))
           while :; do
             gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
@@ -127,7 +121,7 @@ jobs:
           import sys
 
           required = {
-              "Release intent label gate",
+              "Release target gate",
               "quality",
               "macOS Swift tests",
               "arm64 native package",
@@ -168,18 +162,12 @@ jobs:
             esac
           done
           validate_current_pr "${RUNNER_TEMP}/current-pr-final.json"
-          jq '.labels' "${RUNNER_TEMP}/current-pr-final.json" > "${RUNNER_TEMP}/labels.json"
           gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/check-runs?filter=latest&per_page=100" > "${RUNNER_TEMP}/source-checks.json"
           prepared_json=""
           preparation_sha=""
-          product_release="$(jq -r 'any(.[]; .name == "type:major" or .name == "type:minor" or .name == "type:patch")' "${RUNNER_TEMP}/labels.json")"
-          if [[ "${product_release}" == true ]]; then
-            prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}" 2>/dev/null || true)"
+          prepared_json="$(python3 .github/scripts/release_chain.py find-prepared --commit "${HEAD_SHA}" --base "${BASE_SHA}" 2>/dev/null || true)"
+          if [[ -n "${prepared_json}" ]]; then
             preparation_sha="$(printf '%s' "${prepared_json}" | jq -r .preparationSha)"
-            if [[ -z "${prepared_json}" ]]; then
-              echo "product release is missing a valid VERSION preparation commit" >&2
-              exit 1
-            fi
             gh api "repos/${GITHUB_REPOSITORY}/commits/${preparation_sha}" > "${RUNNER_TEMP}/github-verification.json"
             jq -e --arg commit "${preparation_sha}" \
               '.sha == $commit and .commit.verification.verified == true' \
@@ -189,11 +177,9 @@ jobs:
             --repo-root .
             --commit "${HEAD_SHA}"
             --base "${BASE_SHA}"
-            --labels-json "${RUNNER_TEMP}/labels.json"
             --checks-json "${RUNNER_TEMP}/source-checks.json"
           )
-          if [[ "${product_release}" == true ]] && \
-             python3 .github/scripts/release_completion.py --help 2>&1 | grep -Fq -- "--github-verification-json"; then
+          if [[ -n "${prepared_json}" ]]; then
             completion_args+=(--github-verification-json "${RUNNER_TEMP}/github-verification.json")
           fi
           if [[ -n "${prepared_json}" ]]; then
@@ -208,12 +194,14 @@ jobs:
               --arg sourceSha "${reservation_source_sha}" \
               --arg sourceTreeSha "${reservation_source_tree}" \
               --arg version "$(printf '%s' "${prepared_json}" | jq -r .version)" \
+              --arg releaseTarget "$(printf '%s' "${prepared_json}" | jq -r .releaseTarget)" \
+              --arg policy "$(printf '%s' "${prepared_json}" | jq -r .policy)" \
               --arg channel "$(printf '%s' "${prepared_json}" | jq -r .channel | sed 's/^channel://')" \
               --arg reservationId "$(printf '%s' "${prepared_json}" | jq -r .reservationId)" \
               --arg owner "$(printf '%s' "${prepared_json}" | jq -r .reservationOwner)" \
               --arg claimKey "$(printf '%s' "${prepared_json}" | jq -r .claimKey)" \
               --arg boundaryToken "$(printf '%s' "${prepared_json}" | jq -r .boundaryToken)" \
-              '{ref:$ref,sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,version:$version,channel:$channel,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
+              '{ref:$ref,sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,version:$version,channel:$channel,releaseTarget:$releaseTarget,policy:$policy,reservationId:$reservationId,"Reservation-Owner":$owner,"Reservation-Claim-Key":$claimKey,"Reservation-Boundary-Token":$boundaryToken}' \
               > "${RUNNER_TEMP}/reservation.json"
             python3 - "${RUNNER_TEMP}/reservation.json" <<'PY'
           import json
@@ -245,15 +233,19 @@ jobs:
           fi
           # Keep the gate logic on the trusted base while bridging the
           # reservation-source field introduced after the base checkout.
+          if [[ -n "${prepared_json}" ]]; then
+            completion_args+=(
+              --reservation-json "${RUNNER_TEMP}/reservation.json"
+              --repository "${GITHUB_REPOSITORY}"
+              --token "${GH_TOKEN}"
+              --api-root "${GITHUB_API_URL}"
+              --require-github-verification
+            )
+          fi
           python3 - "${completion_args[@]}" \
             --allow-migration \
             --migration-version 0.9.2 \
-            --allow-baseline-restore \
-            --reservation-json "${RUNNER_TEMP}/reservation.json" \
-            --repository "${GITHUB_REPOSITORY}" \
-            --token "${GH_TOKEN}" \
-            --api-root "${GITHUB_API_URL}" \
-            --require-github-verification <<'PY'
+            --allow-baseline-restore <<'PY'
           import sys
 
           sys.path.insert(0, ".github/scripts")
