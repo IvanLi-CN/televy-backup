@@ -115,3 +115,5 @@ root helper 在既有身份与未挂载检查后，按 journal 精确拥有的 U
 daemon 维护任务与 acquire 共用锁，release 完成通知与 5 秒 tick 触发清理，错误退避上限 60 秒，每轮最多释放 16 条，随后才对 fresh status 中的 released drift 执行 reconciliation。控制操作通过 progress.stage 报告 cleanup_retry/inventory_reconcile，结果包含剩余 pending/drift 数量。Settings 在 mixed pending+drift 状态展示清理动作，只在 pending 为零后展示独立 inventory 动作，并保留 strict mode 阻断。
 
 上述确定性测试不代表已在用户正式实例完成 APFS 快照删除或 Telegram 端到端备份。隔离 macOS 集成与发布后的真实实例验收分别记录，不能用 mocked inventory 冒充真实运行时证据。
+
+标准 helper 安装复用 PendingCleanupUpgrade 分支接受已核验的 pending+released-drift 分区；仅在 Access active_leases=0 时允许保留 pending 并完成替换，持有 mutation lock 后再次核验。卸载与 legacy/unknown 升级的完全 idle 门禁不变。单元测试覆盖有 active reader 时拒绝；hosted fixture 为标准安装构造旧 helper 与 Access pending 记录，验证候选身份及 journal 保留，不声称 fixture 创建了真实快照。

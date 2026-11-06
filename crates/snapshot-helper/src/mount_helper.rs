@@ -5151,7 +5151,7 @@ mod tests {
             device_identifier: "disk5s1".into(),
             uuid: Uuid::new_v4().to_string(),
         };
-        let manifest = serde_json::to_string(&[owned.clone()]).unwrap();
+        let manifest = serde_json::to_string(std::slice::from_ref(&owned)).unwrap();
         let root = expected_mount_root(501, &lease).unwrap();
         for _ in 0..3 {
             sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?,501,?,'disk5s1','','','[]','[]',1,'released',datetime('now'),datetime('now'))")

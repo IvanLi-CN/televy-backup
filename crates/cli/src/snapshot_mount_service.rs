@@ -1128,16 +1128,25 @@ fn classify_busy_status(
         || status.helper_version == mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.component_version.as_deref() == Some(mount_helper::ROOT_MOUNT_HELPER_VERSION)
         && status.active_mounts > 0
-        && status.pending_cleanup == Some(status.active_mounts)
+        && status.pending_cleanup.is_some_and(|pending| pending > 0)
+        && status.pending_cleanup.and_then(|pending| {
+            status
+                .inventory_drift_mounts
+                .and_then(|drift| pending.checked_add(drift))
+        }) == Some(status.active_mounts)
         && status.live_mounts == Some(0)
         && status.recoverable_stale_mounts == Some(0)
         && status.unknown_blocking_mounts == Some(0)
-        && status.pending_cleanup_leases.len() == status.active_mounts as usize
+        && Some(status.pending_cleanup_leases.len() as u32) == status.pending_cleanup
         && status
             .pending_cleanup_leases
             .iter()
             .all(|lease| lease.state == "cleanup_pending")
-        && status.inventory_drift_mounts == Some(0)
+        && status.inventory_drift_mounts == Some(status.inventory_drift_leases.len() as u32)
+        && status.inventory_drift_leases.iter().all(|lease| {
+            lease.state == "released_inventory_drift"
+                && uuid::Uuid::parse_str(&lease.lease_id).is_ok()
+        })
         && status.build_commit.as_deref() != Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
     if current_pending_only {
         // A current component with a different build can be replaced only when the helper has
@@ -1215,6 +1224,18 @@ fn ensure_snapshot_access_idle(status: &StatusResult) -> Result<(), CliError> {
     Ok(())
 }
 
+// Replacement never releases leases or edits the journal. A verified pending partition
+// may survive replacement while Access has no readers; uninstall still requires full idle.
+fn ensure_snapshot_access_for_replacement(
+    status: &StatusResult,
+    check: BusyCheck,
+) -> Result<(), CliError> {
+    if check == BusyCheck::PendingCleanupUpgrade && status.active_leases == 0 {
+        return Ok(());
+    }
+    ensure_snapshot_access_idle(status)
+}
+
 fn snapshot_access_status_for_maintenance(
     config_dir: &Path,
     data_dir: &Path,
@@ -1261,6 +1282,15 @@ fn wait_for_snapshot_access_idle(
 }
 
 fn wait_for_legacy_upgrade(config_dir: &Path, data_dir: &Path) -> Result<(), CliError> {
+    let check = check_if_busy("replace the snapshot mount helper")?;
+    if check == BusyCheck::PendingCleanupUpgrade {
+        let access = snapshot_access_status_for_maintenance(
+            config_dir,
+            data_dir,
+            "replacing a cleanup-blocked helper",
+        )?;
+        return ensure_snapshot_access_for_replacement(&access, check);
+    }
     // Snapshot Access cleanup retries acquire the same cross-process mutation lock as an
     // installer. Do not hold that lock while waiting, or the cleanup can never make progress.
     wait_for_snapshot_access_idle(
@@ -1481,10 +1511,6 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
                 return Err(error);
             }
         };
-        if let Err(error) = ensure_snapshot_access_idle(&refreshed_access) {
-            discard_staged(&[&staged_binary, &staged_plist]);
-            return Err(error);
-        }
         let refreshed_busy = match check_if_busy("install or update the snapshot mount helper") {
             Ok(busy) => busy,
             Err(error) => {
@@ -1492,6 +1518,12 @@ pub fn install(config_dir: &Path, data_dir: &Path, json_output: bool) -> Result<
                 return Err(error);
             }
         };
+        if let Err(error) =
+            ensure_snapshot_access_for_replacement(&refreshed_access, refreshed_busy)
+        {
+            discard_staged(&[&staged_binary, &staged_plist]);
+            return Err(error);
+        }
         if refreshed_busy == BusyCheck::RecoveryRequired {
             discard_staged(&[&staged_binary, &staged_plist]);
             return Err(CliError::retryable(
@@ -2613,6 +2645,38 @@ mod tests {
                 ),
                 "unsafe case {case}"
             );
+        }
+    }
+
+    #[test]
+    fn cleanup_blocked_upgrade_preserves_pending_access_but_rejects_active_readers() {
+        let mut status = stale_inventory_drift_status();
+        status.active_mounts += 1;
+        status.pending_cleanup = Some(1);
+        status
+            .pending_cleanup_leases
+            .push(televybackup_snapshot_access::MountRecoveryLease {
+                lease_id: uuid::Uuid::new_v4().to_string(),
+                state: "cleanup_pending".into(),
+            });
+        let check = classify_busy_status("update", &status).unwrap();
+        assert_eq!(check, BusyCheck::PendingCleanupUpgrade);
+        let mut access = StatusResult {
+            pending_cleanup: 1,
+            ..Default::default()
+        };
+        assert!(ensure_snapshot_access_for_replacement(&access, check).is_ok());
+        assert!(ensure_snapshot_access_idle(&access).is_err()); // uninstall and unknown upgrades stay fenced
+        access.active_leases = 1;
+        assert!(ensure_snapshot_access_for_replacement(&access, check).is_err());
+        for field in ["live", "unknown", "stale"] {
+            let mut unsafe_status = status.clone();
+            match field {
+                "live" => unsafe_status.live_mounts = Some(1),
+                "unknown" => unsafe_status.unknown_blocking_mounts = Some(1),
+                _ => unsafe_status.recoverable_stale_mounts = Some(1),
+            }
+            assert!(classify_busy_status("update", &unsafe_status).is_err());
         }
     }
 

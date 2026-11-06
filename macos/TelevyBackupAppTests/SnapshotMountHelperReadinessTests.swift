@@ -293,6 +293,15 @@ enum SnapshotMountHelperReadinessTests {
             completion: { success, error, _ in result = (success, error) }
         )
         expectReadiness(result?.0 == true && result?.1 == nil, "the candidate replacement must complete confirmation")
+        let cleanupBlockedUpgrade = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false,
+            buildCommit: String(repeating: "0", count: 40), expectedBuildCommit: candidateCommit,
+            helperVersion: "0.5.7", activeMounts: 75, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+            inventoryDriftMounts: 74, pendingCleanupCandidates: 1, snapshotAccessPendingCleanup: 1
+        )
+        expectReadiness(cleanupBlockedUpgrade.canUpdate, "standard helper update must preserve pending cleanup with released drift")
+        expectReadiness(!cleanupBlockedUpgrade.isOperational, "replacement admission never proves strict readiness")
         print("OK: SnapshotMountHelperReadinessTests")
     }
 

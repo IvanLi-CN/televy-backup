@@ -100,7 +100,7 @@ struct SnapshotMountHelperReadiness {
             return "Update the helper first. Snapshot Access is idle; the update preserves the records. Then reconcile snapshot inventory to unblock strict backups."
         }
         if isPendingCleanupUpgradeSafe {
-            return "The installed helper build is stale, but Snapshot Access is idle and all blocking records are verified cleanup candidates. Update it to restore the cleanup action."
+            return "The installed helper build is stale. No source lease is active and all blocking records are verified cleanup candidates or released inventory drift. Update it while preserving these records, then retry cleanup."
         }
         if isLegacyAggregateStatus {
             let count = activeMounts.map(String.init) ?? "one or more"
@@ -263,6 +263,7 @@ struct SnapshotMountHelperReadiness {
         // Helper replacement and removal mutate the same system boundary as Snapshot Access.
         // Keep the action disabled while a lease or cleanup retry is active; the CLI repeats
         // this check immediately before bootout so a stale UI cannot bypass the boundary.
+        if isPendingCleanupUpgradeSafe { return true }
         guard snapshotAccessActiveLeases == 0 && snapshotAccessPendingCleanup == 0 else { return false }
         if isLegacyPendingCleanupStatus || isPendingCleanupUpgradeSafe || isStaleCurrentPartialClassification || isLegacyUnknownOnlyUpgradeSafe || isInventoryDriftUpgradeSafe { return true }
         if classificationKnown {
@@ -286,6 +287,13 @@ struct SnapshotMountHelperReadiness {
         guard reachable,
               !isReady,
               helperVersion == "0.5.7" || helperVersion == "0.5.6" || helperVersion == "0.5.5" || helperVersion == "0.5.4",
+              let buildCommit, let expectedBuildCommit,
+              buildCommit != expectedBuildCommit,
+              [buildCommit, expectedBuildCommit].allSatisfy({ commit in
+                  commit.utf8.count == 40 && commit.utf8.allSatisfy {
+                      (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+                  }
+              }),
               classificationKnown,
               let activeMounts,
               let liveMounts,
@@ -295,15 +303,14 @@ struct SnapshotMountHelperReadiness {
               let pendingCleanupCandidates,
               let inventoryDriftMounts
         else { return false }
-        return pendingCleanup > 0
-            && activeMounts == pendingCleanup
+        let total = pendingCleanup.addingReportingOverflow(inventoryDriftMounts)
+        return !total.overflow && pendingCleanup > 0
+            && activeMounts == total.partialValue
             && liveMounts == 0
             && recoverableStaleMounts == 0
             && unknownBlockingMounts == 0
-            && inventoryDriftMounts == 0
             && pendingCleanupCandidates == pendingCleanup
             && snapshotAccessActiveLeases == 0
-            && snapshotAccessPendingCleanup == 0
     }
 
     var canRecoverStaleMounts: Bool {
@@ -399,7 +406,7 @@ struct SnapshotMountHelperReadiness {
         // A current helper exposes the exact unknown-row count and the status view renders the
         // explicit repair action. Showing the legacy aggregate warning as well would repeat the
         // same blocker and imply that updating the helper can clear it.
-        guard (unknownBlockingMounts ?? 0) == 0, !isLegacyUnknownOnlyUpgradeSafe, !isInventoryDriftUpgradeSafe else { return nil }
+        guard (unknownBlockingMounts ?? 0) == 0, !isLegacyUnknownOnlyUpgradeSafe, !isInventoryDriftUpgradeSafe, !isPendingCleanupUpgradeSafe else { return nil }
         return SnapshotMountHelperReadiness.updateBlockReason(
             activeMounts: activeMounts,
             pendingCleanup: pendingCleanup

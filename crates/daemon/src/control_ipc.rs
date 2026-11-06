@@ -674,7 +674,7 @@ pub(super) async fn retry_snapshot_cleanup(
             details: serde_json::json!({"reason": "helper_status_failed"}),
         })?;
         snapshot_mount_cleanup_identity(&final_status)?;
-        snapshot_inventory_preflight(&final_status, true)?;
+        snapshot_mount_reconcile_final_state(&final_status, "cleanup retry")?;
         return Ok(serde_json::json!({
             "released": released,
             "remaining": final_status.active_mounts,
@@ -702,6 +702,7 @@ pub(super) async fn retry_snapshot_cleanup(
     }
     Ok(serde_json::json!({
         "cleanup_retry": "completed",
+        "inventory_reconcile": "not_required",
             "remaining_pending": final_pending_cleanup,
             "remaining_drift": final_inventory_drift_mounts,
             "released": released,
