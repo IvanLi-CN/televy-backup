@@ -18,6 +18,7 @@ from pathlib import Path
 
 
 REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
+RECEIPT_SIGNATURE_VERIFIER = Path(__file__).resolve().parents[2] / "scripts/macos/verify-ed25519-receipt.swift"
 FINDER_ACCEPTANCE_PUBLIC_KEY = Path(__file__).resolve().parents[2] / "assets/release/finder-acceptance-signing-public.pem"
 ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
 RC_TAG_RE = re.compile(r"^v(?P<core>\d+\.\d+\.\d+)-rc\.(?P<ordinal>[1-9]\d*)$")
@@ -359,8 +360,8 @@ def verify_finder_acceptance(
         if not signature_path.is_file() or signature_path.is_symlink():
             fail(f"{name} capture signature asset is missing")
         signature_check = subprocess.run(
-            ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(capture_public_key),
-             "-rawin", "-in", str(receipt_path), "-sigfile", str(signature_path)],
+            ["xcrun", "swift", str(RECEIPT_SIGNATURE_VERIFIER), str(capture_public_key),
+             str(receipt_path), str(signature_path)],
             capture_output=True,
             text=True,
             check=False,
