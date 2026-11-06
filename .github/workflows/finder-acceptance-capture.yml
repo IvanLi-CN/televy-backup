@@ -48,10 +48,10 @@ jobs:
       TELEVYBACKUP_FINDER_VISUAL_REVIEW: >-
         {"instruction_readable":true,"instruction_contrast":true,"arrow_visible":true,"arrow_direction_correct":true,"labels_visible":true,"no_occlusion":true}
     steps:
-      - name: Checkout stable release source
+      - name: Checkout capture workflow source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.stable_source_commit }}
+          ref: ${{ github.ref }}
           fetch-depth: 0
           persist-credentials: false
 
