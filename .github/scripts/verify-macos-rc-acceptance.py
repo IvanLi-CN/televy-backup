@@ -29,6 +29,32 @@ def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macOS RC acceptance evidence rejected: {message}")
 
 
+def receipt_signature_command(public_key: Path, receipt: Path, signature: Path) -> list[str]:
+    if sys.platform == "darwin":
+        return [
+            "xcrun",
+            "swift",
+            str(RECEIPT_SIGNATURE_VERIFIER),
+            str(public_key),
+            str(receipt),
+            str(signature),
+        ]
+    # Linux quality jobs validate fixtures without an Apple SDK; the release gate runs on macOS.
+    return [
+        "openssl",
+        "pkeyutl",
+        "-verify",
+        "-pubin",
+        "-inkey",
+        str(public_key),
+        "-rawin",
+        "-in",
+        str(receipt),
+        "-sigfile",
+        str(signature),
+    ]
+
+
 def reject_symlink_components(path: Path, name: str) -> None:
     absolute = Path(os.path.abspath(path))
     current = Path(absolute.anchor)
@@ -359,13 +385,15 @@ def verify_finder_acceptance(
             fail(f"{name} capture receipt asset does not match the protected evidence")
         if not signature_path.is_file() or signature_path.is_symlink():
             fail(f"{name} capture signature asset is missing")
-        signature_check = subprocess.run(
-            ["xcrun", "swift", str(RECEIPT_SIGNATURE_VERIFIER), str(capture_public_key),
-             str(receipt_path), str(signature_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            signature_check = subprocess.run(
+                receipt_signature_command(capture_public_key, receipt_path, signature_path),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            fail(f"{name} receipt signature verifier is unavailable: {error}")
         if signature_check.returncode != 0:
             fail(f"{name} capture receipt signature is invalid")
         if receipt.get("schema_version") != 1:
