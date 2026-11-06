@@ -541,7 +541,8 @@ grep -F 'prepare_evidence_path "$DMG_EVIDENCE_FILE"' <<<"$verify_release_text" >
 }
 grep -F 'json.load(open(sys.argv[12]' <<<"$finder_text" >/dev/null &&
   grep -F 'json.load(open(sys.argv[13]' <<<"$finder_text" >/dev/null &&
-  grep -F 'json.loads(sys.argv[14])' <<<"$finder_text" >/dev/null || {
+  grep -F 'json.loads(sys.argv[14])' <<<"$finder_text" >/dev/null &&
+  grep -F 'signature_basename = sys.argv[18]' <<<"$finder_text" >/dev/null || {
   echo "Finder acceptance must preserve Python evidence argument mapping" >&2
   exit 1
 }

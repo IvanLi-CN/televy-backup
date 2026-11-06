@@ -476,9 +476,13 @@ PY
 acceptance_path="$evidence_dir/$acceptance_basename"
 prepare_evidence_path "$acceptance_path"
 finder_screenshot_sha256="$(shasum -a 256 "$finder_screenshot" | awk '{print $1}')"
-producer_commit="$(git -C "$root_dir" rev-parse HEAD)"
+producer_commit="${TELEVYBACKUP_FINDER_PRODUCER_COMMIT:-$(git -C "$root_dir" rev-parse HEAD)}"
+[[ "$producer_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+  echo "Finder acceptance producer commit must be a full commit SHA" >&2
+  exit 1
+}
 producer_sha256="$(shasum -a 256 "$root_dir/scripts/macos/finder-dmg-acceptance.sh" | awk '{print $1}')"
-python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" "$producer_commit" "$producer_sha256" "$acceptance_basename" <<'PY' > "$acceptance_path"
+python3 - "$attached_device" "$source_dmg" "$dmg" "$dmg_sha256" "$manifest_path" "$checksums_path" "$layout_path" "$finder_screenshot" "$finder_screenshot_sha256" "$machine_arch" "$macos_version" "$hidden_json" "$finder_json" "$visual_review_json" "$producer_commit" "$producer_sha256" "$acceptance_basename" "$signature_basename" <<'PY' > "$acceptance_path"
 import hashlib
 import json
 import pathlib
@@ -490,6 +494,7 @@ visual_review = json.loads(sys.argv[14])
 producer_commit = sys.argv[15]
 producer_sha256 = sys.argv[16]
 acceptance_basename = sys.argv[17]
+signature_basename = sys.argv[18]
 layout = json.load(open(sys.argv[7], encoding="utf-8"))
 canonical_layout = {
     "schema_version": layout["schema_version"],
