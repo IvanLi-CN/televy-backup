@@ -912,8 +912,10 @@ fn pending_cleanup_leases(status: &MountStatusResult) -> Result<Vec<String>, Cli
             "cannot retry snapshot cleanup: the installed snapshot mount helper did not report a complete cleanup status",
         )
     })?;
-    if status.active_mounts != pending_cleanup
-        || status.inventory_drift_mounts != Some(0)
+    if status
+        .inventory_drift_mounts
+        .and_then(|drift| pending_cleanup.checked_add(drift))
+        != Some(status.active_mounts)
         || pending_cleanup as usize != status.pending_cleanup_leases.len()
         || status
             .pending_cleanup_leases
@@ -1707,6 +1709,9 @@ pub fn reconcile(config_dir: &Path, data_dir: &Path, json_output: bool) -> Resul
             ),
         ));
     }
+    if final_status.inventory_drift_mounts.unwrap_or(0) > 0 {
+        return reconcile_inventory(config_dir, data_dir, json_output);
+    }
     if final_status.active_mounts != 0 {
         return Err(CliError::retryable(
             "snapshot_mount_helper.status_inconsistent",
@@ -2401,10 +2406,7 @@ mod tests {
         let mut drift = status;
         drift.inventory_drift_mounts = Some(1);
         drift.active_mounts = 2;
-        assert_eq!(
-            pending_cleanup_leases(&drift).unwrap_err().code,
-            "snapshot_mount_helper.status_inconsistent"
-        );
+        assert_eq!(pending_cleanup_leases(&drift).unwrap(), vec!["pending"]);
     }
 
     #[test]

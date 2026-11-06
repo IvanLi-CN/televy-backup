@@ -65,14 +65,14 @@ struct SnapshotMountHelperReadiness {
         if isReady && (unknownBlockingMounts ?? 0) > 0 {
             return "Snapshot mount helper legacy repair required"
         }
+        if isReady && (pendingCleanup ?? 0) > 0 {
+            return "Snapshot mount helper cleanup required"
+        }
         if isReady && (inventoryDriftMounts ?? 0) > 0 {
             return "Snapshot inventory reconciliation required"
         }
         if isReady && (recoverableStaleMounts ?? 0) > 0 {
             return "Snapshot mount helper recovery required"
-        }
-        if isReady && (pendingCleanup ?? 0) > 0 {
-            return "Snapshot mount helper cleanup required"
         }
         if isReady { return "Snapshot mount helper ready" }
         return reachable ? "Snapshot mount helper update required" : "Snapshot mount helper required"
@@ -383,14 +383,13 @@ struct SnapshotMountHelperReadiness {
               let unknownBlockingMounts,
               let inventoryDriftMounts
         else { return false }
-        return pendingCleanup > 0
+        let total = pendingCleanup.addingReportingOverflow(inventoryDriftMounts)
+        return !total.overflow && pendingCleanup > 0
             && liveMounts == 0
             && recoverableStaleMounts == 0
             && unknownBlockingMounts == 0
-            && inventoryDriftMounts == 0
             && snapshotAccessActiveLeases == 0
-            && snapshotAccessPendingCleanup == 0
-            && activeMounts == pendingCleanup
+            && activeMounts == total.partialValue
             && pendingCleanupCandidates == pendingCleanup
     }
 

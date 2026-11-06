@@ -691,6 +691,19 @@ def main():
         assert cli_payload["inventoryDrift"] == 0
         cli_final = request(ipc, "status")
         assert cli_final["ok"] and cli_final["result"]["active_mounts"] == 0
+        # The daemon must recover released drift without a scheduled backup or UI write.
+        automatic_drift_id = str(uuid.uuid4())
+        insert_inventory_drift_row(journal, os.getuid(), volume_uuid, device, automatic_drift_id)
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            automatic = request(ipc, "status")
+            assert automatic["ok"], automatic
+            if automatic["result"]["active_mounts"] == 0:
+                break
+            time.sleep(0.25)
+        else:
+            raise AssertionError("idle daemon maintenance did not reconcile released inventory drift")
+        print("PASS: idle daemon automatically reconciled released inventory drift", flush=True)
         uid_root, uid_root_created = ensure_uid_mount_root(os.getuid())
         # Hosted macOS cannot create a local snapshot on this disposable APFS
         # image. Verify journal normalization against its real empty inventory;

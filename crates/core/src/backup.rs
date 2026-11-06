@@ -1612,6 +1612,8 @@ struct BaseFileChunkCopyRow {
 
 #[derive(Clone)]
 struct UploadQueue {
+    staged: Option<Arc<std::sync::Mutex<Vec<StagedUpload>>>>,
+    staging_dir: PathBuf,
     sender: mpsc::Sender<UploadJob>,
     bytes_sem: Arc<Semaphore>,
     bytes_budget: usize,
@@ -1625,6 +1627,26 @@ struct UploadQueue {
     cancel: CancellationToken,
 }
 
+enum StagedUpload {
+    Direct {
+        hash: String,
+        source_bytes: u64,
+        file: tempfile::TempPath,
+    },
+    Pack {
+        entries: Vec<PackEntryRef>,
+        file: tempfile::TempPath,
+    },
+}
+
+fn stage_upload_bytes(directory: &Path, bytes: &[u8]) -> Result<tempfile::TempPath> {
+    let mut file = tempfile::Builder::new()
+        .prefix("televybackup-encrypted-pack-")
+        .tempfile_in(directory)?;
+    file.write_all(bytes)?;
+    Ok(file.into_temp_path())
+}
+
 impl UploadQueue {
     async fn enqueue_direct(
         &self,
@@ -1632,6 +1654,21 @@ impl UploadQueue {
         blob: Vec<u8>,
         source_bytes: u64,
     ) -> Result<()> {
+        if let Some(staged) = &self.staged {
+            if self.cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let file = stage_upload_bytes(&self.staging_dir, &blob)?;
+            staged
+                .lock()
+                .expect("staging queue poisoned")
+                .push(StagedUpload::Direct {
+                    hash: chunk_hash,
+                    source_bytes,
+                    file,
+                });
+            return Ok(());
+        }
         let queue_started = Instant::now();
         let queue_wait_id = self.next_queue_wait_id.fetch_add(1, Ordering::Relaxed);
         let bytes = blob.len();
@@ -1711,6 +1748,17 @@ impl UploadQueue {
     }
 
     async fn enqueue_pack(&self, entries: Vec<PackEntryRef>, pack_bytes: Vec<u8>) -> Result<()> {
+        if let Some(staged) = &self.staged {
+            if self.cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            let file = stage_upload_bytes(&self.staging_dir, &pack_bytes)?;
+            staged
+                .lock()
+                .expect("staging queue poisoned")
+                .push(StagedUpload::Pack { entries, file });
+            return Ok(());
+        }
         let queue_started = Instant::now();
         let queue_wait_id = self.next_queue_wait_id.fetch_add(1, Ordering::Relaxed);
         let bytes = pack_bytes.len();
@@ -2171,6 +2219,22 @@ pub async fn run_backup_with_source<S: Storage>(
     run_backup_with_source_internal(storage, config, options, source, source_read_complete).await
 }
 
+struct SourceReadCompletion<'a>(Option<&'a (dyn Fn() + Send + Sync)>);
+
+impl SourceReadCompletion<'_> {
+    fn complete(&mut self) {
+        if let Some(callback) = self.0.take() {
+            callback();
+        }
+    }
+}
+
+impl Drop for SourceReadCompletion<'_> {
+    fn drop(&mut self) {
+        self.complete();
+    }
+}
+
 async fn run_backup_with_source_internal<S: Storage>(
     storage: &S,
     config: BackupConfig,
@@ -2178,6 +2242,7 @@ async fn run_backup_with_source_internal<S: Storage>(
     source: &dyn BackupSource,
     source_read_complete: Option<&(dyn Fn() + Send + Sync)>,
 ) -> Result<BackupResult> {
+    let mut source_completion = SourceReadCompletion(source_read_complete);
     debug!(
         event = "backup.prepare",
         db_path = %config.endpoint_db_path.display(),
@@ -2281,6 +2346,8 @@ async fn run_backup_with_source_internal<S: Storage>(
     let (result_tx, result_rx) = mpsc::channel::<Result<UploadOutcome>>(limits.max_pending_jobs);
     let bytes_sem = Arc::new(Semaphore::new(bytes_budget));
     let uploader = UploadQueue {
+        staged: source_read_complete.map(|_| Arc::new(std::sync::Mutex::new(Vec::new()))),
+        staging_dir: config.filemap_dir.clone(),
         sender: upload_tx.clone(),
         bytes_sem: bytes_sem.clone(),
         bytes_budget,
@@ -3219,11 +3286,28 @@ async fn run_backup_with_source_internal<S: Storage>(
                         });
                     }
                 }
-                drop(upload_tx);
+                source_completion.complete();
 
-                if let Some(callback) = source_read_complete {
-                    callback();
+                // Snapshot reads have finished. Network backpressure may now wait on
+                // the bounded queue without keeping the APFS lease alive. Files hold
+                // encrypted payloads only and are removed on success, error or unwind.
+                if let Some(staged) = &uploader.staged {
+                    let jobs = std::mem::take(&mut *staged.lock().expect("staging queue poisoned"));
+                    let mut network = uploader.clone();
+                    network.staged = None;
+                    for job in jobs {
+                        if cancel.is_cancelled() { return Err(Error::Cancelled); }
+                        match job {
+                            StagedUpload::Direct { hash, source_bytes, file } => {
+                                network.enqueue_direct(hash, std::fs::read(&file)?, source_bytes).await?;
+                            }
+                            StagedUpload::Pack { entries, file } => {
+                                network.enqueue_pack(entries, std::fs::read(&file)?).await?;
+                            }
+                        }
+                    }
                 }
+                drop(upload_tx);
 
                 Ok((snapshot_id, result, upload_started))
             }
@@ -7018,6 +7102,35 @@ fn revalidate_file_for_base_copy(
 
 #[cfg(test)]
 mod tests {
+    use super::{AtomicUsize, Ordering, SourceReadCompletion};
+
+    #[test]
+    fn source_completion_runs_once_on_success_error_and_unwind() {
+        for early_complete in [false, true] {
+            let calls = AtomicUsize::new(0);
+            let callback = || {
+                calls.fetch_add(1, Ordering::SeqCst);
+            };
+            {
+                let mut completion = SourceReadCompletion(Some(&callback));
+                if early_complete {
+                    completion.complete();
+                    completion.complete();
+                }
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+        let calls = AtomicUsize::new(0);
+        let callback = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+        };
+        let panic = std::panic::catch_unwind(|| {
+            let _completion = SourceReadCompletion(Some(&callback));
+            panic!("injected scan panic");
+        });
+        assert!(panic.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
     use std::collections::BTreeMap;
     use std::io;
     use std::path::Path;

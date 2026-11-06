@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "kind": "version-impact-record",
+  "change": {
+    "description": "按序恢复 pending snapshot cleanup 与 released inventory drift，并将快照读取和远端上传分离。",
+    "release_unit_description": "core encrypted staging, daemon recovery, root helper ownership-bound cleanup, CLI and Settings controls.",
+    "affected_contracts": [
+      "public-api",
+      "persistent-state"
+    ]
+  },
+  "classification": {
+    "allowed_impacts": [
+      "patch",
+      "minor",
+      "major"
+    ],
+    "planned": {
+      "impact": "patch",
+      "reasoning": "兼容修复：v4 helper 和 v2 Access 协议不变，控制进度仅增加可选字段，journal schema 与状态不变。已核验的外部 baseline 使用既有字段；旧版本仍可读取并保守阻断 drift。加密临时文件不构成新的持久化格式。",
+      "evidence": [
+        "owned_cleanup_preserves_external_snapshots_added_during_backup",
+        "denied_mount_cleanup_keeps_unsafe_or_racing_rows_blocked",
+        "snapshot_reads_finish_before_direct_and_pack_upload_retries",
+        "source_completion_runs_once_on_success_error_and_unwind",
+        "SnapshotMountHelperReadinessTests pending plus drift cases"
+      ]
+    },
+    "current": {
+      "impact": "patch",
+      "reasoning": "兼容修复：v4 helper 和 v2 Access 协议不变，控制进度仅增加可选字段，journal schema 与状态不变。已核验的外部 baseline 使用既有字段；旧版本仍可读取并保守阻断 drift。加密临时文件不构成新的持久化格式。",
+      "evidence": [
+        "owned_cleanup_preserves_external_snapshots_added_during_backup",
+        "denied_mount_cleanup_keeps_unsafe_or_racing_rows_blocked",
+        "snapshot_reads_finish_before_direct_and_pack_upload_retries",
+        "source_completion_runs_once_on_success_error_and_unwind",
+        "SnapshotMountHelperReadinessTests pending plus drift cases"
+      ]
+    },
+    "verified": {
+      "impact": "patch",
+      "reasoning": "兼容修复：v4 helper 和 v2 Access 协议不变，控制进度仅增加可选字段，journal schema 与状态不变。已核验的外部 baseline 使用既有字段；旧版本仍可读取并保守阻断 drift。加密临时文件不构成新的持久化格式。",
+      "evidence": [
+        "owned_cleanup_preserves_external_snapshots_added_during_backup",
+        "denied_mount_cleanup_keeps_unsafe_or_racing_rows_blocked",
+        "snapshot_reads_finish_before_direct_and_pack_upload_retries",
+        "source_completion_runs_once_on_success_error_and_unwind",
+        "SnapshotMountHelperReadinessTests pending plus drift cases"
+      ]
+    }
+  },
+  "compatibility_evidence": {
+    "public_api": {
+      "change": "compatible",
+      "supported_consumer_range": "Existing v4 helper and v2 Access IPC consumers.",
+      "evidence": [
+        "No removed fields or wire protocol changes; optional operation progress/result fields."
+      ]
+    },
+    "persistent_state": {
+      "applicable": true,
+      "state_description": "Unchanged mounts/leases journal schema, ownership manifests and released baseline fields.",
+      "source_program_compatibility_range": "Supported 0.5.x helpers reading unchanged journal schema.",
+      "evidence": [
+        "Reuses reservation_manifest, snapshot_manifest and existing cleanup_pending/released states; no migration."
+      ]
+    }
+  },
+  "release_unit": {
+    "member_change_records": [
+      "encrypted-source-staging",
+      "ownership-bound-cleanup",
+      "daemon-recovery",
+      "macos-recovery-control"
+    ],
+    "maximum_verified_impact": "patch",
+    "calculation_evidence": [
+      "兼容修复：v4 helper 和 v2 Access 协议不变，控制进度仅增加可选字段，journal schema 与状态不变。已核验的外部 baseline 使用既有字段；旧版本仍可读取并保守阻断 drift。加密临时文件不构成新的持久化格式。"
+    ]
+  }
+}

@@ -9,6 +9,24 @@ enum SnapshotMountOperationProgressPreview {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         for (name, scheme) in [("light", ColorScheme.light), ("dark", ColorScheme.dark)] {
             let content = VStack(alignment: .leading, spacing: 18) {
+                Text("Pending cleanup with inventory drift").font(.headline)
+                SnapshotMountHelperStatusView(
+                    readiness: SnapshotMountHelperReadiness(
+                        reachable: true, daemonReady: true,
+                        buildCommit: String(repeating: "a", count: 40),
+                        expectedBuildCommit: String(repeating: "a", count: 40), helperVersion: "0.5.7",
+                        activeMounts: 75, liveMounts: 0, pendingCleanup: 1,
+                        recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+                        inventoryDriftMounts: 74, pendingCleanupCandidates: 1,
+                        snapshotAccessPendingCleanup: 1
+                    ),
+                    path: nil, version: "0.5.7", error: nil, activeMounts: 75,
+                    pendingCleanup: 1, pendingCleanupCandidates: 1, liveMounts: 0,
+                    recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+                    inventoryDriftMounts: 74, busy: false,
+                    install: {}, recover: {}, retryCleanup: {}, reconcileInventory: { _ in }
+                )
+                Divider()
                 Text("Snapshot inventory reconciliation").font(.headline)
                 Text("While the background operation is running").font(.subheadline)
                 SnapshotStatusFreshnessView(lastUpdatedAt: Date(timeIntervalSince1970: 1_700_000_000), isRefreshing: false)

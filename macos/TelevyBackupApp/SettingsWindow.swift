@@ -1191,7 +1191,7 @@ struct SettingsWindowRootView: View {
                                     .foregroundStyle(.orange)
                                     .fixedSize(horizontal: false, vertical: true)
                             } else if snapshotStatus.pendingCleanup > 0 {
-                                Text("Snapshot Access is retrying \(snapshotStatus.pendingCleanup) earlier cleanup record(s). Wait for it to become idle before retrying helper cleanup.")
+                                Text("Snapshot Access is retrying \(snapshotStatus.pendingCleanup) earlier cleanup record(s). Cleanup is retried automatically; use Retry snapshot cleanup to check recovery.")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.orange)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -1392,6 +1392,9 @@ struct SettingsWindowRootView: View {
                 case let .success(status):
                     switch status.state {
                     case "pending", "running":
+                        if let progress = status.progress?.decoded(SnapshotCleanupProgress.self) {
+                            snapshotOperation.updatePhase(progress)
+                        }
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                             pollSnapshotMountRecovery(
                                 operationId: operationId,

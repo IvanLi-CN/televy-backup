@@ -1,5 +1,7 @@
 # History
 
+- 快照源读取与远端上传曾共享内存队列，Telegram 背压会延长源 lease；同时 cleanup 要求旧 baseline 完全一致，外部 inventory 变化导致 pending 与 released drift 无法按序收敛。修复将加密 pack 暂存与上传分离，并在保留 journal 归属边界的前提下先清理、后重建 released baseline。稳定 Snapshot Access FDA 组件的产品版本差异不是本次故障归因。
+
 - Maintenance UI could report failure after 60 pending/running polls while the daemon continued reconciliation. The status callback also admitted out-of-order replies without a request fence. UI observation now follows the daemon terminal state, preserves accepted operation IDs when a query disconnects, and applies only the latest status response. A synthetic 72-to-zero reply-order regression covers stale overwrites; it does not establish that this race was the sole cause of a particular owner screenshot.
 
 - The first legacy-repair release could leave every old row blocked when the journal omitted its
