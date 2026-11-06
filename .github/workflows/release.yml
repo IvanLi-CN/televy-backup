@@ -1328,7 +1328,7 @@ jobs:
               --mode release --asset-dir release-assets \
               --expected-source-commit "${MERGE_SHA}" \
               --expected-packaging-commit "${POLICY_SHA}" \
-              --skip-bundle-checks
+              --skip-app-bundle-checks
           python3 .github/scripts/verify-dmg-evidence.py \
             --evidence "${RUNNER_TEMP}/dmg-release-events.jsonl" \
             --asset-dir release-assets
