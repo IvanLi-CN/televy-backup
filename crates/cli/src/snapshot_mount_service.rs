@@ -1147,6 +1147,10 @@ fn classify_busy_status(
             lease.state == "released_inventory_drift"
                 && uuid::Uuid::parse_str(&lease.lease_id).is_ok()
         })
+        && (status.inventory_drift_mounts == Some(0)
+            || status.build_commit.as_deref().is_some_and(|commit| {
+                commit.len() == 40 && commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }))
         && status.build_commit.as_deref() != Some(env!("TELEVYBACKUP_BUILD_COMMIT"));
     if current_pending_only {
         // A current component with a different build can be replaced only when the helper has
@@ -2677,6 +2681,21 @@ mod tests {
                 _ => unsafe_status.recoverable_stale_mounts = Some(1),
             }
             assert!(classify_busy_status("update", &unsafe_status).is_err());
+        }
+        for build_commit in [
+            None,
+            Some(String::new()),
+            Some("a".repeat(39)),
+            Some("g".repeat(40)),
+            Some(env!("TELEVYBACKUP_BUILD_COMMIT").into()),
+        ] {
+            let mut unsafe_status = status.clone();
+            unsafe_status.build_commit = build_commit;
+            assert!(
+                classify_busy_status("update", &unsafe_status).is_err(),
+                "mixed cleanup upgrade accepted invalid or current identity: {:?}",
+                unsafe_status.build_commit
+            );
         }
     }
 
