@@ -43,6 +43,7 @@ jobs:
       STABLE_SOURCE_COMMIT: ${{ inputs.stable_source_commit }}
       RC2_TAG: ${{ inputs.rc2_tag }}
       TELEVYBACKUP_RUN_FINDER_ACCEPTANCE: "1"
+      TELEVYBACKUP_FINDER_PRODUCER_COMMIT: ${{ inputs.stable_source_commit }}
       TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY: ${{ secrets.TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY }}
       TELEVYBACKUP_FINDER_VISUAL_REVIEW: >-
         {"instruction_readable":true,"instruction_contrast":true,"arrow_visible":true,"arrow_direction_correct":true,"labels_visible":true,"no_occlusion":true}
