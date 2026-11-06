@@ -170,6 +170,11 @@ assert 'cd "${policy_checkout}"' in release_workflow
 assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"' in release_workflow
 assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
 assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
+reuse_release_assets = release_workflow.split("  reuse_release_assets:", 1)[1].split("  macos-acceptance:", 1)[0]
+assert 'TRUSTED_POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}' in reuse_release_assets
+assert 'git worktree add --detach "${policy_checkout}" "${TRUSTED_POLICY_SHA}"' in reuse_release_assets
+assert 'bash "${policy_checkout}/scripts/macos/verify-release-assets.sh"' in reuse_release_assets
+assert 'python3 "${policy_checkout}/.github/scripts/verify-dmg-evidence.py"' in reuse_release_assets
 build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
 assert "gh release download" not in build_and_assembly
 assert build_and_assembly.count("name: snapshot-helper-source") == 3
@@ -197,6 +202,7 @@ assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
 assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
 assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
+assert "verify-ed25519-receipt.swift" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR --expected-source-commit SHA --expected-packaging-commit SHA [--skip-bundle-checks]" >&2; exit 2; }
-mode=""; asset_dir=""; expected_source_commit=""; expected_packaging_commit=""; skip_bundle_checks=false
+usage() { echo "usage: verify-release-assets.sh --mode release|development --asset-dir DIR --expected-source-commit SHA --expected-packaging-commit SHA [--skip-bundle-checks|--skip-app-bundle-checks]" >&2; exit 2; }
+mode=""; asset_dir=""; expected_source_commit=""; expected_packaging_commit=""; skip_bundle_checks=false; skip_app_bundle_checks=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) mode="${2:-}"; shift 2 ;;
@@ -10,6 +10,7 @@ while [[ $# -gt 0 ]]; do
     --expected-source-commit) expected_source_commit="${2:-}"; shift 2 ;;
     --expected-packaging-commit) expected_packaging_commit="${2:-}"; shift 2 ;;
     --skip-bundle-checks) skip_bundle_checks=true; shift ;;
+    --skip-app-bundle-checks) skip_app_bundle_checks=true; shift ;;
     *) usage ;;
   esac
 done
@@ -369,6 +370,7 @@ if [[ "$skip_bundle_checks" == true ]]; then
   echo "release metadata verified (bundle checks skipped)"
   exit 0
 fi
+if [[ "$skip_app_bundle_checks" != true ]]; then
 app="$asset_dir/TelevyBackup.app"
 reject_symlink_components "$asset_dir"
 [[ ! -L "$app" && -d "$app" ]] || { echo "missing main app bundle or symlinked app: $app" >&2; exit 1; }
@@ -514,6 +516,7 @@ require(component["component_version"] == metadata["componentVersion"], "Snapsho
 require(component["protocol_version"] == metadata["protocolVersion"], "Snapshot Access protocol version mismatch")
 require(component["mount_helper_protocol_version"] == metadata["mountHelperProtocolVersion"], "Snapshot Access mount helper protocol version mismatch")
 PY
+fi
 fi
 verify_dmg_helper_identity() (
   set -euo pipefail

@@ -2,6 +2,7 @@
 """Verify the protected evidence required before publishing a stable macOS build."""
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -12,10 +13,12 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
 REQUIREMENT_NORMALIZER = Path(__file__).resolve().parents[2] / "scripts/macos/normalize-designated-requirement.py"
+RECEIPT_SIGNATURE_VERIFIER = Path(__file__).resolve().parents[2] / "scripts/macos/verify-ed25519-receipt.swift"
 FINDER_ACCEPTANCE_PUBLIC_KEY = Path(__file__).resolve().parents[2] / "assets/release/finder-acceptance-signing-public.pem"
 ALLOWED_SYSTEM_ALIASES = {"/tmp", "/var"}
 RC_TAG_RE = re.compile(r"^v(?P<core>\d+\.\d+\.\d+)-rc\.(?P<ordinal>[1-9]\d*)$")
@@ -24,6 +27,32 @@ MACOS_VERSION_RE = re.compile(r"^(?P<major>\d+)\.(?P<minor>\d+)(?:\.(?P<patch>\d
 
 def fail(message: str) -> "NoReturn":
     raise SystemExit(f"macOS RC acceptance evidence rejected: {message}")
+
+
+def receipt_signature_command(public_key: Path, receipt: Path, signature: Path) -> list[str]:
+    if sys.platform == "darwin":
+        return [
+            "xcrun",
+            "swift",
+            str(RECEIPT_SIGNATURE_VERIFIER),
+            str(public_key),
+            str(receipt),
+            str(signature),
+        ]
+    # Linux quality jobs validate fixtures without an Apple SDK; the release gate runs on macOS.
+    return [
+        "openssl",
+        "pkeyutl",
+        "-verify",
+        "-pubin",
+        "-inkey",
+        str(public_key),
+        "-rawin",
+        "-in",
+        str(receipt),
+        "-sigfile",
+        str(signature),
+    ]
 
 
 def reject_symlink_components(path: Path, name: str) -> None:
@@ -40,11 +69,17 @@ def device_from_plist(raw: bytes, expected_mount: str) -> str:
         payload = plistlib.loads(raw)
     except (plistlib.InvalidFileException, ValueError):
         return ""
+    expected_mount = os.path.realpath(expected_mount)
     entities = list(payload.get("system-entities", []))
     for image in payload.get("images", []):
         entities.extend(image.get("system-entities", []))
     for entity in entities:
-        if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        mount_point = entity.get("mount-point")
+        if (
+            isinstance(mount_point, str)
+            and os.path.realpath(mount_point) == expected_mount
+            and entity.get("dev-entry")
+        ):
             return str(entity["dev-entry"])
     return ""
 
@@ -350,13 +385,15 @@ def verify_finder_acceptance(
             fail(f"{name} capture receipt asset does not match the protected evidence")
         if not signature_path.is_file() or signature_path.is_symlink():
             fail(f"{name} capture signature asset is missing")
-        signature_check = subprocess.run(
-            ["openssl", "pkeyutl", "-verify", "-pubin", "-inkey", str(capture_public_key),
-             "-rawin", "-in", str(receipt_path), "-sigfile", str(signature_path)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        try:
+            signature_check = subprocess.run(
+                receipt_signature_command(capture_public_key, receipt_path, signature_path),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as error:
+            fail(f"{name} receipt signature verifier is unavailable: {error}")
         if signature_check.returncode != 0:
             fail(f"{name} capture receipt signature is invalid")
         if receipt.get("schema_version") != 1:
@@ -586,18 +623,38 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
         if not attached_device:
             attached_device = device_from_hdiutil_info(mount_path)
         if attached_device:
+            detach_device = re.sub(r"s\d+$", "", attached_device)
             detach = subprocess.run(
-                ["hdiutil", "detach", attached_device],
+                ["hdiutil", "detach", "-force", detach_device],
                 capture_output=True,
                 text=True,
                 check=False,
             )
             if detach.returncode != 0:
                 cleanup_error = f"{name} DMG exact-device detach failed: {detach.stderr.strip() or detach.returncode}"
-        try:
-            mount_path.rmdir()
-        except OSError as error:
-            cleanup_error = cleanup_error or f"{name} DMG mount cleanup failed: {error}"
+        resolved_mount_path = Path(os.path.realpath(mount_path))
+        if os.path.ismount(resolved_mount_path):
+            unmount = subprocess.run(
+                ["diskutil", "unmount", "force", str(resolved_mount_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if unmount.returncode != 0:
+                cleanup_error = cleanup_error or (
+                    f"{name} DMG mount unmount failed: "
+                    f"{unmount.stderr.strip() or unmount.returncode}"
+                )
+        cleanup_deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                mount_path.rmdir()
+                break
+            except OSError as error:
+                if error.errno != errno.EBUSY or time.monotonic() >= cleanup_deadline:
+                    cleanup_error = cleanup_error or f"{name} DMG mount cleanup failed: {error}"
+                    break
+                time.sleep(0.1)
         if cleanup_error:
             fail(cleanup_error)
 

@@ -352,10 +352,16 @@ def find_local_reservation_by_claim(
     if not claim_key.strip() or not owner.strip():
         raise ReservationError("reservation owner and claim key are required")
     validate_release_target(release_target, policy)
-    refs = _git("for-each-ref", "--format=%(refname)", "refs/tags/release-reservation", cwd=cwd).splitlines()
+    refs = _git(
+        "for-each-ref", "--format=%(refname)",
+        "refs/tags/release-reservation", "refs/tags/release-reservation-reclaimed", cwd=cwd,
+    ).splitlines()
     matches: list[dict[str, Any]] = []
     for ref in refs:
-        if not ref.startswith("refs/tags/release-reservation/v"):
+        if not (
+            ref.startswith("refs/tags/release-reservation/v")
+            or ref.startswith("refs/tags/release-reservation-reclaimed/v")
+        ):
             continue
         target = local_ref_target(ref, cwd)
         if not target:

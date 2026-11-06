@@ -1320,17 +1320,26 @@ jobs:
         env:
           MERGE_SHA: ${{ needs.resolve.outputs.merge_sha }}
           POLICY_SHA: ${{ needs.resolve.outputs.recovery_policy_sha }}
+          TRUSTED_POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}
         run: |
           set -euo pipefail
-          git show "${MERGE_SHA}:VERSION" > VERSION
+          git cat-file -e "${TRUSTED_POLICY_SHA}^{commit}"
+          policy_checkout="${RUNNER_TEMP}/release-policy"
+          git worktree add --detach "${policy_checkout}" "${TRUSTED_POLICY_SHA}"
+          policy_cleanup() {
+            git worktree remove --force "${policy_checkout}" >/dev/null 2>&1 || true
+          }
+          trap policy_cleanup EXIT
+          git show "${MERGE_SHA}:VERSION" > "${policy_checkout}/VERSION"
           DMG_EVIDENCE_FILE="${RUNNER_TEMP}/dmg-release-events.jsonl" \
-            bash scripts/macos/verify-release-assets.sh \
-              --mode release --asset-dir release-assets \
+            bash "${policy_checkout}/scripts/macos/verify-release-assets.sh" \
+              --mode release --asset-dir "$GITHUB_WORKSPACE/release-assets" \
               --expected-source-commit "${MERGE_SHA}" \
-              --expected-packaging-commit "${POLICY_SHA}"
-          python3 .github/scripts/verify-dmg-evidence.py \
+              --expected-packaging-commit "${POLICY_SHA}" \
+              --skip-app-bundle-checks
+          python3 "${policy_checkout}/.github/scripts/verify-dmg-evidence.py" \
             --evidence "${RUNNER_TEMP}/dmg-release-events.jsonl" \
-            --asset-dir release-assets
+            --asset-dir "$GITHUB_WORKSPACE/release-assets"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ${{ needs.resolve.outputs.release_assets_artifact_name }}
