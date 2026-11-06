@@ -2,6 +2,7 @@
 """Verify the protected evidence required before publishing a stable macOS build."""
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -40,11 +42,17 @@ def device_from_plist(raw: bytes, expected_mount: str) -> str:
         payload = plistlib.loads(raw)
     except (plistlib.InvalidFileException, ValueError):
         return ""
+    expected_mount = os.path.realpath(expected_mount)
     entities = list(payload.get("system-entities", []))
     for image in payload.get("images", []):
         entities.extend(image.get("system-entities", []))
     for entity in entities:
-        if entity.get("mount-point") == expected_mount and entity.get("dev-entry"):
+        mount_point = entity.get("mount-point")
+        if (
+            isinstance(mount_point, str)
+            and os.path.realpath(mount_point) == expected_mount
+            and entity.get("dev-entry")
+        ):
             return str(entity["dev-entry"])
     return ""
 
@@ -586,18 +594,38 @@ def helper_identity_from_dmg(dmg_path: str, name: str) -> dict[str, str | int]:
         if not attached_device:
             attached_device = device_from_hdiutil_info(mount_path)
         if attached_device:
+            detach_device = re.sub(r"s\d+$", "", attached_device)
             detach = subprocess.run(
-                ["hdiutil", "detach", attached_device],
+                ["hdiutil", "detach", "-force", detach_device],
                 capture_output=True,
                 text=True,
                 check=False,
             )
             if detach.returncode != 0:
                 cleanup_error = f"{name} DMG exact-device detach failed: {detach.stderr.strip() or detach.returncode}"
-        try:
-            mount_path.rmdir()
-        except OSError as error:
-            cleanup_error = cleanup_error or f"{name} DMG mount cleanup failed: {error}"
+        resolved_mount_path = Path(os.path.realpath(mount_path))
+        if os.path.ismount(resolved_mount_path):
+            unmount = subprocess.run(
+                ["diskutil", "unmount", "force", str(resolved_mount_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if unmount.returncode != 0:
+                cleanup_error = cleanup_error or (
+                    f"{name} DMG mount unmount failed: "
+                    f"{unmount.stderr.strip() or unmount.returncode}"
+                )
+        cleanup_deadline = time.monotonic() + 5.0
+        while True:
+            try:
+                mount_path.rmdir()
+                break
+            except OSError as error:
+                if error.errno != errno.EBUSY or time.monotonic() >= cleanup_deadline:
+                    cleanup_error = cleanup_error or f"{name} DMG mount cleanup failed: {error}"
+                    break
+                time.sleep(0.1)
         if cleanup_error:
             fail(cleanup_error)
 
