@@ -44,7 +44,7 @@ jobs:
       RC2_TAG: ${{ inputs.rc2_tag }}
       TELEVYBACKUP_RUN_FINDER_ACCEPTANCE: "1"
       TELEVYBACKUP_FINDER_PRODUCER_COMMIT: ${{ inputs.stable_source_commit }}
-      TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY: ${{ secrets.TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY }}
+      TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY_MATERIAL: ${{ secrets.TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY }}
       TELEVYBACKUP_FINDER_VISUAL_REVIEW: >-
         {"instruction_readable":true,"instruction_contrast":true,"arrow_visible":true,"arrow_direction_correct":true,"labels_visible":true,"no_occlusion":true}
     steps:
@@ -88,7 +88,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p acceptance
-          bash scripts/macos/finder-dmg-acceptance.sh \
+          signing_key="${RUNNER_TEMP}/finder-acceptance-signing-key.pem"
+          umask 077
+          printf '%s\n' "${TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY_MATERIAL}" > "${signing_key}"
+          trap 'rm -f "${signing_key}"' EXIT
+          TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY="${signing_key}" bash scripts/macos/finder-dmg-acceptance.sh \
             --dmg "release-assets/TelevyBackup-${STABLE_VERSION}.dmg" \
             --evidence-dir acceptance \
             --upload-rc2-tag "${RC2_TAG}"
