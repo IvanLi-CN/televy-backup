@@ -2613,6 +2613,7 @@ async fn release_request_with_observation(
             &manifest_json,
             &reservation_manifest_json,
             reservation_manifest_valid,
+            &SystemLegacyRepairObservation,
         )
         .await;
     }
@@ -2646,7 +2647,11 @@ async fn release_request_with_observation(
             cleanup_state: cleanup_state.to_string(),
         });
     }
-    let manifest = match parse_journal_manifest(&manifest_json) {
+    let manifest = match if state == "cleanup_pending" && manifest_json == "[]" {
+        Ok(Vec::new())
+    } else {
+        parse_journal_manifest(&manifest_json)
+    } {
         Ok(manifest) => manifest,
         Err(_) => {
             update_state(journal, lease_id, "cleanup_pending").await?;
@@ -2683,7 +2688,7 @@ async fn release_request_with_observation(
         !snapshot
             .device_identifier
             .eq_ignore_ascii_case(&device_identifier)
-    }) || validate_device_volume_binding(&device_identifier, &volume_uuid).is_err()
+    }) || !observation.binding_valid(&device_identifier, &volume_uuid)
     {
         update_state(journal, lease_id, "cleanup_pending").await?;
         return Ok(MountReleaseResult {
@@ -2691,17 +2696,10 @@ async fn release_request_with_observation(
             cleanup_state: "cleanup_pending".to_string(),
         });
     }
-    if !inventory_matches_expected(&device_identifier, &reservation_manifest_json, &manifest)
-        && !inventory_matches_reservation_baseline(&device_identifier, &reservation_manifest_json)
-    {
-        update_state(journal, lease_id, "cleanup_pending").await?;
-        return Ok(MountReleaseResult {
-            lease_id: lease_id.to_string(),
-            cleanup_state: "cleanup_pending".to_string(),
-        });
-    }
+    // Inventory may legitimately change during a long read. After verifying the managed
+    // mount identity, deletion rechecks the journal and preserves every unowned UUID.
     if mount_root.is_empty() {
-        let cleanup_state = if delete_manifest_and_record_tombstone(
+        let cleanup_state = if delete_manifest_and_record_tombstone_with_observation(
             journal,
             lease_id,
             &volume_uuid,
@@ -2709,6 +2707,7 @@ async fn release_request_with_observation(
             &reservation_manifest_json,
             &manifest_json,
             &manifest,
+            observation,
         )
         .await
             == "released"
@@ -2767,6 +2766,7 @@ async fn reconcile_released_tombstone(
     snapshot_manifest_json: &str,
     reservation_manifest_json: &str,
     reservation_manifest_valid: i64,
+    observation: &impl LegacyRepairObservation,
 ) -> Result<MountReleaseResult, MountHelperError> {
     if !mount_root.is_empty() || snapshot_manifest_json != "[]" || reservation_manifest_valid != 1 {
         return Err(MountHelperError::Protocol(
@@ -2775,9 +2775,13 @@ async fn reconcile_released_tombstone(
     }
     validate_uuid(volume_uuid)?;
     validate_device(device_identifier)?;
-    validate_device_volume_binding(device_identifier, volume_uuid)?;
+    if !observation.binding_valid(device_identifier, volume_uuid) {
+        return Err(MountHelperError::Protocol(
+            "released snapshot volume binding changed".into(),
+        ));
+    }
     let baseline = parse_reservation_manifest(reservation_manifest_json)?;
-    let current_manifest = snapshot_inventory_manifest(device_identifier)?;
+    let current_manifest = observation.inventory(device_identifier)?;
     if manifests_equal(&current_manifest, &baseline) {
         return Ok(MountReleaseResult {
             lease_id: lease_id.to_string(),
@@ -2800,7 +2804,7 @@ async fn reconcile_released_tombstone(
             "released snapshot tombstone changed during reconciliation".into(),
         ));
     }
-    let confirmed_manifest = snapshot_inventory_manifest(device_identifier)?;
+    let confirmed_manifest = observation.inventory(device_identifier)?;
     if !manifests_equal(&confirmed_manifest, &current_manifest) {
         return Err(MountHelperError::Protocol(
             "released snapshot tombstone inventory changed during reconciliation".into(),
@@ -2999,6 +3003,7 @@ async fn cleanup_mount(
 }
 
 trait CleanupObservation {
+    fn binding_valid(&self, device: &str, volume: &str) -> bool;
     fn unmounted_root(&self, root: &Path, name: &str, device: &str, volume: &str) -> bool;
     fn remove_root(&self, root: &Path) -> bool;
     fn inventory(&self, device: &str) -> Result<Vec<MountSnapshotRef>, MountHelperError>;
@@ -3011,6 +3016,9 @@ trait CleanupObservation {
 
 struct SystemCleanupObservation;
 impl CleanupObservation for SystemCleanupObservation {
+    fn binding_valid(&self, device: &str, volume: &str) -> bool {
+        validate_device_volume_binding(device, volume).is_ok()
+    }
     fn unmounted_root(&self, root: &Path, name: &str, device: &str, volume: &str) -> bool {
         validate_legacy_mount_root(root)
             && validate_device_volume_binding(device, volume).is_ok()
@@ -3148,19 +3156,24 @@ async fn cleanup_unmounted_prepared_with_observation(
     if !valid || !observation.unmounted_root(root, &name, device, volume) {
         return "cleanup_pending";
     }
-    let Ok(mut expected_inventory) = parse_reservation_manifest(baseline_json) else {
+    let Ok(baseline) = parse_reservation_manifest(baseline_json) else {
         return "cleanup_pending";
     };
-    let baseline = expected_inventory.clone();
-    expected_inventory.extend_from_slice(manifest);
-    if !observation.inventory(device).is_ok_and(|current| {
-        manifests_equal(&current, &expected_inventory) || manifests_equal(&current, &baseline)
-    }) {
+    let Ok(current) = observation.inventory(device) else {
+        return "cleanup_pending";
+    };
+    if cleanup_inventory_partition(&current, &baseline, manifest, device).is_none() {
         return "cleanup_pending";
     }
     // Only an empty, root-owned managed directory is removed. Repeat kernel/volume checks
     // immediately before snapshot deletion; a substituted or mounted root stays blocked.
     if !observation.remove_root(root) || !observation.unmounted_root(root, &name, device, volume) {
+        return "cleanup_pending";
+    }
+    if !observation
+        .inventory(device)
+        .is_ok_and(|confirmed| manifests_equal(&current, &confirmed))
+    {
         return "cleanup_pending";
     }
     delete_manifest_and_record_tombstone_with_observation(
@@ -3435,6 +3448,33 @@ async fn delete_manifest_and_record_tombstone_with_observation(
         Ok(manifest) => manifest,
         Err(_) => return "cleanup_pending",
     };
+    let Ok(current) = observation.inventory(device_identifier) else {
+        return "cleanup_pending";
+    };
+    let Some((retained, present_owned)) =
+        cleanup_inventory_partition(&current, &reservation_manifest, manifest, device_identifier)
+    else {
+        return "cleanup_pending";
+    };
+    let Ok(retained_json) = serde_json::to_string(&retained) else {
+        return "cleanup_pending";
+    };
+    // This function is reached only after proving the managed root is unmounted.
+    // The root helper's mutation lock serializes callers; the CAS binds the new
+    // baseline to the original ownership record and rejects another volume owner.
+    let updated = sqlx::query("UPDATE mounts SET reservation_manifest = ? WHERE lease_id = ? AND volume_uuid = ? AND device_identifier = ? AND uid > 0 AND snapshot_manifest = ? AND reservation_manifest = ? AND reservation_manifest_valid = 1 AND state IN ('prepared', 'active', 'cleanup_pending') AND NOT EXISTS (SELECT 1 FROM mounts AS other WHERE other.lease_id != mounts.lease_id AND lower(other.volume_uuid) = lower(mounts.volume_uuid) AND other.state IS NOT 'released')")
+        .bind(&retained_json).bind(lease_id).bind(volume_uuid).bind(device_identifier)
+        .bind(manifest_json).bind(reservation_manifest_json).execute(journal).await;
+    if !matches!(updated, Ok(result) if result.rows_affected() == 1)
+        || !observation
+            .inventory(device_identifier)
+            .is_ok_and(|confirmed| manifests_equal(&confirmed, &current))
+    {
+        return "cleanup_pending";
+    }
+    let reservation_manifest_json = retained_json.as_str();
+    let reservation_manifest = retained;
+    let manifest = present_owned.as_slice();
     // A previous process may have deleted the recorded snapshots and crashed before it could
     // persist the released tombstone. An exact reservation-baseline inventory proves that the
     // recorded snapshots are already absent, so the journal transition can be retried safely.
@@ -3457,7 +3497,11 @@ async fn delete_manifest_and_record_tombstone_with_observation(
     {
         return "cleanup_pending";
     }
-    let confirmed_deleted = observation.delete(volume_uuid, manifest).err();
+    let confirmed_deleted = if manifest.is_empty() {
+        None
+    } else {
+        observation.delete(volume_uuid, manifest).err()
+    };
     if let Some(confirmed_deleted) = confirmed_deleted {
         retain_unconfirmed_manifest_after_delete_failure(
             observation,
@@ -3475,7 +3519,7 @@ async fn delete_manifest_and_record_tombstone_with_observation(
         Ok(manifest) => manifest,
         Err(_) => {
             let _ = sqlx::query(
-                "UPDATE mounts SET snapshot_manifest = '[]', state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
+                "UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
             )
             .bind(lease_id)
             .bind(manifest_json)
@@ -3484,10 +3528,13 @@ async fn delete_manifest_and_record_tombstone_with_observation(
             return "cleanup_pending";
         }
     };
-    // A post-deletion inventory change is unowned; keep the original baseline and block reuse.
+    // A post-deletion inventory change is unowned; keep owned UUID provenance until the
+    // released transition commits. An empty manifest on
+    // an unmounted pending row denotes an unresolved reservation; clearing it here would route
+    // retries away from ownership-bound cleanup and strand any newly added external snapshot.
     if !manifests_equal(&current_manifest, &reservation_manifest) {
         let _ = sqlx::query(
-            "UPDATE mounts SET snapshot_manifest = '[]', state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
+            "UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
         )
         .bind(lease_id)
         .bind(manifest_json)
@@ -3515,12 +3562,10 @@ async fn record_released_tombstone(
     if matches!(updated, Ok(result) if result.rows_affected() == 1) {
         "released"
     } else {
-        let _ = sqlx::query(
-            "UPDATE mounts SET snapshot_manifest = '[]', state = 'cleanup_pending' WHERE lease_id = ?",
-        )
-        .bind(lease_id)
-        .execute(journal)
-        .await;
+        let _ = sqlx::query("UPDATE mounts SET state = 'cleanup_pending' WHERE lease_id = ?")
+            .bind(lease_id)
+            .execute(journal)
+            .await;
         "cleanup_pending"
     }
 }
@@ -3543,8 +3588,14 @@ async fn retain_unconfirmed_manifest_after_delete_failure(
         ),
         Err(_) => manifest_entries_remaining_after_partial_delete(manifest, confirmed_deleted, &[]),
     };
-    let remaining_manifest_json =
-        serde_json::to_string(&remaining_manifest).unwrap_or_else(|_| manifest_json.to_string());
+    let remaining_manifest_json = if remaining_manifest.is_empty() {
+        // Do not erase the distinction between confirmed owned cleanup and a reservation
+        // whose snapshot identity was never recorded. Already absent owned UUIDs are safe
+        // to retain: the next inventory partition skips their deletion.
+        manifest_json.to_string()
+    } else {
+        serde_json::to_string(&remaining_manifest).unwrap_or_else(|_| manifest_json.to_string())
+    };
     let _ = sqlx::query(
         "UPDATE mounts SET snapshot_manifest = ?, state = 'cleanup_pending' WHERE lease_id = ? AND snapshot_manifest = ?",
     )
@@ -3608,6 +3659,20 @@ fn infer_legacy_reservation_baseline(
 /// journal stored device nodes in each entry, so comparing the whole pair would make every row
 /// look foreign after a device-node renumbering. A duplicate UUID is ambiguous and is rejected;
 /// snapshots not present in the current inventory are already gone and are not sent to delete.
+fn cleanup_inventory_partition(
+    current: &[MountSnapshotRef],
+    baseline: &[MountSnapshotRef],
+    owned: &[MountSnapshotRef],
+    device: &str,
+) -> Option<(Vec<MountSnapshotRef>, Vec<MountSnapshotRef>)> {
+    if current.iter().chain(baseline).chain(owned).any(|entry| {
+        !entry.device_identifier.eq_ignore_ascii_case(device) || validate_uuid(&entry.uuid).is_err()
+    }) {
+        return None;
+    }
+    partition_legacy_manifests(current, Some(baseline), owned)
+}
+
 fn partition_legacy_manifests(
     current_manifest: &[MountSnapshotRef],
     stored_baseline: Option<&[MountSnapshotRef]>,
@@ -5083,7 +5148,156 @@ mod tests {
         removals: std::sync::atomic::AtomicUsize,
         deletes: std::sync::atomic::AtomicUsize,
     }
+
+    #[tokio::test]
+    async fn owned_cleanup_preserves_external_snapshots_added_during_backup() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease = Uuid::new_v4().to_string();
+        let volume = "B8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        let owned = MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: Uuid::new_v4().to_string(),
+        };
+        let external = MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: Uuid::new_v4().to_string(),
+        };
+        let manifest = serde_json::to_string(std::slice::from_ref(&owned)).unwrap();
+        let root = expected_mount_root(501, &lease).unwrap();
+        for _ in 0..3 {
+            sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?,501,?,'disk5s1','','','[]','[]',1,'released',datetime('now'),datetime('now'))")
+                .bind(Uuid::new_v4().to_string()).bind(volume).execute(&journal).await.unwrap();
+        }
+        sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?,501,?,'disk5s1','com.apple.TimeMachine.synthetic',?,?,'[]',1,'cleanup_pending',datetime('now'),datetime('now'))")
+            .bind(&lease).bind(volume).bind(root.to_str().unwrap()).bind(&manifest).execute(&journal).await.unwrap();
+        let observation = FailedMountFixture {
+            current: std::sync::Mutex::new(vec![owned.clone(), external.clone()]),
+            root_safe: true,
+            ..Default::default()
+        };
+        let before = classify_status_rows_with_observation(&journal, Some(501), None, &observation)
+            .await
+            .unwrap();
+        assert_eq!(before.pending_cleanup, 1);
+        assert_eq!(before.inventory_drift_mounts, 3);
+        let result =
+            release_request_with_observation(501, 501, &lease, false, &journal, &observation)
+                .await
+                .unwrap();
+        assert_eq!(result.cleanup_state, "released");
+        let after = classify_status_rows_with_observation(&journal, Some(501), None, &observation)
+            .await
+            .unwrap();
+        assert_eq!(after.pending_cleanup, 0);
+        assert_eq!(after.inventory_drift_mounts, 3);
+        for drift in after.inventory_drift_leases {
+            reconcile_released_tombstone(
+                &journal,
+                501,
+                &drift.lease_id,
+                volume,
+                "disk5s1",
+                "",
+                "[]",
+                "[]",
+                1,
+                &observation,
+            )
+            .await
+            .unwrap();
+        }
+        let final_status =
+            classify_status_rows_with_observation(&journal, Some(501), None, &observation)
+                .await
+                .unwrap();
+        assert_eq!(final_status.active_mounts, 0);
+        // A repeated release does not delete anything. Released rows require explicit reconciliation.
+        let again =
+            release_request_with_observation(501, 501, &lease, false, &journal, &observation)
+                .await
+                .unwrap();
+        assert_eq!(again.cleanup_state, "reconcile_required");
+        assert_eq!(
+            observation
+                .deletes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(observation.current.lock().unwrap().len(), 1);
+        assert_eq!(observation.current.lock().unwrap()[0].uuid, external.uuid);
+    }
+
+    #[tokio::test]
+    async fn release_retries_inventory_drift_after_owned_snapshot_deletion() {
+        let journal = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        init_journal(&journal).await.unwrap();
+        let lease = Uuid::new_v4().to_string();
+        let volume = "B8A38394-49AE-42F9-85FB-14DD9EA549FA";
+        let owned = MountSnapshotRef {
+            device_identifier: "disk5s1".into(),
+            uuid: Uuid::new_v4().to_string(),
+        };
+        let manifest = serde_json::to_string(std::slice::from_ref(&owned)).unwrap();
+        sqlx::query("INSERT INTO mounts (lease_id, uid, volume_uuid, device_identifier, snapshot_name, mount_root, snapshot_manifest, reservation_manifest, reservation_manifest_valid, state, created_at, last_renewed_at) VALUES (?,501,?,'disk5s1','com.apple.TimeMachine.synthetic','',?,'[]',1,'prepared',datetime('now'),datetime('now'))")
+            .bind(&lease).bind(volume).bind(&manifest).execute(&journal).await.unwrap();
+        let observation = FailedMountFixture {
+            current: std::sync::Mutex::new(vec![owned]),
+            // The fifth observation is the first inventory read after deletion.
+            drift_on_inventory_call: Some(4),
+            ..Default::default()
+        };
+        let first =
+            release_request_with_observation(501, 501, &lease, false, &journal, &observation)
+                .await
+                .unwrap();
+        assert_eq!(first.cleanup_state, "cleanup_pending");
+        let retained: String =
+            sqlx::query_scalar("SELECT snapshot_manifest FROM mounts WHERE lease_id = ?")
+                .bind(&lease)
+                .fetch_one(&journal)
+                .await
+                .unwrap();
+        assert_eq!(
+            retained, manifest,
+            "keep ownership provenance until the released transition"
+        );
+        let retry =
+            release_request_with_observation(501, 501, &lease, false, &journal, &observation)
+                .await
+                .unwrap();
+        assert_eq!(retry.cleanup_state, "released");
+        let final_status =
+            classify_status_rows_with_observation(&journal, Some(501), None, &observation)
+                .await
+                .unwrap();
+        assert_eq!(final_status.active_mounts, 0);
+        let inventory = CleanupObservation::inventory(&observation, "disk5s1").unwrap();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].uuid, "E8A38394-49AE-42F9-85FB-14DD9EA549FA");
+        assert_eq!(
+            observation
+                .deletes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let again =
+            release_request_with_observation(501, 501, &lease, false, &journal, &observation)
+                .await
+                .unwrap();
+        assert_eq!(again.cleanup_state, "reconcile_required");
+        assert_eq!(
+            observation
+                .deletes
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
     impl CleanupObservation for FailedMountFixture {
+        fn binding_valid(&self, _: &str, _: &str) -> bool {
+            true
+        }
         fn unmounted_root(&self, _: &Path, _: &str, _: &str, _: &str) -> bool {
             let call = self
                 .proofs

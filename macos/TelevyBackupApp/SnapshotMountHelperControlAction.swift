@@ -37,6 +37,15 @@ struct SnapshotMountOperationTracker {
         isObserving = true
     }
 
+    mutating func updatePhase(_ progress: SnapshotCleanupProgress) {
+        guard isActive else { return }
+        switch progress.stage {
+        case "cleanup_retry": label = "Retrying snapshot cleanup"
+        case "inventory_reconcile": label = "Reconciling snapshot inventory (\(progress.remaining_drift ?? 0) remaining)"
+        default: break
+        }
+    }
+
     mutating func suspend() { isObserving = false }
 
     mutating func observe(state: String) {
@@ -69,4 +78,10 @@ struct SnapshotStatusRefreshTracker {
         generation += 1
         isRefreshing = false
     }
+}
+
+struct SnapshotCleanupProgress: Decodable {
+    let stage: String
+    let remaining_pending: UInt32?
+    let remaining_drift: UInt32?
 }

@@ -2349,6 +2349,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot_maintenance = Arc::new(AsyncMutex::new(()));
     let settings_reload_requested = Arc::new(AtomicBool::new(false));
     let lifecycle = Arc::new(DaemonLifecycle::default());
+    let snapshot_recovery_notify = Arc::new(Notify::new());
+    {
+        let maintenance = snapshot_maintenance.clone();
+        let notify = snapshot_recovery_notify.clone();
+        let config_root = config_root.clone();
+        let data_root = data_root.clone();
+        let shutdown = lifecycle.shutdown_token();
+        tokio::spawn(async move {
+            let mut delay = Duration::from_secs(5);
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(delay) => {},
+                    _ = notify.notified() => {},
+                }
+                let Ok(_guard) = maintenance.try_lock() else {
+                    continue;
+                };
+                let client = SnapshotClient::for_environment(&config_root, &data_root);
+                // Do not start or repair services from maintenance. Active readers own their
+                // lease; pending Access cleanup is retried by Access every five seconds.
+                let Ok(status) = client.status().await else {
+                    delay = Duration::from_secs(60);
+                    continue;
+                };
+                if status.active_leases > 0 {
+                    continue;
+                }
+                match control_ipc::retry_snapshot_cleanup(&client, None).await {
+                    Ok(result) => {
+                        if result.get("released").and_then(|v| v.as_u64()).unwrap_or(0) > 0
+                            || result.get("inventoryReconciliation").is_some()
+                        {
+                            tracing::info!(event = "snapshot.cleanup_recovered", result = %result, "snapshot.cleanup_recovered");
+                        }
+                        delay = Duration::from_secs(5);
+                    }
+                    Err(error) => {
+                        tracing::debug!(event = "snapshot.cleanup_retry_blocked", error_code = %error.code, details = %error.details, "snapshot.cleanup_retry_blocked");
+                        delay = (delay * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        });
+    }
     let runtime_logging = Arc::new(RwLock::new(televy_backup_core::local_settings::resolve(
         &config_root,
     )));
@@ -3298,6 +3343,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
+            let db_path = index_dir.join(format!("index.{}.sqlite", ep.id));
+            let filemap_dir = index_dir.join("filemaps").join(&ep.id);
+            let dedupe_db_path = index_dir
+                .join("dedupe")
+                .join(format!("dedupe.{}.sqlite", ep.id));
+            let dedupe_pending_db_path = index_dir
+                .join("dedupe")
+                .join(format!("pending.{}.sqlite", ep.id));
+
+            let sink = StatusProgressSink {
+                target_id: target.id.clone(),
+                state: status_state.clone(),
+            };
+            let progress_sink = Some(&sink as &dyn ProgressSink);
+            let prepare_remote = preflight_remote_first_index_sync_daemon(
+                storage,
+                &master_key,
+                &target.id,
+                &target.source_path,
+                &db_path,
+                &filemap_dir,
+                &dedupe_db_path,
+                is_likely_private_chat_id(&ep.chat_id),
+                progress_sink,
+                &task_cancel,
+            )
+            .await;
+            // Remote preparation must finish before acquiring a source snapshot.
+            if let Err(error) = &prepare_remote {
+                tracing::warn!(
+                    event = "prepare.remote_failed",
+                    error_code = error.code(),
+                    "prepare.remote_failed"
+                );
+            }
             let snapshot_client = SnapshotClient::for_environment(&config_root, &data_root);
             let enabled_snapshot_volumes = settings
                 .snapshot_volumes
@@ -3309,7 +3389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let snapshot_lease_state: Arc<
                 Mutex<Option<televybackup_snapshot_access::LeaseResult>>,
             > = Arc::new(Mutex::new(None));
-            if !enabled_snapshot_volumes.is_empty() {
+            if prepare_remote.is_ok() && !enabled_snapshot_volumes.is_empty() {
                 if !Path::new(&target.source_path).exists() {
                     tracing::warn!(
                         event = "snapshot.waiting_for_source_volume",
@@ -3469,34 +3549,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let db_path = index_dir.join(format!("index.{}.sqlite", ep.id));
-            let filemap_dir = index_dir.join("filemaps").join(&ep.id);
-            let dedupe_db_path = index_dir
-                .join("dedupe")
-                .join(format!("dedupe.{}.sqlite", ep.id));
-            let dedupe_pending_db_path = index_dir
-                .join("dedupe")
-                .join(format!("pending.{}.sqlite", ep.id));
-
-            let sink = StatusProgressSink {
-                target_id: target.id.clone(),
-                state: status_state.clone(),
-            };
-            let progress_sink = Some(&sink as &dyn ProgressSink);
-            let prepare_remote = preflight_remote_first_index_sync_daemon(
-                storage,
-                &master_key,
-                &target.id,
-                &target.source_path,
-                &db_path,
-                &filemap_dir,
-                &dedupe_db_path,
-                is_likely_private_chat_id(&ep.chat_id),
-                progress_sink,
-                &task_cancel,
-            )
-            .await;
-            let quick_stats = if let Some(source) = snapshot_source.as_ref() {
+            let quick_stats = if prepare_remote.is_err() {
+                None
+            } else if let Some(source) = snapshot_source.as_ref() {
                 match source.entries(Some(&task_cancel)) {
                     Ok(entries) => Some(SourceQuickStats {
                         files_total: entries.iter().filter(|entry| entry.kind == "file").count()
@@ -3535,12 +3590,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let lease_state = Arc::clone(&snapshot_lease_state);
                 let handles = Arc::clone(&release_handles);
                 let client = snapshot_client.clone();
+                let notify = snapshot_recovery_notify.clone();
                 move || {
                     let lease = lease_state.lock().ok().and_then(|mut slot| slot.take());
                     let Some(lease) = lease else {
                         return;
                     };
                     let client_for_task = client.clone();
+                    let notify = notify.clone();
                     let handle = tokio::spawn(async move {
                         match release_snapshot_lease_with_retry(&client_for_task, &lease.lease_id)
                             .await
@@ -3558,6 +3615,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 "snapshot.release_failed"
                             ),
                         }
+                        notify.notify_one();
                     });
                     if let Ok(mut slot) = handles.lock() {
                         *slot = Some(handle);

@@ -138,7 +138,7 @@ enum SnapshotMountHelperReadinessTests {
             pendingCleanupCandidates: 1,
             snapshotAccessPendingCleanup: 1
         )
-        expectReadiness(!accessPending.canRetryPendingCleanup, "Snapshot Access cleanup must gate helper cleanup retry")
+        expectReadiness(accessPending.canRetryPendingCleanup, "Snapshot Access pending cleanup must allow a guarded retry that waits for Access cleanup")
         expectReadiness(accessPending.title == "Snapshot Access cleanup required", "Snapshot Access cleanup must be visible as the blocking operation")
         let staleAccessBusy = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: false, buildCommit: String(repeating: "b", count: 40),
@@ -221,6 +221,14 @@ enum SnapshotMountHelperReadinessTests {
         expectReadiness(inventoryDrift.title == "Snapshot inventory reconciliation required", "inventory drift must have a dedicated blocking title")
         expectReadiness(inventoryDrift.canReconcileInventory, "a verified inventory-only drift must expose reconciliation")
         expectReadiness(!inventoryDrift.isOperational, "inventory drift must keep strict mode unavailable")
+        let pendingWithDrift = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: true, buildCommit: candidateCommit,
+            expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
+            activeMounts: 3, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+            inventoryDriftMounts: 2, pendingCleanupCandidates: 1
+        )
+        expectReadiness(pendingWithDrift.canRetryPendingCleanup, "pending cleanup must remain actionable while released inventory drift is present")
         let legacyRepair = SnapshotMountHelperReadiness(
             reachable: true, daemonReady: true, buildCommit: candidateCommit,
             expectedBuildCommit: candidateCommit, helperVersion: "0.5.7",
@@ -285,6 +293,15 @@ enum SnapshotMountHelperReadinessTests {
             completion: { success, error, _ in result = (success, error) }
         )
         expectReadiness(result?.0 == true && result?.1 == nil, "the candidate replacement must complete confirmation")
+        let cleanupBlockedUpgrade = SnapshotMountHelperReadiness(
+            reachable: true, daemonReady: false,
+            buildCommit: String(repeating: "0", count: 40), expectedBuildCommit: candidateCommit,
+            helperVersion: "0.5.7", activeMounts: 75, liveMounts: 0, pendingCleanup: 1,
+            recoverableStaleMounts: 0, unknownBlockingMounts: 0,
+            inventoryDriftMounts: 74, pendingCleanupCandidates: 1, snapshotAccessPendingCleanup: 1
+        )
+        expectReadiness(cleanupBlockedUpgrade.canUpdate, "standard helper update must preserve pending cleanup with released drift")
+        expectReadiness(!cleanupBlockedUpgrade.isOperational, "replacement admission never proves strict readiness")
         print("OK: SnapshotMountHelperReadinessTests")
     }
 

@@ -896,3 +896,111 @@ async fn retention_preflight_handles_large_backlog_with_batched_prune() {
         "expected batched retention pruning to keep only the configured snapshots"
     );
 }
+
+// Every upload attempt, including a timed-out first attempt, must see the source
+// lease released. Removing the fixture read root also catches late source reads.
+struct ReleasedSourceStorage<'a> {
+    inner: InMemoryStorage,
+    released: &'a AtomicUsize,
+    attempts: AtomicUsize,
+    fail_upload: bool,
+}
+
+impl Storage for ReleasedSourceStorage<'_> {
+    fn provider(&self) -> &str {
+        self.inner.provider()
+    }
+    fn upload_document<'a>(
+        &'a self,
+        filename: &'a str,
+        bytes: Vec<u8>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+        Box::pin(async move {
+            assert_eq!(
+                self.released.load(Ordering::SeqCst),
+                1,
+                "upload held the source lease"
+            );
+            if self.fail_upload {
+                return Err(Error::Cancelled);
+            }
+            if self.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                return Err(Error::Telegram {
+                    message: "timed out injected upload failure".into(),
+                });
+            }
+            self.inner.upload_document(filename, bytes).await
+        })
+    }
+    fn download_document<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>>> + Send + 'a>> {
+        self.inner.download_document(id)
+    }
+}
+
+#[tokio::test]
+async fn snapshot_reads_finish_before_direct_and_pack_upload_retries() {
+    for (count, fail_upload) in [(3, false), (11, false), (3, true)] {
+        let temp = TempDir::new().unwrap();
+        let source = temp.path().join("snapshot-read-root");
+        for i in 0..count as u8 {
+            write_file(source.join(format!("f{i}.bin")), &[i; 4096]);
+        }
+        let releases = AtomicUsize::new(0);
+        let release = || {
+            assert_eq!(releases.fetch_add(1, Ordering::SeqCst), 0);
+            std::fs::remove_dir_all(&source).unwrap();
+        };
+        let storage = ReleasedSourceStorage {
+            inner: InMemoryStorage::new(),
+            released: &releases,
+            attempts: AtomicUsize::new(0),
+            fail_upload,
+        };
+        let filemap_dir = temp.path().join("filemaps");
+        let result = televy_backup_core::run_backup_with_read_root(
+            &storage,
+            BackupConfig {
+                endpoint_db_path: temp.path().join("index.sqlite"),
+                filemap_dir: filemap_dir.clone(),
+                dedupe_db_path: temp.path().join("dedupe.sqlite"),
+                dedupe_pending_db_path: temp.path().join("pending.sqlite"),
+                source_path: source.clone(),
+                label: "snapshot".into(),
+                chunking: ChunkingConfig {
+                    min_bytes: 4096,
+                    avg_bytes: 4096,
+                    max_bytes: 4096,
+                },
+                rate_limit: Default::default(),
+                master_key: [7; 32],
+                snapshot_id: None,
+                keep_last_snapshots: 10,
+                remote_dedupe: RemoteDedupeMode::Disabled,
+            },
+            BackupOptions::default(),
+            Some(&source),
+            Some(&release),
+        )
+        .await;
+        if fail_upload {
+            assert!(
+                result.is_err(),
+                "injected terminal upload failure must be returned"
+            );
+        } else {
+            assert_eq!(result.unwrap().chunks_uploaded, count);
+            assert!(storage.attempts.load(Ordering::SeqCst) > 2);
+        }
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        assert!(std::fs::read_dir(filemap_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("televybackup-encrypted-pack-")
+        }));
+    }
+}

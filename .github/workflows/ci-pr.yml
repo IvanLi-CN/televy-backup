@@ -198,7 +198,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' &&
       needs.classify.result == 'success' &&
-      needs.classify.outputs.kind == 'source'
+      (needs.classify.outputs.kind == 'source' || needs.classify.outputs.kind == 'prepared')
     name: Manual Snapshot Access regression
     runs-on: macos-15
     timeout-minutes: 30
@@ -329,6 +329,12 @@ jobs:
             --expect-build-commit "${GITHUB_SHA}" --stale-inventory-drift
           python3 scripts/macos/mount-helper-install-integration-test.py \
             --app "${fixture}/TelevyBackup.app" --require-readiness --uninstall
+
+      - name: Cleanup-blocked standard helper upgrade
+        run: |
+          python3 scripts/macos/mount-helper-install-integration-test.py \
+            --app "${RUNNER_TEMP}/mount-helper-install-release/TelevyBackup.app" --require-readiness \
+            --expect-build-commit "${GITHUB_SHA}" --stale-pending-drift
 
       - name: Stale mount recovery and unknown blocker fixture
         run: |
