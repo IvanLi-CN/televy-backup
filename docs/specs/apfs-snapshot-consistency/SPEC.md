@@ -275,4 +275,4 @@ Snapshot creation may coincide with Time Machine pruning older snapshots. Record
 
 ### 清理阻塞时的标准 helper 更新
 
-当旧 helper 的完整分类仅含精确 pending cleanup 候选与 released inventory drift，且 build identity 为有效的 40 位十六进制 commit、与候选不同而已过期时，标准安装入口 MAY 在 Snapshot Access 没有活动 lease、但仍有 pending cleanup 时更新 helper。安装 MUST 保留 journal 和快照，不执行 release/reconcile；持有跨进程 mutation lock 时 MUST 重新核验 helper 分类与 Access 活动 lease。活动 lease、未知/不完整记录或其他 blocker MUST 拒绝此路径。其他升级与卸载仍要求 Access 完全 idle。新 helper 的可用性仍必须由候选 build commit、二进制 hash 和既有 component/protocol 校验确认，不能把安装成功当作 strict mode 已恢复。
+当旧 helper 的完整分类仅含精确 pending cleanup 候选与 released inventory drift，且 build identity 为有效的 40 位十六进制 commit、与候选不同而已过期时，标准安装入口 MAY 在 Snapshot Access 没有活动 lease、但仍有 pending cleanup 时更新 helper。安装 MUST 保留 journal 和快照，不执行 release/reconcile；持有跨进程 mutation lock 时 MUST 重新核验 helper 分类与 Access 活动 lease。活动 lease、未知/不完整记录或其他 blocker MUST 拒绝此路径。混合状态下缺失、长度错误或非十六进制的 build commit MUST 保持升级阻断；pending-only 的既有兼容分支不受此混合状态规则扩大影响。其他升级与卸载仍要求 Access 完全 idle。新 helper 的可用性仍必须由候选 build commit、二进制 hash 和既有 component/protocol 校验确认，不能把安装成功当作 strict mode 已恢复。

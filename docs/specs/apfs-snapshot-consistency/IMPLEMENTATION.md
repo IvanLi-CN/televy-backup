@@ -119,3 +119,5 @@ daemon 维护任务与 acquire 共用锁，release 完成通知与 5 秒 tick �
 标准 helper 安装复用 PendingCleanupUpgrade 分支接受已核验的 pending+released-drift 分区；仅在 Access active_leases=0 时允许保留 pending 并完成替换，持有 mutation lock 后再次核验。卸载与 legacy/unknown 升级的完全 idle 门禁不变。单元测试覆盖有 active reader 时拒绝；hosted fixture 为标准安装构造旧 helper 与 Access pending 记录，验证候选身份及 journal 保留，不声称 fixture 创建了真实快照。
 
 删除后出现新的外部 inventory 时，pending 行保留已确认的原始归属 manifest，只有 released tombstone 提交才清空。完整 Release→retry 回归在删除后的首次核验注入外部快照，验证第一次保持 pending，第二次释放且不重复删除，最终 activeMounts=0。混合升级回归同时拒绝缺失、长度错误、非十六进制或当前候选的 build identity；pending-only 兼容路径保持原有约束。
+
+混合升级的 build commit 格式校验属于旧 helper 分类前置条件；候选安装后的实际运行 build、文件 hash 和组件就绪验证仍独立执行。清理恢复不会仅凭“与候选不同”推断已知旧身份。
