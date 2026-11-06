@@ -245,7 +245,11 @@ jobs:
 
   universal2:
     name: Universal 2 assembly
-    runs-on: macos-15
+    # Assembly consumes the already-built arm64 and x86_64 artifacts. It only
+    # runs lipo/codesign/DMG validation, so it does not require an arm64 host;
+    # keep the arm64 runner reserved for the native build and use the proven
+    # Intel runner for this architecture-neutral consumer job.
+    runs-on: macos-15-intel
     timeout-minutes: 10
     needs: [classify, arm64, x86_64]
     if: >-
