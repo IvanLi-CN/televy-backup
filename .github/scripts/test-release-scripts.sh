@@ -202,6 +202,7 @@ assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
 assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
 assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
+assert "verify-ed25519-receipt.swift" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "needs.macos-acceptance.result == 'success'" in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
