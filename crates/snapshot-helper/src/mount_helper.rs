@@ -3528,7 +3528,8 @@ async fn delete_manifest_and_record_tombstone_with_observation(
             return "cleanup_pending";
         }
     };
-    // Keep owned UUID provenance until the released transition commits. An empty manifest on
+    // A post-deletion inventory change is unowned; keep owned UUID provenance until the
+    // released transition commits. An empty manifest on
     // an unmounted pending row denotes an unresolved reservation; clearing it here would route
     // retries away from ownership-bound cleanup and strand any newly added external snapshot.
     if !manifests_equal(&current_manifest, &reservation_manifest) {
