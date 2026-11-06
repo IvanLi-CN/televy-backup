@@ -6,7 +6,7 @@
 - `televybackup-logo-dark.svg` has a transparent canvas for dark UI surfaces, a high-contrast blue-gray storage layer, and a light azure transmission layer.
 - `televybackup-logo-ui.svg` is the transparent light-appearance Popover asset.
 - `televybackup-logo-ui-compact.svg` and `televybackup-logo-dark-compact.svg` use the same paths and colors with a tighter transparent viewBox for the 20pt Popover mark.
-- `televybackup-logo-template.svg` is the transparent black template asset used by the system menu bar; AppKit applies the template tint.
+- `televybackup-logo-template.svg` is the transparent black template asset used by the system menu bar; AppKit applies the template tint. Its centered `102 102 1050 1050` viewBox reduces transparent padding so the visible mark measures approximately `12.1 × 9.3pt` in the `18 × 18pt` menu-bar canvas.
 - `televybackup-logo-monochrome-design.png` and `televybackup-logo-duotone-design.png` are the approved raster design references, not runtime assets.
 
 `televybackup-logo-compact.svg` is the same geometry with a tighter 1000-point

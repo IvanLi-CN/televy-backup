@@ -4,10 +4,8 @@ enum MenuBarStatusItemIcon {
     static let idleSize = NSSize(width: 18, height: 18)
     static let activeSize = NSSize(width: 18, height: 18)
     static let activeBaseRect = NSRect(origin: .zero, size: idleSize)
-    // The badge is flush with the image's lower-right edge. Clearance only separates it from
-    // the product icon on the left and above; there is intentionally none to the right or below.
-    static let statusClearanceRect = NSRect(x: 6, y: 0, width: 12, height: 12)
-    static let statusBadgeRect = NSRect(x: 7, y: 0, width: 11, height: 11)
+    static let statusSymbolRect = NSRect(x: 7, y: 0, width: 11, height: 11)
+    static let statusSymbolClearance: CGFloat = 1
 
     static func image(
         for activity: MenuBarActivityState,
@@ -26,13 +24,7 @@ enum MenuBarStatusItemIcon {
                 activity: activity,
                 foregroundColor: foregroundColor
             )
-            if activity == .failure {
-                clearFailureBadge(in: statusClearanceRect)
-                drawFailureBadge(in: statusBadgeRect)
-            } else {
-                clearActivityBadge(in: statusClearanceRect)
-                drawActivityBadge(for: activity, in: statusBadgeRect)
-            }
+            drawStatusSymbol(for: activity, in: statusSymbolRect)
             return true
         }
         image.isTemplate = activity != .failure
@@ -128,72 +120,70 @@ enum MenuBarStatusItemIcon {
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    private static func drawActivityBadge(for activity: MenuBarActivityState, in rect: NSRect) {
-        NSColor.black.setFill()
-        NSBezierPath(ovalIn: rect).fill()
+    private static func drawStatusSymbol(for activity: MenuBarActivityState, in rect: NSRect) {
+        let symbols = statusSymbolPaths(for: activity, in: rect)
+        // Expand only the symbol contours to knock a transparent gap out of the product mark.
+        // The symbol itself is then painted as a foreground glyph with no backing shape.
+        clearShape {
+            NSColor.black.setFill()
+            NSColor.black.setStroke()
+            for (path, isStroke) in symbols {
+                let clearance = path.copy() as! NSBezierPath
+                clearance.lineWidth = (isStroke ? path.lineWidth : 0) + 2 * statusSymbolClearance
+                clearance.lineCapStyle = .round
+                clearance.lineJoinStyle = .round
+                if !isStroke {
+                    clearance.fill()
+                }
+                clearance.stroke()
+            }
+        }
 
+        let color: NSColor = activity == .failure ? .systemRed : .black
+        color.setFill()
+        color.setStroke()
+        for (path, isStroke) in symbols {
+            if isStroke {
+                path.stroke()
+            } else {
+                path.fill()
+            }
+        }
+    }
+
+    private static func statusSymbolPaths(
+        for activity: MenuBarActivityState,
+        in rect: NSRect
+    ) -> [(path: NSBezierPath, isStroke: Bool)] {
         switch activity {
-        case .backup: clearUpArrow(in: rect)
-        case .restore: clearDownArrow(in: rect)
-        case .verify: clearCheckmark(in: rect)
-        case .bidirectional: clearBidirectionalArrows(in: rect)
-        case .idle, .failure:
-            return
+        case .backup: return [(upArrowPath(in: rect), false)]
+        case .restore: return [(downArrowPath(in: rect), false)]
+        case .verify: return [(checkmarkPath(in: rect), true)]
+        case .bidirectional: return bidirectionalPaths(in: rect).map { ($0, false) }
+        case .failure: return exclamationPaths(in: rect).map { ($0, false) }
+        case .idle: return []
         }
     }
 
-    private static func clearActivityBadge(in rect: NSRect) {
-        clearShape {
-            NSBezierPath(ovalIn: rect).fill()
-        }
-    }
-
-    private static func clearFailureBadge(in rect: NSRect) {
-        clearShape {
-            failureTriangle(in: rect).fill()
-        }
-    }
-
-    private static func drawFailureBadge(in rect: NSRect) {
-        let triangle = failureTriangle(in: rect)
-        // The failure marker has one foreground color. The exclamation is a transparent knockout,
-        // so it remains distinct from the unchanged monochrome product icon without adding yellow.
-        NSColor.systemRed.setFill()
-        triangle.fill()
-
-        clearFailureExclamation(in: rect)
-    }
-
-    private static func clearFailureExclamation(in rect: NSRect) {
+    private static func exclamationPaths(in rect: NSRect) -> [NSBezierPath] {
         let scale = rect.width / 10
-        clearShape {
-            NSBezierPath(
-                roundedRect: NSRect(
-                    x: rect.midX - 1.15 * scale,
-                    y: rect.minY + 3.45 * scale,
-                    width: 2.3 * scale,
-                    height: 4.4 * scale
-                ),
-                xRadius: 1.15 * scale,
-                yRadius: 1.15 * scale
-            ).fill()
-            NSBezierPath(ovalIn: NSRect(
-                x: rect.midX - 1.15 * scale,
-                y: rect.minY + 1.35 * scale,
-                width: 2.3 * scale,
-                height: 1.9 * scale
-            )).fill()
-        }
-    }
-
-    private static func failureTriangle(in rect: NSRect) -> NSBezierPath {
-        let scale = rect.width / 10
-        let triangle = NSBezierPath()
-        triangle.move(to: NSPoint(x: rect.midX, y: rect.maxY - 0.3 * scale))
-        triangle.line(to: NSPoint(x: rect.minX + 0.5 * scale, y: rect.minY + 0.7 * scale))
-        triangle.line(to: NSPoint(x: rect.maxX - 0.5 * scale, y: rect.minY + 0.7 * scale))
-        triangle.close()
-        return triangle
+        let stem = NSBezierPath(
+            roundedRect: NSRect(
+                x: rect.midX - scale,
+                y: rect.minY + 4 * scale,
+                width: 2 * scale,
+                height: 4.8 * scale
+            ),
+            xRadius: scale,
+            yRadius: scale
+        )
+        let dot = NSBezierPath(ovalIn: NSRect(
+            x: rect.midX - 0.95 * scale,
+            y: rect.minY + 1.45 * scale,
+            width: 1.9 * scale,
+            height: 1.9 * scale
+        ))
+        return [stem, dot]
     }
 
     private static func clearShape(_ draw: () -> Void) {
@@ -202,17 +192,6 @@ enum MenuBarStatusItemIcon {
         context.compositingOperation = .destinationOut
         draw()
         NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private static func clearUpArrow(in rect: NSRect) {
-        clearShape {
-            upArrowPath(in: rect).fill()
-        }
-    }
-
-    private static func drawUpArrow(in rect: NSRect) {
-        NSColor.black.setFill()
-        upArrowPath(in: rect).fill()
     }
 
     private static func upArrowPath(in rect: NSRect) -> NSBezierPath {
@@ -228,17 +207,6 @@ enum MenuBarStatusItemIcon {
         return path
     }
 
-    private static func clearDownArrow(in rect: NSRect) {
-        clearShape {
-            downArrowPath(in: rect).fill()
-        }
-    }
-
-    private static func drawDownArrow(in rect: NSRect) {
-        NSColor.black.setFill()
-        downArrowPath(in: rect).fill()
-    }
-
     private static func downArrowPath(in rect: NSRect) -> NSBezierPath {
         let path = NSBezierPath()
         path.move(to: NSPoint(x: rect.midX, y: rect.minY + 1.4))
@@ -252,17 +220,6 @@ enum MenuBarStatusItemIcon {
         return path
     }
 
-    private static func clearCheckmark(in rect: NSRect) {
-        clearShape {
-            checkmarkPath(in: rect).stroke()
-        }
-    }
-
-    private static func drawCheckmark(in rect: NSRect) {
-        NSColor.black.setStroke()
-        checkmarkPath(in: rect).stroke()
-    }
-
     private static func checkmarkPath(in rect: NSRect) -> NSBezierPath {
         let path = NSBezierPath()
         path.move(to: NSPoint(x: rect.minX + 2.2, y: rect.midY - 0.2))
@@ -272,17 +229,6 @@ enum MenuBarStatusItemIcon {
         path.lineCapStyle = .round
         path.lineJoinStyle = .round
         return path
-    }
-
-    private static func clearBidirectionalArrows(in rect: NSRect) {
-        clearShape {
-            bidirectionalPaths(in: rect).forEach { $0.fill() }
-        }
-    }
-
-    private static func drawBidirectionalArrows(in rect: NSRect) {
-        NSColor.black.setFill()
-        bidirectionalPaths(in: rect).forEach { $0.fill() }
     }
 
     private static func bidirectionalPaths(in rect: NSRect) -> [NSBezierPath] {
