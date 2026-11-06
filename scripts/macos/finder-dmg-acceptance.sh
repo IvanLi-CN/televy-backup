@@ -600,13 +600,8 @@ print(json.dumps({
 PY
 signature_path="$evidence_dir/$signature_basename"
 prepare_evidence_path "$signature_path"
-pkeyutl_args=(-sign -inkey "$signing_key")
-# Older macOS runners use an OpenSSL build that does not recognize OpenSSL 3's -rawin flag.
-if openssl pkeyutl -help 2>&1 | grep -Fq -- "-rawin"; then
-  pkeyutl_args+=(-rawin)
-fi
-pkeyutl_args+=(-in "$acceptance_path" -out "$signature_path")
-openssl pkeyutl "${pkeyutl_args[@]}"
+xcrun swift "$root_dir/scripts/macos/sign-ed25519-receipt.swift" \
+  "$signing_key" "$acceptance_path" "$signature_path"
 [[ -s "$signature_path" ]] || {
   echo "Finder acceptance receipt signature was not created" >&2
   exit 1
