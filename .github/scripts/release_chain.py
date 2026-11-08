@@ -27,7 +27,7 @@ PRODUCT_TAG_RE = re.compile(
     r"^v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)$"
 )
 IDENTITY_REF_RE = re.compile(
-    r"^refs/tags/release-(?:reservation|decision|reservation-reclaimed|decision-reclaimed|bound|consumed|released|retired|artifact-pending|artifact-attempts|artifacts)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/.*)?$"
+    r"^refs/tags/release-(?:reservation|decision|reservation-reclaimed|decision-reclaimed|bound|consumed|released|retired|orphaned|artifact-pending|artifact-attempts|artifacts)/v(?P<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc|dev)\.[1-9]\d*)?)(?:/.*)?$"
 )
 SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 PRODUCT_TAG_OWNER = "protected-release-automation"
@@ -510,8 +510,83 @@ def valid_retirement_receipt(ref: str) -> tuple[str, set[str]] | None:
     return version, source_refs
 
 
+def valid_orphan_recovery_receipt(ref: str) -> tuple[str, set[str]] | None:
+    """Return an unbound version and its source refs only for a valid orphan receipt."""
+    match = IDENTITY_REF_RE.fullmatch(ref)
+    if not match or not ref.startswith("refs/tags/release-orphaned/"):
+        return None
+    target = _ref_target(ref)
+    if not target:
+        return None
+    values = trailers(target)
+    version = match.group("version")
+    required = {
+        "Orphan-Recovery-State": "unbound",
+        "Release-Version": version,
+        "Orphan-Product-Tag": "absent",
+        "Orphan-GitHub-Release": "absent",
+        "Orphan-Decision-Refs": "none",
+        "Orphan-Reclaimed-Refs": "none",
+        "Orphan-Bound-Refs": "none",
+        "Orphan-Consumed-Refs": "none",
+        "Orphan-Released-Refs": "none",
+        "Orphan-Retired-Refs": "none",
+        "Orphan-Artifact-Refs": "none",
+        "Orphan-Provenance": "immutable-orphan-unbound-recovery",
+    }
+    if any(values.get(key) != value for key, value in required.items()):
+        return None
+    reservation_ref = f"refs/tags/release-reservation/v{version}"
+    if values.get("Orphan-Source-Reservation-Ref") != reservation_ref:
+        return None
+    reservation_id = values.get("Orphan-Reservation-Id", "")
+    if not reservation_id or ref.rsplit("/", 1)[-1] != reservation_id:
+        return None
+    if not re.fullmatch(r"[1-9][0-9]*(?:,[1-9][0-9]*)*", values.get("Orphan-Checked-Release-Runs", "")):
+        return None
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", values.get("Orphan-Evidence-Digest", "")):
+        return None
+    try:
+        reservation_target = canonical_sha(
+            values["Orphan-Source-Reservation-SHA"], "orphan reservation SHA"
+        )
+        source_sha = canonical_sha(values["Orphan-Source-SHA"], "orphan source SHA")
+        canonical_sha(values["Orphan-Evidence-Main-SHA"], "orphan evidence main SHA")
+    except (KeyError, ReleaseChainError):
+        return None
+    if _ref_target(reservation_ref) != reservation_target:
+        return None
+    reservation_parents = git("show", "-s", "--format=%P", reservation_target).split()
+    if reservation_parents != [source_sha]:
+        return None
+    if git("show", "-s", "--format=%T", reservation_target) != git("show", "-s", "--format=%T", source_sha):
+        return None
+    reservation_values = trailers(reservation_target)
+    if any(reservation_values.get(key) != expected for key, expected in {
+        "Reservation-Id": reservation_id,
+        "Reservation-Owner": values.get("Orphan-Reservation-Owner", ""),
+        "Reservation-Claim-Key": values.get("Orphan-Claim-Key", ""),
+        "Reservation-Boundary-Token": values.get("Orphan-Boundary-Token", ""),
+        "Release-Version": version,
+        "Release-Target": values.get("Orphan-Release-Target", ""),
+        "Release-Policy": values.get("Orphan-Release-Policy", ""),
+        "Release-Channel": values.get("Orphan-Release-Channel", ""),
+        "Reservation-State": "claimed",
+    }.items()):
+        return None
+    if not values.get("Orphan-Recovery-Owner") or not values.get("Orphan-Recovery-Reason"):
+        return None
+    if git("show", "-s", "--format=%P", target).split() != [reservation_target]:
+        return None
+    receipt_tree = git("show", "-s", "--format=%T", target)
+    reservation_tree = git("show", "-s", "--format=%T", reservation_target)
+    if receipt_tree not in {reservation_tree, "b1612a1f4eed800eeef62ae225399baf8d0ff6fb1"}:
+        return None
+    return version, {reservation_ref, ref}
+
+
 def occupied_identity_versions() -> list[str]:
-    """Return versions claimed by identity refs, excluding only verified retired legacy refs."""
+    """Return versions claimed by identity refs, excluding only verified recovery receipts."""
     prefixes = (
         "refs/tags/release-reservation",
         "refs/tags/release-decision",
@@ -521,19 +596,20 @@ def occupied_identity_versions() -> list[str]:
         "refs/tags/release-consumed",
         "refs/tags/release-released",
         "refs/tags/release-retired",
+        "refs/tags/release-orphaned",
         "refs/tags/release-artifact-pending",
         "refs/tags/release-artifact-attempts",
         "refs/tags/release-artifacts",
     )
     refs = git("for-each-ref", "--format=%(refname)", *prefixes).splitlines()
-    retired_sources: set[str] = set()
+    recovered_sources: set[str] = set()
     for ref in refs:
-        verified = valid_retirement_receipt(ref)
-        if verified:
-            retired_sources.update(verified[1])
+        for verified in (valid_retirement_receipt(ref), valid_orphan_recovery_receipt(ref)):
+            if verified:
+                recovered_sources.update(verified[1])
     versions = []
     for ref in refs:
-        if ref in retired_sources:
+        if ref in recovered_sources:
             continue
         match = IDENTITY_REF_RE.fullmatch(ref)
         if match:

@@ -108,6 +108,10 @@ _Avoid_: patch number, short SHA
 An append-only repository tag under `release-reservation/` that claims one Canonical Version and records its pre-merge provenance before VERSION preparation or publication.
 _Avoid_: queue entry, mutable lock, Git note
 
+**Orphan-Unbound Recovery**:
+The separately authorized recovery of a claimed reservation that has no downstream release identity, product tag, GitHub Release, or artifact; it appends `release-orphaned/` evidence and requires a new reclaimed claim.
+_Avoid_: Same-SHA Recovery, legacy retirement, successor allocation
+
 **Boundary Token**:
 The frozen token carried by a reservation and preparation trailers that proves the same release
 claim crossed the PR-to-merge boundary.
@@ -120,7 +124,7 @@ _Avoid_: source SHA, preparation SHA
 
 **Release Identity Ref**:
 An append-only repository tag under `release-reservation/`, `release-decision/`, `release-bound/`,
-`release-consumed/`, or `release-released/` that records one release claim or state transition.
+`release-consumed/`, `release-released/`, `release-orphaned/`, or `release-retired/` that records one release claim or state transition.
 Its integrity comes from the release identity contract and provenance checks, not from being a
 product tag.
 _Avoid_: product tag, mutable branch, release queue

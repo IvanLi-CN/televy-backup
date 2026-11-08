@@ -23,7 +23,7 @@ assert_not_contains() {
   fi
 }
 
-for workflow in ci-pr.yml ci-main.yml legacy-label-gate-bridge.yml release-target-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml notify-release-failure.yml homebrew-cask.yml homebrew-cask-update.yml; do
+for workflow in ci-pr.yml ci-main.yml legacy-label-gate-bridge.yml release-target-gate.yml package-ci.yml release-preparation.yml release-completion.yml release.yml release-orphan-recovery.yml notify-release-failure.yml homebrew-cask.yml homebrew-cask-update.yml; do
   ruby -ryaml -e 'YAML.parse_file(ARGV.fetch(0))' "$root_dir/.github/workflows/$workflow"
 done
 test ! -e "$root_dir/.github/workflows/label-gate.yml"
@@ -136,6 +136,18 @@ assert_not_contains "reconciliation no ref deletion" "$reconciliation_text" "git
 assert_not_contains "reconciliation no git push" "$reconciliation_text" "git push"
 assert_not_contains "reconciliation no force push" "$reconciliation_text" "git push --force"
 
+orphan_recovery_text="$(<"$root_dir/.github/workflows/release-orphan-recovery.yml")"
+assert_contains "orphan recovery workflow name" "$orphan_recovery_text" "name: Recover unbound release reservation"
+assert_contains "orphan recovery dispatch trigger" "$orphan_recovery_text" "workflow_dispatch:"
+assert_contains "orphan recovery product tag absence" "$orphan_recovery_text" 'git/ref/tags/v${RELEASE_VERSION}'
+assert_contains "orphan recovery release absence" "$orphan_recovery_text" 'releases/tags/v${RELEASE_VERSION}'
+assert_contains "orphan recovery run artifact check" "$orphan_recovery_text" 'actions/runs/${run_id}/artifacts'
+assert_contains "orphan recovery trusted main ancestry" "$orphan_recovery_text" 'git merge-base --is-ancestor'
+assert_contains "orphan recovery writer" "$orphan_recovery_text" "release_reservation.py recover-orphan"
+assert_contains "orphan recovery namespace" "$orphan_recovery_text" "release-orphaned/v"
+assert_not_contains "orphan recovery no ref deletion" "$orphan_recovery_text" "git update-ref -d"
+assert_not_contains "orphan recovery no git push" "$orphan_recovery_text" "git push"
+
 release_text="$(<"$root_dir/.github/workflows/release.yml")"
 assert_contains "release target output" "$release_text" "release_target"
 assert_contains "release policy output" "$release_text" "policy"
@@ -205,7 +217,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 contract = json.loads((root / ".github/release-contract.json").read_text(encoding="utf-8"))
-assert contract["schema_version"] == 3
+assert contract["schema_version"] == 4
 assert contract["source_of_truth"].startswith("one owner-supplied release_target")
 policy = contract["version_policy"]
 assert policy["id"] == "televybackup-manual-semver-v1"
@@ -215,6 +227,9 @@ assert policy["successor_on_collision"] is False
 assert policy["reservation_key"] == "pull_request_number+release_target"
 assert contract["workflows"]["target_gate"] == "Release target gate"
 assert contract["workflows"]["reconciliation"] == "Reconcile unpublished legacy release identity"
+assert contract["workflows"]["orphan_recovery"] == "Recover unbound release reservation"
+assert contract["identity_refs"]["orphaned"] == "refs/tags/release-orphaned/v<version>/<reservation-id>"
+assert contract["recovery"]["orphan_unbound"]["append_only"] is True
 assert contract["preparation"]["reservation_before_version"] is True
 assert contract["release_sequence"]["successor_on_collision"] is False
 assert contract["release_sequence"]["successor_on_recovery"] is False

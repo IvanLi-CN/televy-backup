@@ -135,6 +135,67 @@ bound = chain.resolve_release_target(
 )
 assert bound["version"] == "0.9.4"
 
+# A claimed reservation with no downstream identity can be released only by a
+# verified orphan-unbound receipt, after which the next claim uses a reclaimed
+# reservation path.
+orphan_claim = "pr:305:target:0.9.6"
+orphan_identity = reservation.deterministic_identity("github-actions[bot]", orphan_claim)
+orphan_reservation = reservation.expected_reservation(
+    source_sha=source,
+    version="0.9.6",
+    channel="prod",
+    release_target="0.9.6",
+    policy=chain.VERSION_POLICY_ID,
+    owner="github-actions[bot]",
+    claim_key=orphan_claim,
+    reservation_id=orphan_identity["reservationId"],
+    boundary_token=orphan_identity["boundaryToken"],
+)
+orphan_reservation["ref"] = reservation.reservation_ref("0.9.6")
+reservation.create_local_reservation(orphan_reservation, repo)
+orphan_evidence = {
+    "kind": "orphan-unbound",
+    "schema_version": 1,
+    "version": "0.9.6",
+    "main_sha": source,
+    "product_tag": {"ref": "v0.9.6", "status": "absent"},
+    "github_release": {"tag": "v0.9.6", "status": "absent"},
+    "decision_refs": [],
+    "reclaimed_refs": [],
+    "bound_refs": [],
+    "consumed_refs": [],
+    "released_refs": [],
+    "retired_refs": [],
+    "artifact_refs": [],
+    "release_runs": [{
+        "id": "42506238969",
+        "status": "completed",
+        "conclusion": "success",
+        "head_branch": "main",
+        "workflow_path": ".github/workflows/release.yml",
+        "artifacts": [],
+    }],
+}
+orphan_receipt = reservation.create_local_orphan_recovery(
+    version="0.9.6", reservation_id=orphan_identity["reservationId"],
+    owner="github-actions[bot]", claim_key=orphan_claim, release_target="0.9.6",
+    boundary_token=orphan_identity["boundaryToken"], evidence=orphan_evidence, cwd=repo,
+)
+assert orphan_receipt["ref"] == reservation.orphan_recovery_ref("0.9.6", orphan_identity["reservationId"])
+assert chain.valid_orphan_recovery_receipt(orphan_receipt["ref"])[0] == "0.9.6"
+assert "0.9.6" not in chain.occupied_identity_versions()
+orphan_reclaimed_claim = "pr:306:target:0.9.6"
+orphan_reclaimed_identity = reservation.deterministic_identity("github-actions[bot]", orphan_reclaimed_claim)
+orphan_reclaimed = dict(orphan_reservation)
+orphan_reclaimed.update({
+    "ref": reservation.reclaimed_reservation_ref("0.9.6", orphan_reclaimed_identity["reservationId"]),
+    "reservationId": orphan_reclaimed_identity["reservationId"],
+    "Reservation-Claim-Key": orphan_reclaimed_claim,
+    "Reservation-Boundary-Token": orphan_reclaimed_identity["boundaryToken"],
+})
+reservation.create_local_reservation(orphan_reclaimed, repo)
+assert "0.9.6" in chain.occupied_identity_versions()
+
 # A verified unpublished legacy claim releases only its old source refs. The
 # next reservation must still use a new reclaimed identity path.
 legacy_claim = "pr:125:target:0.9.5"

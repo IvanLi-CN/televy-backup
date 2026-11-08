@@ -65,7 +65,7 @@ assert contract["helper_bootstrap"]["terminal_states_before_resolution"] == ["pu
 assert contract["helper_bootstrap"]["immutable_source_artifact"]["name"] == "snapshot-helper-source"
 assert contract["helper_bootstrap"]["immutable_source_artifact"]["release_redownload_after_resolve"] is False
 assert contract["identity_refs"]["write_policy"] == "append-only-create"
-assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound;retired-only-after-proven-unpublished-legacy-claim"
+assert contract["identity_refs"]["state_order"] == "decision-before-bound-or-released;bound-before-consumed;released-only-when-unbound;orphaned-only-after-proven-unbound-claimed-reservation;retired-only-after-proven-unpublished-legacy-claim"
 assert contract["identity_refs"]["receipt_validation"] == "independently-verify-reservation-provenance"
 assert contract["identity_refs"]["automation"] == "default-github-actions-token"
 assert contract["identity_refs"]["server_protection"] == "product-tags-only"
@@ -79,6 +79,7 @@ assert contract["identity_refs"]["ruleset_excluded_identity_patterns"] == [
     "refs/tags/release-consumed/*",
     "refs/tags/release-released/*",
     "refs/tags/release-retired/*",
+    "refs/tags/release-orphaned/*",
     "refs/tags/release-artifact-pending/*",
     "refs/tags/release-artifact-attempts/*",
     "refs/tags/release-artifacts/*",
@@ -106,7 +107,7 @@ for gate in ("target_gate", "completion"):
 
 workflow_text = "\n".join(
     (root / ".github/workflows" / name).read_text(encoding="utf-8")
-    for name in ("release-preparation.yml", "release-completion.yml", "release-reconciliation.yml", "release.yml")
+    for name in ("release-preparation.yml", "release-completion.yml", "release-reconciliation.yml", "release-orphan-recovery.yml", "release.yml")
 )
 for forbidden in (
     "GPG",
@@ -213,6 +214,15 @@ assert "no-product-publication" in reconciliation_text
 assert "git push" not in reconciliation_text
 assert "git push --force" not in reconciliation_text
 assert "git update-ref -d" not in reconciliation_text
+orphan_text = (root / ".github/workflows/release-orphan-recovery.yml").read_text(encoding="utf-8")
+assert "name: Recover unbound release reservation" in orphan_text
+assert "workflow_dispatch:" in orphan_text
+assert "release_reservation.py recover-orphan" in orphan_text
+assert "release-orphaned/v" in orphan_text
+assert "actions/runs/${run_id}/artifacts" in orphan_text
+assert "git merge-base --is-ancestor" in orphan_text
+assert "git update-ref -d" not in orphan_text
+assert "git push" not in orphan_text
 assert "reservationSourceSha // .sourceSha" in (root / ".github/workflows/release-completion.yml").read_text(encoding="utf-8")
 assert "reservationSourceSha // .sourceSha" in release_workflow
 assert "reservationSourceSha // .sourceSha" in (root / ".github/scripts/merge-group-release-gate.sh").read_text(encoding="utf-8")

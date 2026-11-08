@@ -12,6 +12,7 @@
 - The former route used PR labels as the version and channel source and coupled label validation to PR completion.
 - The current route uses one owner-provided `release_target` and a checked-in Version Policy; labels are not parsed by release workflows.
 - The occupied `v0.9.9` reservation, decision, and released refs remain immutable historical facts. Because remote evidence proves no product publication or consumed artifact, the controlled reconciliation route may append a `release-retired` receipt; a new claim then uses independent reclaimed reservation and decision namespaces without rewriting the old refs.
+- A claimed `v0.9.10` reservation with no downstream identity uses the separate orphan-unbound recovery route: trusted absence evidence appends `release-orphaned`, and a later claim uses a new reclaimed reservation without rewriting the original reservation.
 
 ## Related Changes
 
@@ -22,3 +23,4 @@
 - `./SPEC.md`
 - `./IMPLEMENTATION.md`
 - `../../adr/0017-manual-version-release-target.md`
+- `../../adr/0019-claimed-orphan-reservation-recovery.md`

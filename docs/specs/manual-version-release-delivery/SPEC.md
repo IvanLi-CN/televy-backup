@@ -7,6 +7,8 @@
 - [Same-SHA recovery bound repair](../../adr/0013-release-recovery-bound-repair.md)
 - [Release identity ref protection](../../adr/0014-protected-release-authority.md)
 - [Manual release target authority](../../adr/0017-manual-version-release-target.md)
+- [Unpublished legacy identity retirement](../../adr/0018-unpublished-legacy-identity-retirement.md)
+- [Claimed orphan reservation recovery](../../adr/0019-claimed-orphan-reservation-recovery.md)
 
 ## Context and Scope
 
@@ -46,7 +48,7 @@ Version Policy MUST declare its policy id, target grammar, trusted baseline sour
 
 The normal numeric baseline MUST be the highest eligible final product tag reachable from `main` and carrying the repository's required protected automation provenance. When no eligible final tag exists, the policy MUST use the declared virtual baseline `0.0.0`. `VERSION`, Cargo metadata, workflow artifacts, labels, and merge order MUST NOT act as fallback baselines.
 
-A symbolic target MUST be resolved deterministically against that baseline. An explicit target MUST be validated against the same baseline and grammar. A new target at or below the trusted final baseline, or a target whose publication identity is already owned, MUST fail closed before preparation; it MUST NOT be converted into a successor target. The only exception is a separately authorized reconciliation that appends an immutable retirement receipt after proving that an old claim has no product Tag, GitHub Release, stable consumed receipt, or release artifact receipt.
+A symbolic target MUST be resolved deterministically against that baseline. An explicit target MUST be validated against the same baseline and grammar. A new target at or below the trusted final baseline, or a target whose publication identity is already owned, MUST fail closed before preparation; it MUST NOT be converted into a successor target. The only exceptions are separately authorized recovery workflows that append an immutable orphan-unbound receipt for a claimed reservation with no downstream identity, or an immutable retirement receipt after proving that an old claim has no product Tag, GitHub Release, stable consumed receipt, or release artifact receipt.
 
 Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
@@ -60,9 +62,9 @@ Covers: [ADR 0004](../../adr/0004-pr-local-version-preparation.md), [ADR 0017](.
 
 ### REQ-MVR-004: Reservation precedes irreversible release work
 
-The controller MUST create or verify `refs/tags/release-reservation/v<version>` before creating the VERSION preparation commit, product tag, GitHub Release, uploading release artifacts, or deploying them. If that exact ref is an unpublished legacy claim with a valid retirement receipt, a new claim MUST use the independent `refs/tags/release-reservation-reclaimed/v<version>/<reservation-id>` namespace and its matching `release-decision-reclaimed` namespace. The reservation MUST be append-only and MUST prove its source parent, source tree, owner, claim key, raw target, canonical version, channel, policy id, reservation id, and claimed state.
+The controller MUST create or verify `refs/tags/release-reservation/v<version>` before creating the VERSION preparation commit, product tag, GitHub Release, uploading release artifacts, or deploying them. If that exact ref is an orphan-unbound claim with a valid `release-orphaned` receipt, or an unpublished legacy claim with a valid retirement receipt, a new claim MUST use the independent `refs/tags/release-reservation-reclaimed/v<version>/<reservation-id>` namespace and its matching `release-decision-reclaimed` namespace. The reservation MUST be append-only and MUST prove its source parent, source tree, owner, claim key, raw target, canonical version, channel, policy id, reservation id, and claimed state.
 
-An identical claim MAY be retried idempotently. A foreign claim, different source, different raw target, different policy, different owner, invalid provenance, or occupied product identity MUST stop the run. Existing reservation, decision, bound, consumed, released, and retirement refs MUST never be updated, deleted, force-pushed, or silently replaced by a successor.
+An identical claim MAY be retried idempotently. A foreign claim, different source, different raw target, different policy, different owner, invalid provenance, or occupied product identity MUST stop the run. Existing reservation, decision, bound, consumed, released, orphan, retirement, and artifact refs MUST never be updated, deleted, force-pushed, or silently replaced by a successor.
 
 Covers: [ADR 0010](../../adr/0010-release-identity-reservation.md), [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
@@ -87,7 +89,7 @@ Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md), [ADR 0014](
 
 Same-Identity Recovery MUST require an existing reservation plus the exact canonical version, channel, policy id, source/merge SHA, and matching identity provenance. It MAY repair a missing bound receipt, retry publication, or retry a missing consumed receipt. It MUST NOT recalculate the baseline, reinterpret the raw target, change `VERSION`, change channel, rewrite a tag, or allocate a successor.
 
-A historical merge without a verified preparation and reservation is not recoverable under this topic. It requires a new explicit Release Target and a new release boundary, such as a non-empty VERSION-only PR when the project contract permits that mode.
+A historical merge without a verified preparation and reservation is not recoverable under this topic. It requires a new explicit Release Target and a new release boundary, such as a non-empty VERSION-only PR when the project contract permits that mode. A claimed reservation with no downstream identity follows the separate orphan-unbound recovery route: it requires an exact reservation match, absent publication and later identity refs, bounded successful Release Product runs with no artifacts, and then a new reclaimed claim; it is not same-SHA recovery.
 
 Covers: [ADR 0013](../../adr/0013-release-recovery-bound-repair.md), [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
@@ -107,7 +109,7 @@ Covers: [ADR 0017](../../adr/0017-manual-version-release-target.md).
 
 ## State Model
 
-The normal state path is `unclaimed -> target-validated -> reserved -> prepared -> pr-ready -> merged -> bound -> released -> consumed`. An unpublished legacy claim may take the separate path `legacy-occupied -> retirement-verified -> reclaimed-reserved` only through the trusted reconciliation workflow. `target-validated` records only the owner input and policy result; it does not publish anything. `reserved` is the first durable version claim. `prepared` is a VERSION-only verified commit in the candidate PR. `pr-ready` means required checks and review are satisfied. `merged` creates the mainline boundary. `bound` proves the merge identity before packaging. `released` proves the explicit Release publication. `consumed` proves the publication receipt and artifact binding.
+The normal state path is `unclaimed -> target-validated -> reserved -> prepared -> pr-ready -> merged -> bound -> released -> consumed`. An unpublished legacy claim may take the separate path `legacy-occupied -> retirement-verified -> reclaimed-reserved` only through the trusted reconciliation workflow. A claimed orphan may take the separate path `claimed-orphan -> orphan-recovery-verified -> reclaimed-reserved` only through the trusted orphan recovery workflow. `target-validated` records only the owner input and policy result; it does not publish anything. `reserved` is the first durable version claim. `prepared` is a VERSION-only verified commit in the candidate PR. `pr-ready` means required checks and review are satisfied. `merged` creates the mainline boundary. `bound` proves the merge identity before packaging. `released` proves the explicit Release publication. `consumed` proves the publication receipt and artifact binding.
 
 Retry is allowed only within the same state identity. A reservation collision, target mismatch, provenance mismatch, missing required check, changed PR base/head, or missing merge identity is a fail-closed state, not a reason to choose a successor.
 
@@ -122,13 +124,25 @@ Retry is allowed only within the same state identity. A reservation collision, t
 
 The dispatch is evaluated against trusted `main`; the candidate PR is read through the GitHub API and its exact head/base are revalidated before reservation and before the VERSION commit.
 
+### Orphan-unbound recovery dispatch
+
+- `version`: required canonical product version carried by the original reservation.
+- `reservation_id`: required original reservation identity.
+- `release_target`: required exact raw target carried by the original reservation.
+- `claim_key`: required original `pr:<number>:target:<release-target>` claim key.
+- `boundary_token`: required original reservation boundary token.
+- `release_run_ids`: required bounded list of successful `Release Product` runs checked for zero artifacts.
+- `reason`: bounded operator reason recorded in the append-only receipt.
+
+The workflow is evaluated from trusted `main`. It MUST verify absent product publication, absent later identity refs, exact original reservation provenance, and each supplied run before calling `recover-orphan`. A successful receipt permits only a new reclaimed reservation and a new VERSION-only release PR.
+
 ### Preparation trailers
 
 The preparation commit MUST include `Release-Target`, `Release-Policy`, `Product-Version`, `Release-Channel`, `Release-Source-SHA`, `Release-Reservation-Id`, `Release-Reservation-Ref`, `Release-Reservation-Owner`, `Release-Claim-Key`, `Release-Boundary-Token`, `Release-Mode`, and `Release-Provenance`.
 
 ### Identity refs
 
-The existing append-only namespaces remain the durable identity surface: `release-reservation`, `release-decision`, `release-reservation-reclaimed`, `release-decision-reclaimed`, `release-bound`, `release-consumed`, `release-released`, `release-retired`, `release-artifact-pending`, `release-artifact-attempts`, and `release-artifacts`. Product tags remain `v<canonical-version>` and are never rewritten.
+The existing append-only namespaces remain the durable identity surface: `release-reservation`, `release-decision`, `release-reservation-reclaimed`, `release-decision-reclaimed`, `release-bound`, `release-consumed`, `release-released`, `release-orphaned`, `release-retired`, `release-artifact-pending`, `release-artifact-attempts`, and `release-artifacts`. Product tags remain `v<canonical-version>` and are never rewritten.
 
 ## Failure Semantics
 
@@ -137,6 +151,7 @@ The existing append-only namespaces remain the durable identity surface: `releas
 - Missing or untrusted final baseline: reject unless the declared virtual-baseline bootstrap applies.
 - Occupied version, tag, reservation, or publication mapping: reject without successor allocation.
 - Legacy reservation reconciliation: require absent product Tag and GitHub Release, no stable consumed or artifact refs, checked Release Product runs with no artifacts, exact legacy reservation/decision/released provenance, and a new top-level reclaimed identity path; never delete or rewrite the legacy refs.
+- Claimed orphan reservation recovery: require the exact claimed reservation, absent product Tag and GitHub Release, no decision/reclaimed/bound/consumed/released/retired/orphan/artifact refs, bounded successful Release Product runs with no artifacts, and a new `release-orphaned` receipt; never delete or rewrite the original reservation.
 - Same claim and same target: safe idempotent retry.
 - Same PR with descendant source: reuse the original reservation; never mutate it.
 - Different target, source branch identity, policy id, or owner: explicit conflict.
@@ -161,7 +176,7 @@ Covers: REQ-MVR-005 and REQ-MVR-006. Workflow contract tests verify the manual d
 
 ### VER-MVR-004
 
-Covers: REQ-MVR-007 and REQ-MVR-008. Recovery fixtures verify same-identity-only behavior and contract tests verify that label files, label workflows, and label-derived version paths are absent from the active release route.
+Covers: REQ-MVR-007 and REQ-MVR-008. Recovery fixtures verify same-identity-only behavior, claimed orphan recovery, reclaimed namespace isolation, and contract tests verify that label files, label workflows, and label-derived version paths are absent from the active release route.
 
 ### VER-MVR-005
 
