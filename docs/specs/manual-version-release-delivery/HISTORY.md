@@ -15,7 +15,7 @@
 
 ## Related Changes
 
-- None.
+- v0.9.10 正式版沿用已验证的 v0.9.10-rc.1 修复内容，通过独立 VERSION preparation PR 发布；该条目仅记录发布链路，不改变产品行为。
 
 ## References
 
