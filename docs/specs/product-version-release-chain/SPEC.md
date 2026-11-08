@@ -88,8 +88,9 @@ signature rather than treating the current source head as the preparation commit
 
 `version-only-release-pr` is a separate mode. It is a non-empty PR changing only VERSION and
 records one covered merge SHA that does not already have a release identity. Its new merge SHA is
-the identity; the covered merge remains historical context. No workflow automatically creates this
-PR.
+the identity; the covered merge remains historical context. When the PR already carries the target
+VERSION, the preparation identity may be an empty metadata commit, but it must retain the same
+immutable provenance and GitHub-native verification. No workflow automatically creates this PR.
 
 ### REQ-PVR-006: Mainline release uses bound identity only
 

@@ -221,8 +221,6 @@ def verify_prepared(
     parent = commit_parent(release_sha)
     if source_sha and parent != git("rev-parse", f"{source_sha}^{{commit}}"):
         raise ReleaseChainError(f"preparation parent is {parent}, expected {source_sha}")
-    if diff_names(release_sha) != ["VERSION"]:
-        raise ReleaseChainError("preparation commit must modify only VERSION")
     version = commit_version(release_sha)
     if expected_version and version != expected_version:
         raise ReleaseChainError(f"preparation VERSION is {version}, expected {expected_version}")
@@ -230,6 +228,14 @@ def verify_prepared(
     if expected_target and target["releaseTarget"] != parse_release_target(expected_target)["raw"]:
         raise ReleaseChainError("preparation Release-Target does not match the requested target")
     provenance = verify_provenance(release_sha, version, parent)
+    changed = diff_names(release_sha)
+    if changed != ["VERSION"]:
+        if not (
+            changed == []
+            and provenance["mode"] == "version-only-release-pr"
+            and commit_version(parent) == version
+        ):
+            raise ReleaseChainError("preparation commit must modify only VERSION")
     values = {
         "releaseSha": release_sha,
         "sourceSha": parent,
@@ -721,9 +727,16 @@ def stage(args: argparse.Namespace) -> None:
         raise ReleaseChainError("unsupported release policy")
     verify_tag(version)
     (ROOT / "VERSION").write_text(version + "\n", encoding="utf-8")
-    if git("diff", "--name-only") != "VERSION":
+    changed = git("diff", "--name-only")
+    release_mode = getattr(args, "release_mode", "normal")
+    if changed not in {"", "VERSION"}:
         raise ReleaseChainError("preparation staging may modify only VERSION")
-    subprocess.run(["git", "add", "VERSION"], cwd=ROOT, check=True)
+    if not changed and release_mode != "version-only-release-pr":
+        raise ReleaseChainError("preparation staging must modify VERSION")
+    if not changed and commit_version(source_sha) != version:
+        raise ReleaseChainError("empty version-only preparation requires the source VERSION to match")
+    if changed:
+        subprocess.run(["git", "add", "VERSION"], cwd=ROOT, check=True)
     reservation_source_sha = getattr(args, "reservation_source_sha", source_sha)
     metadata = [
         f"Release-Source-SHA: {source_sha}",
@@ -747,11 +760,11 @@ def stage(args: argparse.Namespace) -> None:
         metadata.append(f"Release-Reservation-Source-SHA: {reservation_source_sha}")
     if getattr(args, "covered_merge_sha", ""):
         metadata.append(f"Release-Covered-Merge-SHA: {args.covered_merge_sha}")
-    subprocess.run(
-        ["git", "commit", "--signoff", "-m", f"chore(release): v{version}", "-m", "\n".join(metadata)],
-        cwd=ROOT,
-        check=True,
-    )
+    commit_args = ["git", "commit", "--signoff"]
+    if not changed:
+        commit_args.append("--allow-empty")
+    commit_args.extend(["-m", f"chore(release): v{version}", "-m", "\n".join(metadata)])
+    subprocess.run(commit_args, cwd=ROOT, check=True)
     print(json.dumps(verify_prepared(git("rev-parse", "HEAD"), source_sha), sort_keys=True))
 
 
