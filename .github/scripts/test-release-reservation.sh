@@ -175,6 +175,43 @@ if python3 "$root_dir/.github/scripts/release_reservation.py" receipt \
   exit 1
 fi
 
+orphan_repo="$tmp_dir/orphan-repo"
+mkdir -p "$orphan_repo"
+git -C "$orphan_repo" init -q
+git -C "$orphan_repo" config user.name fixture
+git -C "$orphan_repo" config user.email fixture@example.com
+printf '0.9.6\n' > "$orphan_repo/VERSION"
+git -C "$orphan_repo" add VERSION
+git -C "$orphan_repo" commit -qm orphan-source
+orphan_source_sha="$(git -C "$orphan_repo" rev-parse HEAD)"
+orphan_claim_key="pr:305:target:0.9.7"
+orphan_reservation="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$orphan_repo" --source-sha "$orphan_source_sha" --version 0.9.7 --channel prod \
+  --release-target 0.9.7 --owner github-actions[bot] --claim-key "$orphan_claim_key")"
+orphan_reservation_id="$(printf '%s' "$orphan_reservation" | jq -r .reservationId)"
+orphan_boundary_token="$(printf '%s' "$orphan_reservation" | jq -r '."Reservation-Boundary-Token"')"
+cat > "$tmp_dir/orphan-evidence.json" <<EOF
+{"kind":"orphan-unbound","schema_version":1,"version":"0.9.7","main_sha":"$orphan_source_sha","product_tag":{"ref":"v0.9.7","status":"absent"},"github_release":{"tag":"v0.9.7","status":"absent"},"decision_refs":[],"reclaimed_refs":[],"bound_refs":[],"consumed_refs":[],"released_refs":[],"retired_refs":[],"artifact_refs":[],"release_runs":[{"id":"42506238969","status":"completed","conclusion":"success","head_branch":"main","workflow_path":".github/workflows/release.yml","artifacts":[]}]}
+EOF
+orphan_recovery="$(python3 "$root_dir/.github/scripts/release_reservation.py" recover-orphan \
+  --local-root "$orphan_repo" --version 0.9.7 --reservation-id "$orphan_reservation_id" \
+  --owner github-actions[bot] --claim-key "$orphan_claim_key" --release-target 0.9.7 \
+  --boundary-token "$orphan_boundary_token" --evidence-json "$tmp_dir/orphan-evidence.json")"
+[[ "$(printf '%s' "$orphan_recovery" | jq -r .ref)" == "refs/tags/release-orphaned/v0.9.7/$orphan_reservation_id" ]]
+orphan_reservation_sha="$(git -C "$orphan_repo" rev-parse refs/tags/release-reservation/v0.9.7^{commit})"
+orphan_recovery_again="$(python3 "$root_dir/.github/scripts/release_reservation.py" recover-orphan \
+  --local-root "$orphan_repo" --version 0.9.7 --reservation-id "$orphan_reservation_id" \
+  --owner github-actions[bot] --claim-key "$orphan_claim_key" --release-target 0.9.7 \
+  --boundary-token "$orphan_boundary_token" --evidence-json "$tmp_dir/orphan-evidence.json")"
+[[ "$(printf '%s' "$orphan_recovery_again" | jq -r .target)" == "$(printf '%s' "$orphan_recovery" | jq -r .target)" ]]
+[[ "$(git -C "$orphan_repo" rev-parse refs/tags/release-reservation/v0.9.7^{commit})" == "$orphan_reservation_sha" ]]
+orphan_reclaimed_claim="pr:306:target:0.9.7"
+orphan_reclaimed="$(python3 "$root_dir/.github/scripts/release_reservation.py" reserve \
+  --local-root "$orphan_repo" --source-sha "$orphan_source_sha" --version 0.9.7 --channel prod \
+  --release-target 0.9.7 --owner github-actions[bot] --claim-key "$orphan_reclaimed_claim")"
+orphan_reclaimed_id="$(printf '%s' "$orphan_reclaimed" | jq -r .reservationId)"
+[[ "$(printf '%s' "$orphan_reclaimed" | jq -r .ref)" == "refs/tags/release-reservation-reclaimed/v0.9.7/$orphan_reclaimed_id" ]]
+
 legacy_repo="$tmp_dir/legacy-repo"
 mkdir -p "$legacy_repo"
 git -C "$legacy_repo" init -q

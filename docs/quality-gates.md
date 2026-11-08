@@ -36,7 +36,7 @@ artifact is also bound to the exact failed `Release Product` run attempt; a prio
 snapshot or resolver job cannot supply notification identity.
 
 Product tag refs (`refs/tags/v*`) remain server-protected and are created as annotated tags by
-`github-actions[bot]`. The five release identity namespaces are intentionally outside that
+`github-actions[bot]`. The twelve release identity namespaces are intentionally outside that
 product-tag ruleset so reservation and receipt writes can use the existing default `GITHUB_TOKEN`;
 no PAT, GitHub App, deploy key, or other CI credential is part of the release contract. Their
 append-only create semantics, provenance, ownership, and transition rules are enforced by
@@ -70,6 +70,8 @@ Release source.
 
 After a normal merge, `Release Product` reads only the committed merged identity and its reservation ref. Its manual entry is restricted to same-identity `recover`. Successful publication is reported directly to the owner by the release-owning agent; Release Product does not write a result comment to the source PR. Failed releases are handled by `Notify failed release`, which reports locked identity context only when it can be resolved.
 
+The dispatch-only `Recover unbound release reservation` workflow handles a claimed reservation that never acquired downstream identity. It verifies the exact original reservation, absent product publication, absent later identity refs, and a bounded list of successful `Release Product` runs with no artifacts before appending `release-orphaned/<version>/<reservation-id>`. This receipt releases only the version-resolution occupation; the next claim must use a new reclaimed reservation and a new VERSION-only release PR.
+
 Recovery and publication evaluate policy and helper resolution from the trusted main checkout, while
 their historical input selects the recovered product identity. Packaging and publication remain bound
 to that identity and do not silently switch product inputs to the policy checkout's commit. The
@@ -82,8 +84,8 @@ resolved by recovery, while its product inputs remain checked out from the recov
 The declaration is the repository source of truth. GitHub labels, required checks, signed commits,
 main branch rules, and product tag protection are reconciled only at PR-ready Step 5C by the
 release-owning agent. The remote tag ruleset must protect `refs/tags/v*` and exclude
-`release-reservation/*`, `release-decision/*`, `release-bound/*`, `release-consumed/*`, and
-`release-released/*`; this change does not edit remote settings. Unrelated rules are preserved and
+`release-reservation/*`, `release-decision/*`, `release-bound/*`, `release-consumed/*`,
+`release-released/*`, `release-orphaned/*`, and `release-retired/*`; this change does not edit remote settings. Unrelated rules are preserved and
 insufficient permissions remain an explicit blocker.
 
 ## Local verification

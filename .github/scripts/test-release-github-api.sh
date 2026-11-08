@@ -361,5 +361,112 @@ assert module.decision_ref("0.9.9", reclaimed["ref"]).endswith(
     f"release-decision-reclaimed/v0.9.9/{reclaimed_identity['reservationId']}"
 )
 
+orphan_source = "1" * 40
+orphan_reservation_sha = "2" * 40
+orphan_receipt_sha = "3" * 40
+orphan_reclaimed_reservation_sha = "4" * 40
+orphan_claim = "pr:305:target:0.9.10"
+orphan_identity = module.deterministic_identity("github-actions[bot]", orphan_claim)
+
+
+class OrphanFakeGitHubRefClient(FakeGitHubRefClient):
+    repository = "fixture/repo"
+    refs = {
+        module.reservation_ref("0.9.10"): orphan_reservation_sha,
+    }
+    commits = {
+        orphan_source: {"sha": orphan_source, "tree": {"sha": tree}, "parents": [], "message": "orphan source\n"},
+        orphan_reservation_sha: {
+            "sha": orphan_reservation_sha, "tree": {"sha": tree}, "parents": [{"sha": orphan_source}],
+            "message": f"""release: reserve product identity
+
+Reservation-Id: {orphan_identity["reservationId"]}
+Reservation-Owner: github-actions[bot]
+Reservation-Claim-Key: {orphan_claim}
+Reservation-Boundary-Token: {orphan_identity["boundaryToken"]}
+Release-Version: 0.9.10
+Release-Channel: prod
+Release-Target: 0.9.10
+Release-Policy: {module.RELEASE_POLICY_ID}
+Reservation-State: claimed
+""",
+        },
+    }
+    next_commits = iter((orphan_receipt_sha, orphan_reclaimed_reservation_sha))
+
+    def __init__(self, repository, token, api_root):
+        assert repository == "fixture/repo"
+        assert token == "token"
+        assert api_root == "https://fixture.invalid"
+        self.repository = repository
+        self.token = token
+        self.api_root = api_root
+
+    def request_json(self, method, path, payload=None):
+        if method == "GET" and (
+            path.endswith("/git/ref/tags/v0.9.10")
+            or path.endswith("/releases/tags/v0.9.10")
+            or "/git/matching-refs/tags/" in path
+        ):
+            return (404 if "/git/matching-refs/" not in path else 200), ([] if "/git/matching-refs/" in path else {})
+        raise AssertionError((method, path, payload))
+
+
+module.GitHubRefClient = OrphanFakeGitHubRefClient
+orphan_evidence = {
+    "kind": "orphan-unbound",
+    "schema_version": 1,
+    "version": "0.9.10",
+    "main_sha": orphan_source,
+    "product_tag": {"ref": "v0.9.10", "status": "absent"},
+    "github_release": {"tag": "v0.9.10", "status": "absent"},
+    "decision_refs": [],
+    "reclaimed_refs": [],
+    "bound_refs": [],
+    "consumed_refs": [],
+    "released_refs": [],
+    "retired_refs": [],
+    "artifact_refs": [],
+    "release_runs": [{
+        "id": "42506238969",
+        "status": "completed",
+        "conclusion": "success",
+        "head_branch": "main",
+        "workflow_path": ".github/workflows/release.yml",
+        "artifacts": [],
+    }],
+}
+orphan_created = module.create_github_orphan_recovery(
+    version="0.9.10", reservation_id=orphan_identity["reservationId"],
+    owner="github-actions[bot]", claim_key=orphan_claim, release_target="0.9.10",
+    boundary_token=orphan_identity["boundaryToken"], evidence=orphan_evidence,
+    repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert orphan_created["ref"] == module.orphan_recovery_ref("0.9.10", orphan_identity["reservationId"])
+orphan_retry = module.create_github_orphan_recovery(
+    version="0.9.10", reservation_id=orphan_identity["reservationId"],
+    owner="github-actions[bot]", claim_key=orphan_claim, release_target="0.9.10",
+    boundary_token=orphan_identity["boundaryToken"], evidence=dict(orphan_evidence, main_sha="5" * 40),
+    repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert orphan_retry["target"] == orphan_created["target"]
+orphan_reclaimed_claim = "pr:306:target:0.9.10"
+orphan_reclaimed_identity = module.deterministic_identity("github-actions[bot]", orphan_reclaimed_claim)
+orphan_reclaimed = module.expected_reservation(
+    source_sha=orphan_source, version="0.9.10", channel="prod", release_target="0.9.10",
+    policy=module.RELEASE_POLICY_ID, owner="github-actions[bot]", claim_key=orphan_reclaimed_claim,
+    reservation_id=orphan_reclaimed_identity["reservationId"], boundary_token=orphan_reclaimed_identity["boundaryToken"],
+)
+orphan_reclaimed["ref"] = module.reservation_ref_for_claim(
+    version="0.9.10", reservation_id=orphan_reclaimed_identity["reservationId"],
+    owner="github-actions[bot]", claim_key=orphan_reclaimed_claim, release_target="0.9.10",
+    repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert orphan_reclaimed["ref"] == module.reclaimed_reservation_ref("0.9.10", orphan_reclaimed_identity["reservationId"])
+created_orphan_reclaimed = module.create_github_reservation(
+    orphan_reclaimed, repository="fixture/repo", token="token", api_root="https://fixture.invalid",
+)
+assert created_orphan_reclaimed["ref"] == orphan_reclaimed["ref"]
+
 print("release GitHub API mock tests passed")
 PY

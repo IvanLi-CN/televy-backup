@@ -154,6 +154,13 @@ def retirement_ref(version: str, reservation_id: str) -> str:
     return f"refs/tags/release-retired/v{version}/{reservation_id}"
 
 
+def orphan_recovery_ref(version: str, reservation_id: str) -> str:
+    validate_version(version)
+    if not IDENTITY_SEGMENT_RE.fullmatch(reservation_id):
+        raise ReservationError(f"invalid orphan recovery identity: {reservation_id!r}")
+    return f"refs/tags/release-orphaned/v{version}/{reservation_id}"
+
+
 def deterministic_identity(owner: str, claim_key: str) -> dict[str, str]:
     if not owner.strip() or not claim_key.strip():
         raise ReservationError("reservation owner and claim key are required")
@@ -405,7 +412,7 @@ def reservation_ref_for_claim(
     release_target: str = "", repository: str | None = None, token: str | None = None,
     api_root: str = "https://api.github.com", cwd: Path = ROOT
 ) -> str:
-    """Choose the immutable reservation path, reclaiming only a verified retired legacy claim."""
+    """Choose the immutable reservation path after a verified append-only recovery receipt."""
     default_ref = reservation_ref(version)
     if repository and token:
         client = GitHubRefClient(repository, token, api_root)
@@ -426,6 +433,17 @@ def reservation_ref_for_claim(
             and legacy_trailers.get("Release-Target") == release_target
         ):
             return default_ref
+        orphan_ref = orphan_recovery_ref(version, legacy_id)
+        if client.ref_target(orphan_ref):
+            verify_github_orphan_recovery(
+                version=version, reservation_id=legacy_id,
+                owner=legacy_trailers.get("Reservation-Owner", ""),
+                claim_key=legacy_trailers.get("Reservation-Claim-Key", ""),
+                release_target=legacy_trailers.get("Release-Target", ""),
+                boundary_token=legacy_trailers.get("Reservation-Boundary-Token", ""),
+                repository=repository, token=token, api_root=api_root,
+            )
+            return reclaimed_reservation_ref(version, reservation_id)
         verify_github_retirement(
             version=version, reservation_id=legacy_id, repository=repository, token=token,
             api_root=api_root,
@@ -447,6 +465,17 @@ def reservation_ref_for_claim(
         and legacy_trailers.get("Release-Target") == release_target
     ):
         return default_ref
+    orphan_ref = orphan_recovery_ref(version, legacy_id)
+    if local_ref_target(orphan_ref, cwd):
+        verify_local_orphan_recovery(
+            version=version, reservation_id=legacy_id,
+            owner=legacy_trailers.get("Reservation-Owner", ""),
+            claim_key=legacy_trailers.get("Reservation-Claim-Key", ""),
+            release_target=legacy_trailers.get("Release-Target", ""),
+            boundary_token=legacy_trailers.get("Reservation-Boundary-Token", ""),
+            cwd=cwd,
+        )
+        return reclaimed_reservation_ref(version, reservation_id)
     verify_local_retirement(version=version, reservation_id=legacy_id, cwd=cwd)
     return reclaimed_reservation_ref(version, reservation_id)
 
@@ -1090,6 +1119,350 @@ def create_github_retirement(
     return verify_github_retirement(
         version=version, reservation_id=reservation_id, repository=repository, token=token,
         api_root=api_root, owner=owner, reason=reason, evidence=evidence,
+    )
+
+
+def validate_orphan_recovery_evidence(evidence: dict[str, Any], version: str) -> None:
+    if not isinstance(evidence, dict) or evidence.get("version") != version:
+        raise ReservationError("orphan recovery evidence version does not match the release version")
+    if evidence.get("kind") != "orphan-unbound" or evidence.get("schema_version") != 1:
+        raise ReservationError("unsupported orphan recovery evidence schema")
+    product_tag = evidence.get("product_tag")
+    github_release = evidence.get("github_release")
+    if not isinstance(product_tag, dict) or product_tag.get("status") != "absent":
+        raise ReservationError("orphan recovery requires an absent product tag")
+    if not isinstance(github_release, dict) or github_release.get("status") != "absent":
+        raise ReservationError("orphan recovery requires an absent GitHub Release")
+    for key in (
+        "decision_refs", "reclaimed_refs", "bound_refs", "consumed_refs", "released_refs",
+        "retired_refs", "artifact_refs",
+    ):
+        if evidence.get(key) != []:
+            raise ReservationError(f"orphan recovery requires no {key.replace('_', ' ')}")
+    runs = evidence.get("release_runs")
+    if not isinstance(runs, list) or not runs:
+        raise ReservationError("orphan recovery evidence must list the checked Release Product runs")
+    for run in runs:
+        if not isinstance(run, dict) or not POSITIVE_INTEGER_RE.fullmatch(str(run.get("id", ""))):
+            raise ReservationError("orphan recovery evidence has an invalid Release Product run")
+        if (
+            run.get("status") != "completed"
+            or run.get("conclusion") != "success"
+            or run.get("head_branch") != "main"
+            or run.get("workflow_path") != ".github/workflows/release.yml"
+            or run.get("artifacts") != []
+        ):
+            raise ReservationError("orphan recovery requires checked Release Product runs with no artifacts")
+    normalize_sha(str(evidence.get("main_sha", "")), "orphan recovery evidence main SHA")
+
+
+def _orphan_recovery_static_fields(
+    *, version: str, reservation: dict[str, Any], owner: str, reason: str
+) -> dict[str, str]:
+    for label, value in (("orphan recovery owner", owner), ("orphan recovery reason", reason)):
+        if not isinstance(value, str) or not value.strip() or "\n" in value or "\r" in value:
+            raise ReservationError(f"{label} must be a non-empty single-line value")
+    return {
+        "Orphan-Recovery-State": "unbound",
+        "Release-Version": version,
+        "Orphan-Reservation-Id": str(reservation["reservationId"]),
+        "Orphan-Source-Reservation-Ref": str(reservation["ref"]),
+        "Orphan-Source-Reservation-SHA": str(reservation["target"]),
+        "Orphan-Source-SHA": str(reservation["sourceSha"]),
+        "Orphan-Reservation-Owner": str(reservation["Reservation-Owner"]),
+        "Orphan-Claim-Key": str(reservation["Reservation-Claim-Key"]),
+        "Orphan-Boundary-Token": str(reservation["Reservation-Boundary-Token"]),
+        "Orphan-Release-Target": str(reservation["releaseTarget"]),
+        "Orphan-Release-Policy": str(reservation["policy"]),
+        "Orphan-Release-Channel": str(reservation["channel"]),
+        "Orphan-Product-Tag": "absent",
+        "Orphan-GitHub-Release": "absent",
+        "Orphan-Decision-Refs": "none",
+        "Orphan-Reclaimed-Refs": "none",
+        "Orphan-Bound-Refs": "none",
+        "Orphan-Consumed-Refs": "none",
+        "Orphan-Released-Refs": "none",
+        "Orphan-Retired-Refs": "none",
+        "Orphan-Artifact-Refs": "none",
+        "Orphan-Recovery-Owner": owner,
+        "Orphan-Recovery-Reason": reason,
+        "Orphan-Provenance": "immutable-orphan-unbound-recovery",
+    }
+
+
+def orphan_recovery_fields(
+    *, version: str, reservation: dict[str, Any], owner: str, reason: str,
+    evidence: dict[str, Any]
+) -> dict[str, str]:
+    validate_orphan_recovery_evidence(evidence, version)
+    fields = _orphan_recovery_static_fields(
+        version=version, reservation=reservation, owner=owner, reason=reason
+    )
+    fields.update({
+        "Orphan-Checked-Release-Runs": ",".join(str(run["id"]) for run in evidence["release_runs"]),
+        "Orphan-Evidence-Main-SHA": normalize_sha(
+            str(evidence["main_sha"]), "orphan recovery evidence main SHA"
+        ),
+        "Orphan-Evidence-Digest": retirement_evidence_digest(evidence),
+    })
+    return fields
+
+
+def orphan_recovery_message(fields: dict[str, str]) -> str:
+    lines = ["release: immutable orphan reservation recovery", ""]
+    lines.extend(f"{key}: {value}" for key, value in fields.items())
+    return "\n".join(lines) + "\n"
+
+
+def verify_orphan_recovery_trailers(
+    actual: dict[str, str], fields: dict[str, str], evidence: dict[str, Any] | None
+) -> None:
+    if any(actual.get(key) != value for key, value in fields.items()):
+        raise ReservationError("orphan recovery receipt does not match the requested identity")
+    if evidence is None:
+        if not actual.get("Orphan-Checked-Release-Runs"):
+            raise ReservationError("orphan recovery receipt is missing checked Release Product runs")
+        normalize_sha(actual.get("Orphan-Evidence-Main-SHA", ""), "orphan recovery evidence main SHA")
+        if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", actual.get("Orphan-Evidence-Digest", "")):
+            raise ReservationError("orphan recovery receipt has an invalid evidence digest")
+    else:
+        expected = orphan_recovery_fields(
+            version=fields["Release-Version"],
+            reservation={
+                "ref": fields["Orphan-Source-Reservation-Ref"],
+                "target": fields["Orphan-Source-Reservation-SHA"],
+                "sourceSha": fields["Orphan-Source-SHA"],
+                "reservationId": fields["Orphan-Reservation-Id"],
+                "Reservation-Owner": fields["Orphan-Reservation-Owner"],
+                "Reservation-Claim-Key": fields["Orphan-Claim-Key"],
+                "Reservation-Boundary-Token": fields["Orphan-Boundary-Token"],
+                "releaseTarget": fields["Orphan-Release-Target"],
+                "policy": fields["Orphan-Release-Policy"],
+                "channel": fields["Orphan-Release-Channel"],
+            },
+            owner=fields["Orphan-Recovery-Owner"], reason=fields["Orphan-Recovery-Reason"],
+            evidence=evidence,
+        )
+        if any(actual.get(key) != value for key, value in expected.items()):
+            raise ReservationError("orphan recovery receipt does not match the supplied evidence")
+
+
+def _verify_orphan_source_local(
+    *, version: str, reservation_id: str, owner: str, claim_key: str,
+    release_target: str, boundary_token: str, cwd: Path = ROOT
+) -> dict[str, Any]:
+    ref = reservation_ref(version)
+    reservation = verify_local_reservation_claim(
+        reservation_ref_value=ref, version=version, reservation_id=reservation_id,
+        owner=owner, claim_key=claim_key, boundary_token=boundary_token,
+        release_target=release_target, policy=RELEASE_POLICY_ID, cwd=cwd,
+    )
+    if reservation["ref"] != ref:
+        raise ReservationError("orphan recovery requires the original reservation ref")
+    return reservation
+
+
+def _verify_orphan_source_github(
+    *, client: GitHubRefClient, version: str, reservation_id: str, owner: str,
+    claim_key: str, release_target: str, boundary_token: str
+) -> dict[str, Any]:
+    ref = reservation_ref(version)
+    reservation = verify_github_reservation_claim(
+        reservation_ref_value=ref, version=version, reservation_id=reservation_id,
+        owner=owner, claim_key=claim_key, boundary_token=boundary_token,
+        release_target=release_target, policy=RELEASE_POLICY_ID,
+        repository=client.repository, token=client.token, api_root=client.api_root,
+    )
+    if reservation["ref"] != ref:
+        raise ReservationError("orphan recovery requires the original reservation ref")
+    return reservation
+
+
+def _local_orphan_blocking_refs(version: str, cwd: Path) -> list[str]:
+    refs: list[str] = []
+    for namespace in (
+        "release-decision", "release-decision-reclaimed", "release-reservation-reclaimed",
+        "release-bound", "release-consumed", "release-released", "release-retired",
+        "release-orphaned", "release-artifact-pending", "release-artifact-attempts",
+        "release-artifacts",
+    ):
+        refs.extend(_git("for-each-ref", "--format=%(refname)", f"refs/tags/{namespace}/v{version}", cwd=cwd).splitlines())
+    return refs
+
+
+def ensure_local_orphan_unbound(version: str, cwd: Path = ROOT) -> None:
+    if local_ref_target(f"refs/tags/v{version}", cwd):
+        raise ReservationError("cannot recover an orphan reservation with a product tag")
+    refs = _local_orphan_blocking_refs(version, cwd)
+    if refs:
+        raise ReservationError(f"orphan reservation has later identity refs: {', '.join(refs)}")
+
+
+def _remote_orphan_blocking_refs(client: GitHubRefClient, version: str) -> list[str]:
+    refs: list[str] = []
+    if client.ref_target(decision_ref(version)):
+        refs.append(decision_ref(version))
+    for namespace in (
+        "release-decision-reclaimed", "release-reservation-reclaimed", "release-bound",
+        "release-consumed", "release-released", "release-retired", "release-orphaned",
+        "release-artifact-pending", "release-artifact-attempts", "release-artifacts",
+    ):
+        refs.extend(_remote_matching_refs(client, namespace, version))
+    return refs
+
+
+def ensure_github_orphan_unbound(client: GitHubRefClient, version: str) -> None:
+    if client.ref_target(f"refs/tags/v{version}"):
+        raise ReservationError("cannot recover an orphan reservation with a product tag")
+    status, _ = client.request_json("GET", f"/repos/{client.repository}/releases/tags/v{version}")
+    if status != 404:
+        raise ReservationError("cannot recover an orphan reservation with a GitHub Release")
+    refs = _remote_orphan_blocking_refs(client, version)
+    if refs:
+        raise ReservationError(f"orphan reservation has later identity refs: {', '.join(refs)}")
+
+
+def verify_local_orphan_recovery(
+    *, version: str, reservation_id: str, owner: str, claim_key: str,
+    release_target: str, boundary_token: str, reason: str = "no-bound-identity",
+    evidence: dict[str, Any] | None = None, cwd: Path = ROOT
+) -> dict[str, Any]:
+    reservation = _verify_orphan_source_local(
+        version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+        release_target=release_target, boundary_token=boundary_token, cwd=cwd,
+    )
+    ref = orphan_recovery_ref(version, reservation_id)
+    target = local_ref_target(ref, cwd)
+    if not target:
+        raise ReservationError(f"orphan recovery ref is missing: {ref}")
+    fields = (
+        _orphan_recovery_static_fields(version=version, reservation=reservation, owner=owner, reason=reason)
+        if evidence is None else orphan_recovery_fields(
+            version=version, reservation=reservation, owner=owner, reason=reason, evidence=evidence
+        )
+    )
+    info = local_commit_info(target, cwd)
+    source_info = local_commit_info(str(reservation["target"]), cwd)
+    if info["parents"] != [source_info["sha"]] or info["tree"] not in {source_info["tree"], IDENTITY_METADATA_TREE_SHA}:
+        raise ReservationError("orphan recovery receipt provenance does not match the reservation")
+    verify_orphan_recovery_trailers(trailers_from_message(info["message"]), fields, evidence)
+    return {"ref": ref, "target": target, **fields}
+
+
+def create_local_orphan_recovery(
+    *, version: str, reservation_id: str, owner: str, claim_key: str,
+    release_target: str, boundary_token: str, evidence: dict[str, Any],
+    reason: str = "no-bound-identity", cwd: Path = ROOT
+) -> dict[str, Any]:
+    ref = orphan_recovery_ref(version, reservation_id)
+    existing = local_ref_target(ref, cwd)
+    if existing:
+        return verify_local_orphan_recovery(
+            version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+            release_target=release_target, boundary_token=boundary_token, reason=reason, cwd=cwd,
+        )
+    reservation = _verify_orphan_source_local(
+        version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+        release_target=release_target, boundary_token=boundary_token, cwd=cwd,
+    )
+    ensure_local_orphan_unbound(version, cwd)
+    fields = orphan_recovery_fields(
+        version=version, reservation=reservation, owner=owner, reason=reason, evidence=evidence
+    )
+    reservation_info = local_commit_info(str(reservation["target"]), cwd)
+    commit = _git(
+        "commit-tree", reservation_info["tree"], "-p", reservation_info["sha"],
+        "-m", orphan_recovery_message(fields), cwd=cwd,
+    )
+    update = subprocess.run(["git", "update-ref", ref, commit, "0" * 40], cwd=cwd, text=True, capture_output=True)
+    if update.returncode != 0:
+        existing = local_ref_target(ref, cwd)
+        if existing:
+            return verify_local_orphan_recovery(
+                version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+                release_target=release_target, boundary_token=boundary_token, reason=reason,
+                evidence=evidence, cwd=cwd,
+            )
+        raise ReservationError(update.stderr.strip() or "orphan recovery ref creation failed")
+    return verify_local_orphan_recovery(
+        version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+        release_target=release_target, boundary_token=boundary_token, reason=reason,
+        evidence=evidence, cwd=cwd,
+    )
+
+
+def verify_github_orphan_recovery(
+    *, version: str, reservation_id: str, owner: str, claim_key: str,
+    release_target: str, boundary_token: str, repository: str, token: str,
+    api_root: str = "https://api.github.com", reason: str = "no-bound-identity",
+    evidence: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    client = GitHubRefClient(repository, token, api_root)
+    reservation = _verify_orphan_source_github(
+        client=client, version=version, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, release_target=release_target, boundary_token=boundary_token,
+    )
+    ref = orphan_recovery_ref(version, reservation_id)
+    target = client.ref_target(ref)
+    if not target:
+        raise ReservationError(f"orphan recovery ref is missing: {ref}")
+    fields = (
+        _orphan_recovery_static_fields(version=version, reservation=reservation, owner=owner, reason=reason)
+        if evidence is None else orphan_recovery_fields(
+            version=version, reservation=reservation, owner=owner, reason=reason, evidence=evidence
+        )
+    )
+    info = client.commit_info(target)
+    source_info = client.commit_info(str(reservation["target"]))
+    parents = [parent.get("sha") for parent in info.get("parents", [])]
+    allowed_trees = {source_info.get("tree", {}).get("sha"), IDENTITY_METADATA_TREE_SHA}
+    if parents != [str(reservation["target"])] or info.get("tree", {}).get("sha") not in allowed_trees:
+        raise ReservationError("remote orphan recovery provenance does not match the reservation")
+    verify_orphan_recovery_trailers(trailers_from_message(str(info.get("message", ""))), fields, evidence)
+    return {"ref": ref, "target": target, **fields}
+
+
+def create_github_orphan_recovery(
+    *, version: str, reservation_id: str, owner: str, claim_key: str,
+    release_target: str, boundary_token: str, evidence: dict[str, Any], repository: str,
+    token: str, api_root: str = "https://api.github.com", reason: str = "no-bound-identity"
+) -> dict[str, Any]:
+    client = GitHubRefClient(repository, token, api_root)
+    ref = orphan_recovery_ref(version, reservation_id)
+    existing = client.ref_target(ref)
+    if existing:
+        return verify_github_orphan_recovery(
+            version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+            release_target=release_target, boundary_token=boundary_token, repository=repository,
+            token=token, api_root=api_root, reason=reason,
+        )
+    reservation = _verify_orphan_source_github(
+        client=client, version=version, reservation_id=reservation_id, owner=owner,
+        claim_key=claim_key, release_target=release_target, boundary_token=boundary_token,
+    )
+    ensure_github_orphan_unbound(client, version)
+    fields = orphan_recovery_fields(
+        version=version, reservation=reservation, owner=owner, reason=reason, evidence=evidence
+    )
+    commit = client.create_commit(
+        tree=client.create_tree(), parent=str(reservation["target"]), message=orphan_recovery_message(fields)
+    )
+    try:
+        target = client.create_ref(ref, commit)
+    except ReservationError:
+        target = client.ref_target(ref)
+        if not target:
+            raise
+    if target != commit:
+        return verify_github_orphan_recovery(
+            version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+            release_target=release_target, boundary_token=boundary_token, repository=repository,
+            token=token, api_root=api_root, reason=reason, evidence=evidence,
+        )
+    return verify_github_orphan_recovery(
+        version=version, reservation_id=reservation_id, owner=owner, claim_key=claim_key,
+        release_target=release_target, boundary_token=boundary_token, repository=repository,
+        token=token, api_root=api_root, reason=reason, evidence=evidence,
     )
 
 
@@ -2142,6 +2515,20 @@ def main(argv: list[str] | None = None) -> int:
     retire.add_argument("--token")
     retire.add_argument("--api-root", default="https://api.github.com")
     retire.add_argument("--output", type=Path)
+    orphan = sub.add_parser("recover-orphan")
+    orphan.add_argument("--version", required=True)
+    orphan.add_argument("--reservation-id", required=True)
+    orphan.add_argument("--owner", default="github-actions[bot]")
+    orphan.add_argument("--claim-key", required=True)
+    orphan.add_argument("--release-target", required=True)
+    orphan.add_argument("--boundary-token", required=True)
+    orphan.add_argument("--reason", default="no-bound-identity")
+    orphan.add_argument("--evidence-json", type=Path, required=True)
+    orphan.add_argument("--local-root", type=Path)
+    orphan.add_argument("--repository")
+    orphan.add_argument("--token")
+    orphan.add_argument("--api-root", default="https://api.github.com")
+    orphan.add_argument("--output", type=Path)
     find_claim = sub.add_parser("find-claim")
     find_claim.add_argument("--claim-key", required=True)
     find_claim.add_argument("--owner", required=True)
@@ -2227,6 +2614,23 @@ def main(argv: list[str] | None = None) -> int:
                 result = create_local_retirement(
                     version=args.version, reservation_id=args.reservation_id, evidence=evidence,
                     owner=args.owner, reason=args.reason, cwd=args.local_root or ROOT,
+                )
+        elif args.command == "recover-orphan":
+            evidence = json.loads(args.evidence_json.read_text(encoding="utf-8"))
+            validate_orphan_recovery_evidence(evidence, args.version)
+            if args.repository and args.token:
+                result = create_github_orphan_recovery(
+                    version=args.version, reservation_id=args.reservation_id, owner=args.owner,
+                    claim_key=args.claim_key, release_target=args.release_target,
+                    boundary_token=args.boundary_token, evidence=evidence, repository=args.repository,
+                    token=args.token, api_root=args.api_root, reason=args.reason,
+                )
+            else:
+                result = create_local_orphan_recovery(
+                    version=args.version, reservation_id=args.reservation_id, owner=args.owner,
+                    claim_key=args.claim_key, release_target=args.release_target,
+                    boundary_token=args.boundary_token, evidence=evidence, reason=args.reason,
+                    cwd=args.local_root or ROOT,
                 )
         elif args.command == "find-claim":
             result = find_local_reservation_by_claim(
