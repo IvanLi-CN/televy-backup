@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 cask "televybackup" do
-  version "0.9.8"
-  sha256 "56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8"
+  version "0.9.11"
+  sha256 "fdf009e32b6e30e51661b030bd82cd82dbea08883f7ec0dca2e1cb8c13a57bff"
 
   url "https://github.com/IvanLi-CN/televy-backup/releases/download/v#{version}/TelevyBackup-#{version}.dmg"
   name "TelevyBackup"
