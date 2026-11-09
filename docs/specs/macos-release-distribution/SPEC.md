@@ -150,14 +150,7 @@ Gatekeeper confirmation required for the ad-hoc signed, non-notarized app. It MU
 quarantine, run privileged commands, install or control a daemon/service/helper, request FDA, or
 remove configuration, Keychain entries, or backup data on uninstall.
 
-After publishing a stable GitHub Release, a trusted workflow MUST generate the Cask from that
-Release's immutable `SHA256SUMS` and `BUILD-MANIFEST.json`, create or update a same-repository PR,
-and use only the GitHub Actions-provided `GITHUB_TOKEN`; no PAT, GitHub App, fine-grained token, or
-repository secret may be required. The PR MUST receive the channel-free `type:docs` label and MUST
-run the normal required repository checks plus the dedicated Homebrew Cask audit, including release
-asset checksum and bundle-identity verification. The trusted workflow MUST merge only after all
-exact-head checks succeed, using a head-SHA-constrained squash merge. The Cask audit workflow
-remains read-only and a manual retry MUST never mutate the published Release.
+After publishing a stable GitHub Release, a trusted workflow MUST generate the Cask from that Release's immutable `SHA256SUMS` and `BUILD-MANIFEST.json`, create or update a same-repository PR, and use only the GitHub Actions-provided `GITHUB_TOKEN`; no PAT, GitHub App, fine-grained token, or repository secret may be required. The repository setting `Allow GitHub Actions to create and approve pull requests` MUST be enabled in addition to the workflow's `pull-requests: write` permission. The PR MUST run the normal required repository checks plus the dedicated Homebrew Cask audit, including release asset checksum and bundle-identity verification. A legacy label bridge MAY emit a compatibility check for older branch protection rules, but labels are not release authority. The trusted workflow MUST merge only after all exact-head checks succeed, using a head-SHA-constrained squash merge. The Cask audit workflow remains read-only and a manual retry MUST never mutate the published Release.
 
 ## Compatibility
 

@@ -74,10 +74,12 @@ jobs:
       - name: Install Homebrew tap view for audit
         run: |
           set -euo pipefail
+          tap_name="IvanLi-CN/televy-backup"
           tap_dir="$(brew --repository)/Library/Taps/ivanli-cn/homebrew-televy-backup"
           mkdir -p "${tap_dir}/Casks"
           cp Casks/televybackup.rb "${tap_dir}/Casks/televybackup.rb"
           git -C "${tap_dir}" init -q
+          brew trust --tap "${tap_name}"
 
       - name: Run Homebrew strict Cask audit
         env:
@@ -90,7 +92,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version="$(python3 scripts/homebrew/cask_release.py cask-version --cask Casks/televybackup.rb)"
+          version="$(ruby -e 'text = File.read("Casks/televybackup.rb"); match = text.match(/^  version "([^"]+)"$/); abort unless match; puts match[1]')"
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${version}" > "${RUNNER_TEMP}/cask-release.json"
           jq -e '.draft == false and .prerelease == false' "${RUNNER_TEMP}/cask-release.json" >/dev/null
           mkdir -p "${RUNNER_TEMP}/televybackup-release"
@@ -103,8 +105,6 @@ jobs:
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Verify Cask metadata and downloaded DMG
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           version="${{ steps.release.outputs.version }}"
