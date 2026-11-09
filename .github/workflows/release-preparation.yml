@@ -353,6 +353,7 @@ jobs:
           else
             git merge-base --is-ancestor "${PREPARED_IDENTITY_SHA}" "${prepared_head_sha}"
           fi
+          dispatch_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           gh workflow run ci-pr.yml \
             --repo "${GITHUB_REPOSITORY}" --ref "${HEAD_REF}" \
             --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${prepared_head_sha}"
@@ -367,4 +368,5 @@ jobs:
             --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${prepared_head_sha}"
           gh workflow run release-completion.yml \
             --repo "${GITHUB_REPOSITORY}" --ref main \
-            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${prepared_head_sha}"
+            --raw-field "pr_number=${PR_NUMBER}" --raw-field "head_sha=${prepared_head_sha}" \
+            --raw-field "checks_since=${dispatch_started_at}"
