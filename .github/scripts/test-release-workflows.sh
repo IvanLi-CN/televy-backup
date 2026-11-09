@@ -71,6 +71,11 @@ assert_contains "preparation dispatch head binding" "$preparation_text" 'head_sh
 ci_pr_text="$(<"$root_dir/.github/workflows/ci-pr.yml")"
 assert_contains "ci dispatch head input" "$ci_pr_text" "head_sha:"
 assert_contains "ci dispatch exact SHA" "$ci_pr_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'
+for job in quality macos-swift; do
+  job_condition="$(sed -n "/^  ${job}:/,/^    steps:/p" <<<"$ci_pr_text")"
+  assert_contains "${job} partial rerun guard" "$job_condition" "always() &&"
+  assert_contains "${job} cancellation guard" "$job_condition" "!cancelled() &&"
+done
 package_ci_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
 assert_contains "package dispatch head input" "$package_ci_text" "head_sha:"
 assert_contains "package dispatch exact SHA" "$package_ci_text" 'test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"'

@@ -665,18 +665,18 @@ package_workflow_text="$(<"$root_dir/.github/workflows/package-ci.yml")"
   echo "package matrix jobs must validate their persisted DMG event streams" >&2
   exit 1
 }
-# Job-level always() survives workflow cancellation. Keep long native/assembly
-# consumers cancellable while preserving their explicit dependency guards.
-for job in x86_64 universal2; do
+# Explicit job status checks must be evaluated on partial reruns, while the
+# cancellation guard still stops obsolete PR work.
+for job in arm64 x86_64 universal2; do
   job_condition="$(sed -n "/^  ${job}:/,/^    steps:/p" <<<"$package_workflow_text")"
+  grep -F 'always() &&' <<<"$job_condition" >/dev/null || {
+    echo "$job must evaluate its dependency guard on partial reruns" >&2
+    exit 1
+  }
   grep -F '!cancelled() &&' <<<"$job_condition" >/dev/null || {
     echo "$job must stop when its PR workflow is cancelled" >&2
     exit 1
   }
-  if grep -F 'always() &&' <<<"$job_condition" >/dev/null; then
-    echo "$job must not bypass workflow cancellation" >&2
-    exit 1
-  fi
 done
 # Evaluate the actual job condition across source/prepared and dependency states.
 python3 - "$root_dir/.github/workflows/package-ci.yml" <<'PY_GUARDS'
@@ -690,7 +690,7 @@ for kind, arm, intel, classified, cancelled in itertools.product(
     ("source", "prepared"), ("success", "failure", "skipped", "cancelled"),
     ("success", "failure", "skipped", "cancelled"), (True, False), (True, False)
 ):
-    expression = condition.replace("!cancelled()", str(not cancelled))
+    expression = condition.replace("always()", "True").replace("!cancelled()", str(not cancelled))
     values = {"needs.classify.outputs.kind": kind,
               "needs.classify.result": "success" if classified else "failure",
               "needs.arm64.result": arm, "needs.x86_64.result": intel}
