@@ -136,6 +136,27 @@ if ! cmp "$root_dir/Casks/televybackup.rb" "$tmp_dir/stable.rb"; then
   exit 1
 fi
 
+if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
+  : "${GH_TOKEN:?GitHub Actions must provide GH_TOKEN for published Cask metadata verification}"
+  : "${GITHUB_REPOSITORY:?GitHub Actions must provide GITHUB_REPOSITORY for published Cask metadata verification}"
+  remote_release_dir="$tmp_dir/published-release"
+  mkdir -p "$remote_release_dir"
+  gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${root_cask_version}" > "$tmp_dir/published-release.json"
+  jq -e '.draft == false and .prerelease == false and .tag_name == $tag' \
+    --arg tag "v${root_cask_version}" "$tmp_dir/published-release.json" >/dev/null
+  gh release download "v${root_cask_version}" \
+    --repo "$GITHUB_REPOSITORY" \
+    --pattern SHA256SUMS \
+    --pattern BUILD-MANIFEST.json \
+    --dir "$remote_release_dir" \
+    --clobber
+  python3 "$root_dir/scripts/homebrew/cask_release.py" verify-cask \
+    --cask "$root_dir/Casks/televybackup.rb" \
+    --version "$root_cask_version" \
+    --checksums "$remote_release_dir/SHA256SUMS" \
+    --manifest "$remote_release_dir/BUILD-MANIFEST.json"
+fi
+
 if python3 "$root_dir/scripts/homebrew/cask_release.py" render \
   --version 1.2.3-rc.1 \
   --checksums "$tmp_dir/SHA256SUMS" \
@@ -159,6 +180,8 @@ workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask.yml")"
 [[ "$workflow_text" != *'gh pr create'* ]]
 [[ "$workflow_text" != *'gh workflow run'* ]]
 [[ "$workflow_text" == *'brew trust --tap'* ]]
+ci_pr_workflow_text="$(<"$root_dir/.github/workflows/ci-pr.yml")"
+[[ "$ci_pr_workflow_text" == *'GH_TOKEN: ${{ github.token }}'* ]]
 update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")"
 [[ "$update_workflow_text" == *'workflow_run:'* ]]
 [[ "$update_workflow_text" == *'workflows: [Release Product]'* ]]
@@ -168,8 +191,11 @@ update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")
 [[ "$update_workflow_text" != *'issues: write'* ]]
 [[ "$update_workflow_text" == *'GITHUB_REPOSITORY'* ]]
 [[ "$update_workflow_text" == *'github.token'* ]]
-[[ "$update_workflow_text" == *'Verify repository Actions PR creation setting'* ]]
-[[ "$update_workflow_text" == *'can_approve_pull_request_reviews'* ]]
+[[ "$update_workflow_text" == *'not permitted to create and approve pull requests'* ]]
+[[ "$update_workflow_text" == *'steps.branch.outputs.branch_sha'* ]]
+[[ "$update_workflow_text" == *'Verify Cask PR target immediately before merge'* ]]
+[[ "$update_workflow_text" == *'.base.sha == $base_sha'* ]]
+[[ "$update_workflow_text" == *'git/ref/heads/main'* ]]
 [[ "$update_workflow_text" == *'gh pr create'* ]]
 [[ "$update_workflow_text" == *'gh workflow run ci-pr.yml'* ]]
 [[ "$update_workflow_text" == *'gh workflow run package-ci.yml'* ]]
