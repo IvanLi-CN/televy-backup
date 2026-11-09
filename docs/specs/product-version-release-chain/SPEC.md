@@ -173,9 +173,7 @@ independent helper bootstrap state, and no automatic history backfill.
 
 ### VER-PVR-005
 
-Covers: REQ-PVR-008, REQ-PVR-009. Failure-context and workflow contract tests verify locked identity
-payloads, no-identity/resolver-error distinction, unresolved identity fail-closed behavior, intent
-artifact generation, required-gate scheduling, and current PR label revalidation.
+Covers: REQ-PVR-008, REQ-PVR-009. Failure-context and workflow contract tests verify locked identity payloads, no-identity/resolver-error distinction, unresolved identity fail-closed behavior, intent artifact generation, required-gate scheduling, and current PR head/base revalidation.
 
 ### VER-PVR-006
 
