@@ -64,6 +64,8 @@ assert_contains "preparation CI dispatch" "$preparation_text" "gh workflow run c
 assert_contains "preparation package dispatch" "$preparation_text" "gh workflow run package-ci.yml"
 assert_contains "preparation manual target gate dispatch" "$preparation_text" "gh workflow run release-target-gate.yml"
 assert_contains "preparation manual completion dispatch" "$preparation_text" "gh workflow run release-completion.yml"
+assert_contains "preparation dispatch timestamp" "$preparation_text" 'dispatch_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"'
+assert_contains "preparation completion dispatch boundary" "$preparation_text" 'checks_since=${dispatch_started_at}'
 assert_contains "preparation legacy label bridge dispatch" "$preparation_text" "gh workflow run legacy-label-gate-bridge.yml"
 assert_contains "preparation dispatch head binding" "$preparation_text" 'head_sha=${prepared_head_sha}'
 ci_pr_text="$(<"$root_dir/.github/workflows/ci-pr.yml")"
@@ -111,6 +113,9 @@ assert_contains "completion runner event path" "$completion_text" 'GITHUB_EVENT_
 assert_not_contains "completion context event path" "$completion_text" 'github.event_path'
 assert_contains "completion current main check" "$completion_text" "validate_current_main"
 assert_contains "completion trusted dispatch ref" "$completion_text" 'test "${GITHUB_REF}" = "refs/heads/main"'
+assert_contains "completion check boundary input" "$completion_text" "checks_since:"
+assert_contains "completion check boundary environment" "$completion_text" "CHECKS_SINCE"
+assert_contains "completion check boundary filter" "$completion_text" "if checks_since and observed_at < checks_since:"
 assert_contains "completion exact check publisher" "$completion_text" "publish-pr-check.py"
 assert_contains "completion pull request head publisher" "$completion_text" "github.event_name != 'merge_group'"
 assert_not_contains "completion label authority" "$completion_text" ".labels"

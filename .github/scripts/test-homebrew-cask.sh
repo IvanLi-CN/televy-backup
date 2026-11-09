@@ -197,6 +197,7 @@ update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")
 [[ "$update_workflow_text" == *'gh workflow run release-target-gate.yml'* ]]
 [[ "$update_workflow_text" == *'gh workflow run release-completion.yml'* ]]
 [[ "$update_workflow_text" == *'head_sha=${HEAD_SHA}'* ]]
+[[ "$update_workflow_text" == *'checks_since=${dispatch_started_at}'* ]]
 [[ "$update_workflow_text" != *'type:major'* ]]
 [[ "$update_workflow_text" != *'channel:prod'* ]]
 [[ "$update_workflow_text" == *'gh workflow run homebrew-cask.yml'* ]]
