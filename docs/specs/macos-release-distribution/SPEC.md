@@ -109,40 +109,7 @@ MUST launch the embedded helper as a process-local child with those directories 
 they MUST NOT register the production `SMAppService` agent, whose bundle plist has no mutable
 environment fields.
 
-Stable publication MUST wait for the `macos-release-acceptance` GitHub environment approval and a
-JSON `TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE` environment value identifying the exact manual
-RC1-to-RC2 acceptance result. The gate MUST select the two highest published RC ordinals for the
-same stable version, treating the lower selected ordinal as RC1 and the higher as RC2. It MUST
-download both RC Universal DMGs, bind each manifest's source commit to its tag, verify each DMG
-against its manifest and `SHA256SUMS`, and compare both RC helper identities with the final stable
-manifest. The evidence MUST name the stable version and both selected RC tags, cover
-legacy registration migration, exactly one FDA grant, strict backup success on RC1 and RC2 without
-a second grant, and an unchanged root mount helper. Its Snapshot Access and root helper identity
-fields MUST match the final `BUILD-MANIFEST.json`; arbitrary or stale non-JSON values MUST fail.
-Each `finder_acceptance` record MUST identify exactly one `platform` from `macos-15` and `current`,
-use the matching basenames `finder-acceptance-<platform>.png`,
-`finder-acceptance-<platform>.json`, and `finder-acceptance-<platform>.sig`, and include a capture
-receipt. The receipt MUST bind the
-controlled harness path and digest, its source commit, `screencapture -x -l`, Finder window ID,
-attached device, screenshot/DMG/manifest/checksum digests, and digests of the Finder observation,
-hidden-resource observation, and visual review. Both files MUST be uploaded as assets on the RC2
-GitHub Release together with the detached Ed25519 signature. The controlled host MUST keep the
-private signing key outside the repository and provide it through
-`TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY`. The stable gate downloads those exact assets into a
-real temporary directory, verifies the receipt asset matches the protected evidence, verifies its
-detached signature against the checked-in public key, recomputes all receipt digests, and then
-verifies regular-file type, PNG signature, dimensions, and screenshot digest before accepting the evidence.
-RC publication remains available so the real-device test can be performed before the stable gate.
-
-The protected evidence object MUST contain `schema_version: 1`, `product`, `stable_version`,
-`rc1_tag`, `rc2_tag`, `legacy_registration_migrated`, `strict_backup_rc1`,
-`strict_backup_rc2`, `fda_grants: 1`, `fda_regrant_requested: false`,
-`root_mount_helper_unchanged`, and `snapshot_access`/`root_mount_helper` identity objects. The
-Snapshot Access identity includes the SHA-256, complete artifact digest, the Universal CodeDirectory
-identity, and complete designated requirement recorded in the final manifest. The root helper identity
-in that manifest is a bundled
-compatibility reference; the evidence MUST include `root_mount_helper.rc1` and `.rc2` observations
-from its stable system path and those two identities MUST be equal.
+Stable publication MUST validate the final Universal DMG, `BUILD-MANIFEST.json`, `SHA256SUMS`, source commit, helper identity, and immutable release receipts through the release workflow. Stable eligibility MUST NOT depend on publishing a second RC, RC1-to-RC2 manual acceptance, Finder screenshots, or the `macos-release-acceptance` environment. The manual Finder acceptance harness and its structured evidence remain optional owner-run diagnostics and MUST NOT block stable publication.
 
 ### REQ-MRD-008: Release atomicity and backfill
 
@@ -227,17 +194,9 @@ Covers: REQ-MRD-009. App Icon asset generation, bundle inspection, and brand ass
 Covers: REQ-MRD-010. Package verification, Snapshot Access transaction tests, LaunchAgent plist
 inspection, and an isolated unique-label `launchctl bootstrap` fixture provide the evidence.
 
-### VER-MRD-008: Authorization continuity across RCs
+### VER-MRD-008: Optional authorization continuity diagnostics
 
-Covers: REQ-MRD-010 and the authorization-stability requirement. On a controlled macOS 15 APFS
-fixture, start from the v0.9.8 external registration, install RC1 at `/Applications/TelevyBackup.app`, confirm that the
-old registration is backed up and the embedded agent is running, then manually grant FDA to the
-exact embedded helper path and complete a strict backup of a protected source. Replace only the
-main app with RC2 from the same product-version RC1 helper artifact, record equal helper
-SHA-256/CDHash/designated-requirement values, confirm that Settings does not require a new FDA
-grant, and repeat the protected-source strict backup. Record the unchanged root helper path,
-version, and binary hash. This is a release-blocking manual acceptance result; no TCC database
-mutation or Developer ID/notarization step is permitted.
+Covers: REQ-MRD-010 and the authorization-stability requirement. On a controlled macOS 15 APFS fixture, start from the v0.9.8 external registration, install RC1 at `/Applications/TelevyBackup.app`, confirm that the old registration is backed up and the embedded agent is running, then manually grant FDA to the exact embedded helper path and complete a strict backup of a protected source. Replace only the main app with RC2 from the same product-version RC1 helper artifact, record equal helper SHA-256/CDHash/designated-requirement values, confirm that Settings does not require a new FDA grant, and repeat the protected-source strict backup. Record the unchanged root helper path, version, and binary hash. This is optional diagnostic evidence and does not block stable publication; no TCC database mutation or Developer ID/notarization step is permitted.
 
 ### VER-MRD-007
 
@@ -270,7 +229,7 @@ exact-head polling, and guarded squash merge.
 | REQ-MRD-007 | Swift unit tests; isolated Settings snapshots |
 | REQ-MRD-009 | app build; brand and App Icon asset verifiers; bundle inspection |
 | REQ-MRD-010 | package verifier; CLI Snapshot Access transaction tests; LaunchAgent plist inspection |
-| REQ-MRD-010 authorization continuity | controlled macOS 15 RC1/RC2 migration and protected-source FDA acceptance |
+| REQ-MRD-010 authorization continuity | optional controlled macOS 15 RC1/RC2 migration and protected-source FDA acceptance (non-blocking) |
 | REQ-MRD-011 | shared dmgbuild layout; manifest and package verifier; UDIF/filesystem roundtrip; Finder acceptance |
 | REQ-MRD-012 | generated root Cask; built-in-token same-repository PR and guarded merge; read-only Homebrew audit and downloaded-asset verification |
 

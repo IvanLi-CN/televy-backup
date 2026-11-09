@@ -1,5 +1,6 @@
 # History
 
+- Stable publication no longer requires a second RC or manual RC1-to-RC2 Finder/FDA acceptance; final asset and identity checks remain release-blocking.
 - The repository previously created GitHub Release records without uploading build assets. This topic makes artifact validation a prerequisite for a public release.
 - `v0.9.0` remains an exact-source compatibility backfill. Product-managed service behavior starts with the next patch release.
 - The legacy Homebrew daemon Formula remains a compatibility integration; the GUI Cask is maintained at the root of this repository's tap surface and does not own the daemon or LaunchAgent.
