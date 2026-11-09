@@ -42,8 +42,9 @@ Evidence:
   cross-PR artifact is used as authoritative release input.
 - Package cancellation applies only to superseded candidates of the same PR.
   Merge-group and manual runs do not use that cancellation rule. Long native
-  and assembly jobs use `!cancelled()` rather than job-level `always()`, so
-  GitHub cancellation can stop an obsolete build instead of letting it continue.
+  and assembly jobs use `always() && !cancelled()`: `always()` keeps the
+  explicit dependency guard active on partial reruns, while `!cancelled()`
+  still lets GitHub stop an obsolete build instead of letting it continue.
   Source assembly also requires both native jobs to succeed; prepared releases
   retain their independent immutable-source verification path.
 - Existing native and Universal DMG verification, Snapshot Access identity,

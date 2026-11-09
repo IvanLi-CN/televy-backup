@@ -80,7 +80,7 @@ jobs:
 
   quality:
     needs: classify
-    if: needs.classify.result == 'success'
+    if: always() && !cancelled() && needs.classify.result == 'success'
     runs-on: ubuntu-latest
     env:
       CARGO_TARGET_DIR: target/ci/pr/rust
@@ -196,6 +196,8 @@ jobs:
   manual-snapshot-regression:
     needs: classify
     if: >-
+      always() &&
+      !cancelled() &&
       github.event_name == 'workflow_dispatch' &&
       needs.classify.result == 'success' &&
       (needs.classify.outputs.kind == 'source' || needs.classify.outputs.kind == 'prepared')
@@ -360,7 +362,7 @@ jobs:
 
   macos-swift:
     needs: classify
-    if: needs.classify.result == 'success'
+    if: always() && !cancelled() && needs.classify.result == 'success'
     name: macOS Swift tests
     runs-on: macos-latest
     steps:
