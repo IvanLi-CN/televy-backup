@@ -303,6 +303,7 @@ def main():
         with (root / "synthetic-access.log").open("w"):
             agent = plistlib.loads((app / "Contents/Library/LaunchAgents" / (ACCESS_LABEL + ".plist")).read_bytes())
             assert agent["Label"] == ACCESS_LABEL and agent["KeepAlive"] is True
+            assert agent["ThrottleInterval"] == 30
             agent["Program"] = str(access)
             agent["EnvironmentVariables"] = env
             agent["StandardOutPath"] = str(root / "synthetic-access.log")

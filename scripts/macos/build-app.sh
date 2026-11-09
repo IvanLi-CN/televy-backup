@@ -289,7 +289,10 @@ cat > "$access_agent_plist" <<PLIST
 <plist version="1.0"><dict>
   <key>Label</key><string>com.ivan.televybackup.snapshot-access</string>
   <key>Program</key><string>/Applications/TelevyBackup.app/Contents/Library/LoginItems/TelevyBackup Snapshot Access.app/Contents/MacOS/televybackup-snapshot-access</string>
-  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <!-- Avoid a rapid Gatekeeper or permission failure retry loop. -->
+  <key>ThrottleInterval</key><integer>30</integer>
 </dict></plist>
 PLIST
 
