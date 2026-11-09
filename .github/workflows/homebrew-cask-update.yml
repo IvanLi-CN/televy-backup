@@ -21,6 +21,7 @@ permissions:
   checks: read
   contents: write
   pull-requests: write
+  statuses: write
 
 jobs:
   update:
@@ -406,6 +407,40 @@ jobs:
             esac
           done
 
+      - name: Publish exact Cask PR status contexts
+        if: steps.release.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
+        env:
+          HEAD_SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          required=(
+            "Release target gate"
+            "quality"
+            "macOS Swift tests"
+            "arm64 native package"
+            "x86_64 native package"
+            "Universal 2 assembly"
+            "Release completion"
+          )
+          for context in "${required[@]}"; do
+            target_url="$(jq -r --arg name "${context}" '
+              [.check_runs[]
+                | select(.name == $name and .status == "completed" and .conclusion == "success")]
+              | sort_by(.completed_at // .started_at // .created_at)
+              | last
+              | .details_url // empty
+            ' "${RUNNER_TEMP}/cask-checks.json")"
+            if [[ -z "${target_url}" ]]; then
+              echo "missing successful Cask check details for ${context}" >&2
+              exit 1
+            fi
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+              -f state=success \
+              -f context="${context}" \
+              -f description="Validated by Cask release workflow run ${GITHUB_RUN_ID}" \
+              -f target_url="${target_url}" >/dev/null
+          done
+
       - name: Verify Cask PR target immediately before merge
         if: steps.release.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
         env:
@@ -428,14 +463,29 @@ jobs:
             echo "latest stable Release changed while waiting for Cask checks; rerun the workflow for ${latest_tag}" >&2
             exit 1
           fi
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/cask-pr-before-merge.json"
-          jq -e \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg branch "${UPDATE_BRANCH}" \
-            --arg head_sha "${HEAD_SHA}" \
-            --arg base_sha "${EXPECTED_BASE_SHA}" \
-            '.state == "open" and .mergeable_state == "clean" and .base.ref == "main" and .base.repo.full_name == $repository and .base.sha == $base_sha and .head.ref == $branch and .head.repo.full_name == $repository and .head.sha == $head_sha' \
-            "${RUNNER_TEMP}/cask-pr-before-merge.json" >/dev/null
+          pr_ready=false
+          for attempt in {1..20}; do
+            gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/cask-pr-before-merge.json"
+            if jq -e \
+              --arg repository "${GITHUB_REPOSITORY}" \
+              --arg branch "${UPDATE_BRANCH}" \
+              --arg head_sha "${HEAD_SHA}" \
+              --arg base_sha "${EXPECTED_BASE_SHA}" \
+              '.state == "open" and (.mergeable_state == "clean" or .mergeable_state == "unstable") and .base.ref == "main" and .base.repo.full_name == $repository and .base.sha == $base_sha and .head.ref == $branch and .head.repo.full_name == $repository and .head.sha == $head_sha' \
+              "${RUNNER_TEMP}/cask-pr-before-merge.json" >/dev/null; then
+              pr_ready=true
+              break
+            fi
+            mergeable_state="$(jq -r '.mergeable_state // empty' "${RUNNER_TEMP}/cask-pr-before-merge.json")"
+            case "${mergeable_state}" in
+              blocked|unknown|"") sleep 5 ;;
+              *) echo "Cask PR is not mergeable: ${mergeable_state}" >&2; exit 1 ;;
+            esac
+          done
+          if [[ "${pr_ready}" != true ]]; then
+            echo "timed out waiting for GitHub to recognize the validated Cask PR as mergeable" >&2
+            exit 1
+          fi
 
       - name: Merge validated Cask PR
         if: steps.release.outputs.skip != 'true' && steps.pr.outputs.skip != 'true'
