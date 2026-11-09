@@ -130,7 +130,6 @@ assert "helper_source_mode" in release_workflow
 assert "helper_source_tag" in release_workflow
 assert "extract-snapshot-access-helper.sh" in release_workflow
 assert "verify-tag-provenance --tag \"${candidate}\"" in release_workflow
-assert "verify-tag-provenance --tag \"${rc_tag}\"" in release_workflow
 assert "verify-component-identity.sh" in release_workflow
 assert "stable release requires a previously published RC" in release_workflow
 assert "gh release list" in release_workflow
@@ -171,40 +170,30 @@ assert 'cd "${policy_checkout}"' in release_workflow
 assert '"${policy_verify_release_assets}" --mode release --asset-dir "$GITHUB_WORKSPACE/dist/final" --expected-source-commit "${{ needs.resolve.outputs.merge_sha }}" --expected-packaging-commit "${POLICY_SHA}"' in release_workflow
 assert 'git show "${POLICY_SHA}:scripts/macos/verify-release-assets.sh"' not in release_workflow
 assert 'bash scripts/macos/verify-release-assets.sh --mode release --asset-dir dist/final' not in release_workflow
-reuse_release_assets = release_workflow.split("  reuse_release_assets:", 1)[1].split("  macos-acceptance:", 1)[0]
+reuse_release_assets = release_workflow.split("  reuse_release_assets:", 1)[1].split("  publish:", 1)[0]
 assert 'TRUSTED_POLICY_SHA: ${{ needs.resolve.outputs.policy_sha }}' in reuse_release_assets
 assert 'git worktree add --detach "${policy_checkout}" "${TRUSTED_POLICY_SHA}"' in reuse_release_assets
 assert 'bash "${policy_checkout}/scripts/macos/verify-release-assets.sh"' in reuse_release_assets
 assert 'python3 "${policy_checkout}/.github/scripts/verify-dmg-evidence.py"' in reuse_release_assets
-build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  macos-acceptance:", 1)[0]
+build_and_assembly = release_workflow.split("  build-arm64:", 1)[1].split("  publish:", 1)[0]
 assert "gh release download" not in build_and_assembly
 assert build_and_assembly.count("name: snapshot-helper-source") == 3
 assert release_workflow.index("release_state=missing") < release_workflow.index("helper_candidates_json")
 assert release_workflow.index("consumed_state=missing") < release_workflow.index("helper_candidates_json")
 assert release_workflow.index("RELEASE_TERMINAL state=consumed") < release_workflow.index("helper_candidates_json")
 assert "consumed receipt exists without a matching product tag" in release_workflow
-assert "macos-release-acceptance" in release_workflow
-assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" in release_workflow
-assert "verify-macos-rc-acceptance.py" in release_workflow
-assert "stable release requires two published RCs" in release_workflow
-assert 'candidates[-2:]' in release_workflow
-assert "--screenshot-dir" in release_workflow
-assert "--capture-receipt-dir" in release_workflow
-assert "--capture-signature-dir" in release_workflow
-assert "signature_names=()" in release_workflow
-assert "gh release download \"${rc2_tag}\"" in release_workflow
-assert "receipt_names=()" in release_workflow
 assert 'gh release upload "$rc2_tag" "$acceptance_path"' in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
 assert "TELEVYBACKUP_FINDER_RECEIPT_SIGNING_KEY" in (root / "scripts/macos/finder-dmg-acceptance.sh").read_text(encoding="utf-8")
-assert "import re" in release_workflow
-assert "mapfile" not in release_workflow
 assert "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093" in release_workflow
-assert 'rc1_json="$(gh release view "$rc1_tag"' in release_workflow
-assert 'rc2_json="$(gh release view "$rc2_tag"' in release_workflow
 assert "fda_regrant_requested" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "artifact_sha256" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
 assert "verify-ed25519-receipt.swift" in (root / ".github/scripts/verify-macos-rc-acceptance.py").read_text(encoding="utf-8")
-assert "needs.macos-acceptance.result == 'success'" in release_workflow
+assert "needs: [resolve, assemble, reuse_release_assets]" in release_workflow
+assert "macos-acceptance" not in release_workflow
+assert "macos-release-acceptance" not in release_workflow
+assert "TELEVYBACKUP_MACOS_RC_ACCEPTANCE_EVIDENCE" not in release_workflow
+assert "stable release requires two published RCs" not in release_workflow
+assert "needs.macos-acceptance.result == 'success'" not in release_workflow
 assert "needs.assemble.result == 'success'" in release_workflow
 assert "Assemble and validate final assets" in release_workflow
 assert "reservation source must be an ancestor" in (root / ".github/scripts/release_preparation.py").read_text(encoding="utf-8")
