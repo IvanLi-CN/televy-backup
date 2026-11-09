@@ -144,8 +144,6 @@ jobs:
 
       - name: Homebrew Cask contract tests
         if: needs.classify.outputs.kind == 'source'
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: bash ./.github/scripts/test-homebrew-cask.sh
 
       - name: Package script contract tests

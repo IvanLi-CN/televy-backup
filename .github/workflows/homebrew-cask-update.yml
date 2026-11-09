@@ -270,7 +270,7 @@ jobs:
       - name: Remove stale automation branch when no PR is needed
         if: steps.release.outputs.skip != 'true' && steps.pr.outputs.skip == 'true'
         env:
-          EXPECTED_BRANCH_SHA: ${{ steps.branch.outputs.branch_sha }}
+          EXPECTED_BRANCH_SHA: ${{ steps.commit.outputs.sha }}
         run: |
           set -euo pipefail
           current_pr="$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open --base main --head "${UPDATE_BRANCH}" --json number --jq '.[0].number // empty')"
@@ -411,11 +411,20 @@ jobs:
           PR_NUMBER: ${{ steps.pr.outputs.number }}
           HEAD_SHA: ${{ steps.commit.outputs.sha }}
           EXPECTED_BASE_SHA: ${{ steps.branch.outputs.main_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
           if [[ "${main_sha}" != "${EXPECTED_BASE_SHA}" ]]; then
             echo "main advanced from the base used for this Cask PR; rerun the workflow to bind fresh checks" >&2
+            exit 1
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/releases/latest" > "${RUNNER_TEMP}/latest-stable-release-before-merge.json"
+          latest_tag="$(jq -r '.tag_name // empty' "${RUNNER_TEMP}/latest-stable-release-before-merge.json")"
+          jq -e '.draft == false and .prerelease == false and .tag_name == $tag' \
+            --arg tag "${latest_tag}" "${RUNNER_TEMP}/latest-stable-release-before-merge.json" >/dev/null
+          if [[ "${TAG}" != "${latest_tag}" ]]; then
+            echo "latest stable Release changed while waiting for Cask checks; rerun the workflow for ${latest_tag}" >&2
             exit 1
           fi
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "${RUNNER_TEMP}/cask-pr-before-merge.json"

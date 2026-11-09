@@ -136,27 +136,6 @@ if ! cmp "$root_dir/Casks/televybackup.rb" "$tmp_dir/stable.rb"; then
   exit 1
 fi
 
-if [[ "${GITHUB_ACTIONS:-}" == true ]]; then
-  : "${GH_TOKEN:?GitHub Actions must provide GH_TOKEN for published Cask metadata verification}"
-  : "${GITHUB_REPOSITORY:?GitHub Actions must provide GITHUB_REPOSITORY for published Cask metadata verification}"
-  remote_release_dir="$tmp_dir/published-release"
-  mkdir -p "$remote_release_dir"
-  gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${root_cask_version}" > "$tmp_dir/published-release.json"
-  jq -e '.draft == false and .prerelease == false and .tag_name == $tag' \
-    --arg tag "v${root_cask_version}" "$tmp_dir/published-release.json" >/dev/null
-  gh release download "v${root_cask_version}" \
-    --repo "$GITHUB_REPOSITORY" \
-    --pattern SHA256SUMS \
-    --pattern BUILD-MANIFEST.json \
-    --dir "$remote_release_dir" \
-    --clobber
-  python3 "$root_dir/scripts/homebrew/cask_release.py" verify-cask \
-    --cask "$root_dir/Casks/televybackup.rb" \
-    --version "$root_cask_version" \
-    --checksums "$remote_release_dir/SHA256SUMS" \
-    --manifest "$remote_release_dir/BUILD-MANIFEST.json"
-fi
-
 if python3 "$root_dir/scripts/homebrew/cask_release.py" render \
   --version 1.2.3-rc.1 \
   --checksums "$tmp_dir/SHA256SUMS" \
@@ -180,8 +159,11 @@ workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask.yml")"
 [[ "$workflow_text" != *'gh pr create'* ]]
 [[ "$workflow_text" != *'gh workflow run'* ]]
 [[ "$workflow_text" == *'brew trust --tap'* ]]
+[[ "$workflow_text" == *'version="$(ruby -e'* ]]
+[[ "$workflow_text" != *'cask_release.py cask-version'* ]]
 ci_pr_workflow_text="$(<"$root_dir/.github/workflows/ci-pr.yml")"
-[[ "$ci_pr_workflow_text" == *'GH_TOKEN: ${{ github.token }}'* ]]
+cask_contract_block="$(printf '%s\n' "$ci_pr_workflow_text" | sed -n '/- name: Homebrew Cask contract tests/,/- name: Package script contract tests/p')"
+[[ "$cask_contract_block" != *'GH_TOKEN:'* ]]
 update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")"
 [[ "$update_workflow_text" == *'workflow_run:'* ]]
 [[ "$update_workflow_text" == *'workflows: [Release Product]'* ]]
@@ -200,7 +182,7 @@ update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")
 [[ "$update_workflow_text" == *'length) < 300'* ]]
 [[ "$update_workflow_text" == *'contents/Casks/televybackup.rb?ref=main'* ]]
 [[ "$update_workflow_text" == *'Remove stale automation branch when no PR is needed'* ]]
-[[ "$update_workflow_text" == *'EXPECTED_BRANCH_SHA'* ]]
+[[ "$update_workflow_text" == *'EXPECTED_BRANCH_SHA: ${{ steps.commit.outputs.sha }}'* ]]
 [[ "$update_workflow_text" == *'Verify Cask PR target immediately before merge'* ]]
 [[ "$update_workflow_text" == *'DISPATCH_STARTED_AT'* ]]
 [[ "$update_workflow_text" == *'timestamp < dispatch_started_at'* ]]
