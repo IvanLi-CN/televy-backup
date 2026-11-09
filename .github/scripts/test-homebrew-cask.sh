@@ -104,10 +104,30 @@ cask_release.command_output = fake_command_output
 cask_release.verify_dmg(dmg, version, checksums, manifest)
 PY
 
-printf '56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8  TelevyBackup-0.9.8.dmg\n' > "$tmp_dir/stable-SHA256SUMS"
-printf '%s\n' '{"architectures":["arm64","x86_64","universal2"],"assets":[{"name":"TelevyBackup-0.9.8.dmg","sha256":"56180c32798b74be199c3bcbbef0f025107fd93859651f81aef80d1770a7ced8","bytes":1}],"product":"TelevyBackup","release_version":"0.9.8"}' > "$tmp_dir/stable-BUILD-MANIFEST.json"
+root_cask_metadata="$(python3 - "$root_dir/Casks/televybackup.rb" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+versions = re.findall(r'^  version "([^"]+)"$', text, re.MULTILINE)
+digests = re.findall(r'^  sha256 "([^"]+)"$', text, re.MULTILINE)
+if len(versions) != 1 or len(digests) != 1:
+    raise SystemExit("Cask must contain exactly one version and SHA-256")
+print(versions[0], digests[0])
+PY
+)"
+read -r root_cask_version root_cask_digest <<< "$root_cask_metadata"
+root_cask_name="TelevyBackup-${root_cask_version}.dmg"
+printf '%s  %s\n' "$root_cask_digest" "$root_cask_name" > "$tmp_dir/stable-SHA256SUMS"
+printf '%s\n' "{\"architectures\":[\"arm64\",\"x86_64\",\"universal2\"],\"assets\":[{\"name\":\"${root_cask_name}\",\"sha256\":\"${root_cask_digest}\",\"bytes\":1}],\"product\":\"TelevyBackup\",\"release_version\":\"${root_cask_version}\",\"schema_version\":1}" > "$tmp_dir/stable-BUILD-MANIFEST.json"
+python3 "$root_dir/scripts/homebrew/cask_release.py" verify-cask \
+  --cask "$root_dir/Casks/televybackup.rb" \
+  --version "$root_cask_version" \
+  --checksums "$tmp_dir/stable-SHA256SUMS" \
+  --manifest "$tmp_dir/stable-BUILD-MANIFEST.json"
 python3 "$root_dir/scripts/homebrew/cask_release.py" render \
-  --version 0.9.8 \
+  --version "$root_cask_version" \
   --checksums "$tmp_dir/stable-SHA256SUMS" \
   --manifest "$tmp_dir/stable-BUILD-MANIFEST.json" \
   --output "$tmp_dir/stable.rb"
@@ -138,15 +158,18 @@ workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask.yml")"
 [[ "$workflow_text" != *'secrets.'* ]]
 [[ "$workflow_text" != *'gh pr create'* ]]
 [[ "$workflow_text" != *'gh workflow run'* ]]
+[[ "$workflow_text" == *'brew trust --tap'* ]]
 update_workflow_text="$(<"$root_dir/.github/workflows/homebrew-cask-update.yml")"
 [[ "$update_workflow_text" == *'workflow_run:'* ]]
 [[ "$update_workflow_text" == *'workflows: [Release Product]'* ]]
 [[ "$update_workflow_text" == *'actions: write'* ]]
 [[ "$update_workflow_text" == *'contents: write'* ]]
-[[ "$update_workflow_text" == *'issues: write'* ]]
 [[ "$update_workflow_text" == *'pull-requests: write'* ]]
+[[ "$update_workflow_text" != *'issues: write'* ]]
 [[ "$update_workflow_text" == *'GITHUB_REPOSITORY'* ]]
 [[ "$update_workflow_text" == *'github.token'* ]]
+[[ "$update_workflow_text" == *'Verify repository Actions PR creation setting'* ]]
+[[ "$update_workflow_text" == *'can_approve_pull_request_reviews'* ]]
 [[ "$update_workflow_text" == *'gh pr create'* ]]
 [[ "$update_workflow_text" == *'gh workflow run ci-pr.yml'* ]]
 [[ "$update_workflow_text" == *'gh workflow run package-ci.yml'* ]]

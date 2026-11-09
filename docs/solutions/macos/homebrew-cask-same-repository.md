@@ -150,7 +150,8 @@ The trusted update workflow follows this sequence:
 4. Render and verify the Cask candidate.
 5. Create or reuse the same-repository `automation/homebrew-cask` branch, and reject
    branch history containing changes outside `Casks/televybackup.rb`.
-6. Create or update a PR labelled `type:docs` with no release-channel label.
+6. Create or update a same-repository PR. The legacy label bridge may emit a compatibility
+   check for older branch protection rules, but labels are not release authority.
 7. Dispatch the normal required checks plus the read-only Homebrew Cask audit against
    the exact branch head.
 8. Poll the PR and check runs while binding every result to the expected repository,
@@ -165,10 +166,7 @@ slices.
 
 ### Credential boundary
 
-The update workflow uses GitHub Actions' built-in `GITHUB_TOKEN` for same-repository
-branch, PR, label, check-dispatch, and guarded-merge operations. The audit workflow has
-read-only `contents` and `pull-requests` permissions. No PAT, GitHub App, fine-grained
-token, or repository secret is part of the normal design.
+The update workflow uses GitHub Actions' built-in `GITHUB_TOKEN` for same-repository branch, PR, check-dispatch, and guarded-merge operations. The repository setting `Allow GitHub Actions to create and approve pull requests` must be enabled in addition to the workflow's `pull-requests: write` permission; the workflow fails closed with an owner-action message when that prerequisite is absent. The audit workflow has read-only `contents` and `pull-requests` permissions. No PAT, GitHub App, fine-grained token, or repository secret is part of the normal design.
 
 The workflow's write permissions are intentionally confined to the same repository. A
 cross-repository tap, a token stored in CI, or a direct write to the default branch would
@@ -185,6 +183,8 @@ change the trust model and is not a compatible extension of this solution.
   daemon.
 - Keep the Homebrew audit read-only and keep write permissions in the post-release update
   workflow only.
+- Trust the temporary local tap before invoking Homebrew audit; an untrusted tap is rejected by
+  current Homebrew even when the tap contents are checked out locally.
 - Validate the exact PR head immediately before merge. A successful check from another
   head or a successful manual dispatch is not sufficient evidence.
 - When Release completion fails on a Cask PR, check the following in order:

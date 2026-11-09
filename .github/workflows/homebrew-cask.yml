@@ -74,10 +74,12 @@ jobs:
       - name: Install Homebrew tap view for audit
         run: |
           set -euo pipefail
+          tap_name="IvanLi-CN/televy-backup"
           tap_dir="$(brew --repository)/Library/Taps/ivanli-cn/homebrew-televy-backup"
           mkdir -p "${tap_dir}/Casks"
           cp Casks/televybackup.rb "${tap_dir}/Casks/televybackup.rb"
           git -C "${tap_dir}" init -q
+          brew trust --tap "${tap_name}"
 
       - name: Run Homebrew strict Cask audit
         env:
