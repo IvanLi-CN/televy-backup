@@ -135,17 +135,7 @@ The release-owning agent MUST report successful publication directly to the owne
 
 ### REQ-PVR-009: Required gates preserve queued evaluations
 
-`Release intent label gate` and `Release completion` are required PR gates and use a per-PR
-non-preemptive `queue: max` concurrency policy. They MUST NOT use `cancel-in-progress: true`.
-When trusted preparation creates a new PR head, any manually dispatched gate runs MUST be bound to
-that prepared head ref and SHA so their check-runs satisfy the same PR-local required checks. The
-dispatch-mode workflows MUST execute gate scripts from trusted `main` and MUST verify that the
-selected ref and SHA still match the current in-repository PR head before evaluating it.
-`Release completion` MUST fetch the current pull request through the GitHub API at execution time,
-verify that its open head and base still match the event-bound SHAs, and pass that current labels
-snapshot to the validator. After waiting for source checks, it MUST repeat the head/base and labels
-validation immediately before invoking the completion validator. Event-payload labels are trigger
-metadata, not an authoritative input for a queued completion evaluation.
+`Release completion` is the active release gate and uses a per-PR non-preemptive `queue: max` concurrency policy. It MUST NOT use `cancel-in-progress: true`. The historical `Release intent label gate` check MAY remain as a compatibility bridge for existing branch protection rules, but it MUST not be treated as release authority or included in the canonical required-check declaration. When trusted preparation or release automation creates a new PR head, any manually dispatched gate runs MUST be bound to that prepared head ref and SHA so their check-runs satisfy the same PR-local required checks. The dispatch-mode workflows MUST execute gate scripts from trusted `main` and MUST verify that the selected ref and SHA still match the current in-repository PR head before evaluating it. `Release completion` MUST fetch the current pull request through the GitHub API at execution time and verify that its open head and base still match the event-bound SHAs before evaluating the completion contract. Event-payload labels are not an authoritative input for a queued completion evaluation.
 
 ### REQ-PVR-010: Release identity protection uses no extra CI authorization
 

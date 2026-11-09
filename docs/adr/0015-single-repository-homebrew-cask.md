@@ -6,5 +6,5 @@ TelevyBackup's existing public repository also serves as its Homebrew tap, with 
 
 - Homebrew users tap `IvanLi-CN/televy-backup` with the explicit GitHub repository URL because its repository name does not use Homebrew's conventional `homebrew-` prefix.
 - The post-release workflow generates the Cask from the published `SHA256SUMS` and `BUILD-MANIFEST.json`, creates or updates a same-repository PR, dispatches its checks, and merges only after every exact-head check succeeds.
-- The audit workflow is read-only; only the post-release trusted workflow has the minimum same-repository write permissions needed for its branch, PR, labels, check dispatches, and guarded merge.
+- The audit workflow is read-only; only the post-release trusted workflow has the minimum same-repository write permissions needed for its branch, PR, check dispatches, and guarded merge. The repository setting `Allow GitHub Actions to create and approve pull requests` is an independent prerequisite for a new Cask PR; no PAT, GitHub App, or repository secret is introduced to provide it.
 - The historical daemon Formula remains separate and is not part of the GUI Cask lifecycle.
